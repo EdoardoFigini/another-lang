@@ -19,3 +19,7 @@ clean:
 	rm -rf build
 	rm -rf bin
 .PHONY: clean
+
+run: bin/main
+	./bin/main
+.PHONY: run
