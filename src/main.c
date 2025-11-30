@@ -11,16 +11,24 @@
 
 const char* source = 
   // "require raylib"
-  "extern puts: (s: str) -> void;";
+  "extern puts: (s: str) -> void;\n"
+  "\n"
+  "main : () -> i32 {\n"
+  " puts(\"Hello World!\\n\");\n"
+  " return 0;\n"
+  "}";
 
 typedef enum {
   TOK_EOF = 256,
   TOK_IDENT,
   TOK_ARROW,
+  TOK_STRLIT,
+  TOK_RETURN,
   TOK_EXTERN
 } tok_kind_t;
 
 const char* tok_keywords[] = {
+  [TOK_RETURN] = "return",
   [TOK_EXTERN] = "extern",
 };
 
@@ -58,6 +66,8 @@ void tok_print(token_t tok) {
       case TOK_EOF: printf("%-20s", "TOK_EOF"); break;
       case TOK_IDENT: printf("%-20s", "TOK_IDENT"); break;
       case TOK_ARROW: printf("%-20s", "TOK_ARROW"); break;
+      case TOK_STRLIT: printf("%-20s", "TOK_STRLIT"); break;
+      case TOK_RETURN: printf("%-20s", "TOK_RETURN"); break;
       case TOK_EXTERN: printf("%-20s", "TOK_EXTERN"); break;
       default: printf("%-20s", "<INVALID TOKEN>"); break;
     }
@@ -72,13 +82,48 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_EOF: return "EOF";
       case TOK_IDENT: return "identifier";
       case TOK_ARROW: return "->";
+      case TOK_STRLIT: return "string literal";
+      case TOK_RETURN: return "return";
       case TOK_EXTERN: return "extern";
       default: return "<INVALID TOKEN>";
     }
   }
 }
 
-int tok_tokenize(tokenizer_t* t) {
+static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, size_t col) {
+  int escape = 0;
+
+  sb_t sb = { 0 };
+
+  while(*(++*end)) {
+    if (escape) {
+      switch(**end) {
+        case 'n' : sb_n_append(&sb, "\n", 1); break;
+        case 't' : sb_n_append(&sb, "\t", 1); break;
+        case 'r' : sb_n_append(&sb, "\r", 1); break;
+        case '\"': sb_n_append(&sb, "\"", 1); break;
+        case '\\': sb_n_append(&sb, "\\", 1); break;
+        default:
+          fprintf(stderr, "[ERROR]: %zu:%zu: Unknown escape sequence", line, col);
+          return NULL;
+      }
+
+      escape = 0;
+    } else {
+      if      (**end == '\"') break;
+      else if (**end == '\\') escape = 1;
+      else                    sb_appendf(&sb, "%c", **end);
+    }
+    col++;
+  }
+  sb_appendf(&sb, "%c", *(*end)++);
+
+  const char* ret = arena_sprintf(&t->arena, "%.*s", (int)sb.count, sb.items);
+  sb_free(&sb);
+  return ret;
+}
+
+static inline int tok_tokenize(tokenizer_t* t) {
   token_t tok = { 0 };
   size_t line = 1;
   size_t col  = 1;
@@ -87,6 +132,7 @@ int tok_tokenize(tokenizer_t* t) {
   while(*p) {
     if(*p == '\n') {
       line++;
+      p++;
       col = 1;
       continue;
     }
@@ -94,16 +140,19 @@ int tok_tokenize(tokenizer_t* t) {
 
     switch(*p) {
       case '(':
-      case ',':
       case ')': 
+      case '{':
+      case '}': 
+      case ',':
       case ';': 
       case ':': 
         tok = (token_t){ .kind = *p, .start = p, .len = 1 }; 
         break;
       case '-':
+        // TODO: handle negative number literals
         switch(*(p + 1)) {
           case '>': tok = (token_t){ .kind = TOK_ARROW, .start = p, .len = 2 }; break;
-          // case '=': tok = (token_t){ .kind = TOK_DECASS }; break;
+          // case '=': tok = (token_t){ .kind = TOK_MINEQS }; break;
           default: 
             tok = (token_t){ .kind = *p, .start = p, .len = 1 };
             break;
@@ -132,8 +181,27 @@ int tok_tokenize(tokenizer_t* t) {
             .start = p,
             .as.s = arena_sprintf(&t->arena, "%.*s", (int)(end - p), p),
           };
+        } else if (isdigit(*p)) {
+          // TODO: lex int/real literals
+          // support _ notation for integers (10_000_000)
+          // support exp notation for reals (5e-3)
+          fprintf(stderr, "[FATAL]: Unimplemented: number literals\n");
+          abort();
+        } else if (*p == '"') {
+          char* end = p;
+          const char* str = tok_string(t, &end, line, col);
+          if (!str) {
+            fprintf(stderr, "[ERROR]: %zu:%zu: Missing closing `\"`", line, col);
+            return 1;
+          }
+          tok = (token_t){ 
+            .kind = TOK_STRLIT,
+            .len = (int)(end - p),
+            .start = p,
+            .as.s = str
+          };
         } else {
-          fprintf(stderr, "[ERROR]: Unrecognized token near %.*s\n", 20, p);
+          fprintf(stderr, "[ERROR]: %zu:%zu Unrecognized token near %.*s\n", line, col, 20, p);
           return 1;
         }
     }
@@ -179,14 +247,17 @@ static inline int peek(parser_t* p, tok_kind_t kind) {
   return get_tok(p).kind == kind; 
 }
 
-static inline int consume(parser_t* p, tok_kind_t kind) {
-  token_t t = get_tok(p); 
-  printf("consuming %s\n", tok_kind_str(&p->arena, t.kind));
+static inline int consume_with_name(parser_t* p, tok_kind_t kind, const char* exp_name) {
+  token_t t = get_tok(p);
   if (t.kind != kind) {
-    fprintf(stderr, "[ERROR]: %zu:%zu: Expected %s, found %s\n", t.line, t.col, tok_kind_str(&p->arena, kind), tok_kind_str(&p->arena, t.kind));
+    fprintf(stderr, "[ERROR]: %zu:%zu: Expected %s, found %s\n", t.line, t.col, exp_name, tok_kind_str(&p->arena, t.kind));
     return 0;
   }
   return 1;
+}
+
+static inline int consume(parser_t* p, tok_kind_t kind) {
+  return consume_with_name(p, kind, tok_kind_str(&p->arena, kind));
 }
 
 static inline void next(parser_t* p) {
@@ -204,8 +275,11 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
 
     switch(t.kind) {
       case TOK_EXTERN: cur_flag = SPEC_EXTERN; break;
+
       case TOK_EOF:
       case TOK_IDENT:
+      case TOK_STRLIT:
+      case TOK_RETURN:
       case TOK_ARROW:
       default: return flags;
     }
@@ -245,14 +319,38 @@ typedef struct {
 } ast_sig_t;
 
 typedef struct {
+  void* __todo;
+} ast_body_t;
+
+typedef struct {
   const char* name;
   spec_flags_t flags;
   ast_decl_kind kind; 
   union {
-    ast_sig_t* sig;
-    ast_type_t* type;
-  };
+    struct {
+      ast_sig_t* sig;
+      ast_body_t* body;
+    } fun;
+    struct {
+      ast_type_t* type;
+    } var;
+  } as;
 } ast_decl_t;
+
+// body = '{' statements '}'
+static inline ast_body_t* parse_body(parser_t* p) {
+  ast_body_t* n = arena_alloc(&p->arena, sizeof(*n));
+
+  if(!consume(p, '{')) return NULL;
+  next(p);
+
+  // TODO: parse statements
+
+  if(!consume(p, '}')) return NULL;
+  next(p);
+
+  return n;
+}
 
 // param = ident ':' ident
 static inline ast_param_t* parse_param(parser_t* p) {
@@ -265,46 +363,51 @@ static inline ast_param_t* parse_param(parser_t* p) {
   if(!consume(p, ':')) return NULL;
   next(p);
 
-  if(!consume(p, TOK_IDENT)) return NULL;
+  if(!consume_with_name(p, TOK_IDENT, "type")) return NULL;
   n->type.name = arena_strdup(&p->arena, get_tok(p).as.s);
   next(p);
 
   return n;
 }
 
-// sig = '(' [ param ( ',' param )+ ] ')' -> ident
+// sig = '(' [ param ( ',' param )+ ] ')' -> ident ( ';' | body )
 static inline ast_sig_t* parse_signature(parser_t* p) {
   ast_sig_t* n = arena_alloc(&p->arena, sizeof(*n));
 
   if(!consume(p, '(')) return NULL;
   next(p);
 
-  ast_param_t* param = parse_param(p);
-  if(!param) return NULL;
-
-  da_append(&n->params, param);
-
   if (peek(p, ')')) {
     if(!consume(p, ')')) return NULL;
     next(p);
-  } else {
-    while(peek(p, ',')) {
-      if (!consume(p, ',')) return NULL;
+  } else { 
+    ast_param_t* param = parse_param(p);
+    if(!param) return NULL;
+
+    da_append(&n->params, param);
+
+    if (peek(p, ')')) {
+      if(!consume(p, ')')) return NULL;
       next(p);
+    } else {
+      while(peek(p, ',')) {
+        if (!consume(p, ',')) return NULL;
+        next(p);
 
-      param = parse_param(p);
-      if(!param) return NULL;
+        param = parse_param(p);
+        if(!param) return NULL;
 
-      da_append(&n->params, param);
-    } 
+        da_append(&n->params, param);
+      } 
 
-    if(!consume(p, ')')) return NULL;
-    next(p);
+      if(!consume(p, ')')) return NULL;
+      next(p);
+    }
   }
 
   if(!consume(p, TOK_ARROW)) return NULL;
   next(p);
-  if(!consume(p, TOK_IDENT)) return NULL;
+  if(!consume_with_name(p, TOK_IDENT, "return type")) return NULL;
   n->ret.name = arena_strdup(&p->arena, get_tok(p).as.s);
   next(p);
 
@@ -318,10 +421,18 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
   n->name = arena_strdup(&p->arena, name);
   n->kind = DECL_KIND_FUNC;
 
-  n->sig = parse_signature(p);
+  n->as.fun.sig = parse_signature(p);
+  if(!n->as.fun.sig) return NULL;
 
-  if(!consume(p, ';')) return NULL;
-  next(p);
+  if (peek(p, ';')) {
+    if(!consume(p, ';')) return NULL;
+    next(p);
+  } else {
+    ast_body_t* body = parse_body(p);
+    if(!body) return NULL;
+
+    n->as.fun.body = body;
+  }
 
   return n;
 }
@@ -341,7 +452,11 @@ static inline ast_decl_t* parse_top_level_declaration(parser_t* p) {
 }
 
 typedef struct {
-  ast_decl_t* top_level;
+  struct {
+    ast_decl_t** items;
+    size_t count;
+    size_t capacity;
+  } top_level;
 } ast_root_t;
 
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
@@ -350,8 +465,12 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
 
   ast_root_t *n = arena_alloc(&p->arena, sizeof(*n));
 
-  n->top_level = parse_top_level_declaration(p);
-  if (!n->top_level) return NULL;
+  while(!peek(p, TOK_EOF)) {
+    ast_decl_t* decl = parse_top_level_declaration(p);
+    if (!decl) return NULL;
+
+    da_append(&n->top_level, decl);
+  }
 
   return n;
 }
@@ -362,7 +481,7 @@ int main() {
 
   parser_t parser = { 0 };
 
-  tok_tokenize(&tok);
+  if(tok_tokenize(&tok)) return 1;
 
   da_foreach(token_t, t, &tok.tokens) {
     tok_print(*t);
@@ -370,6 +489,8 @@ int main() {
 
   ast_root_t* root = parse(&parser, &tok);
   if(!root) return 1;
+
+  tok_destroy(&tok);
 
   return 0;
 }
