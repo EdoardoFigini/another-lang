@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <ctype.h>
+#include <stdlib.h>
 
 #define SB_IMPLEMENTATION
 #include "sb.h"
@@ -22,6 +23,8 @@ typedef enum {
   TOK_EOF = 256,
   TOK_IDENT,
   TOK_ARROW,
+  TOK_INTLIT,
+  TOK_REALLIT,
   TOK_STRLIT,
   TOK_RETURN,
   TOK_EXTERN
@@ -32,10 +35,17 @@ const char* tok_keywords[] = {
   [TOK_EXTERN] = "extern",
 };
 
+typedef enum {
+  TI_UNSIGNED = 1 << 0,
+  TI_LONG     = 1 << 1,
+  TI_REAL     = 1 << 2,
+} lit_type_info_flags_t;
+
 typedef struct {
   tok_kind_t kind;
   const char* start;
   int len;
+  lit_type_info_flags_t type_info;
   union {
     const char* s;
     double      r;
@@ -66,6 +76,8 @@ void tok_print(token_t tok) {
       case TOK_EOF: printf("%-20s", "TOK_EOF"); break;
       case TOK_IDENT: printf("%-20s", "TOK_IDENT"); break;
       case TOK_ARROW: printf("%-20s", "TOK_ARROW"); break;
+      case TOK_INTLIT: printf("%-20s", "TOK_INTLIT"); break;
+      case TOK_REALLIT: printf("%-20s", "TOK_REALLIT"); break;
       case TOK_STRLIT: printf("%-20s", "TOK_STRLIT"); break;
       case TOK_RETURN: printf("%-20s", "TOK_RETURN"); break;
       case TOK_EXTERN: printf("%-20s", "TOK_EXTERN"); break;
@@ -82,6 +94,8 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_EOF: return "EOF";
       case TOK_IDENT: return "identifier";
       case TOK_ARROW: return "->";
+      case TOK_INTLIT: return "integer literal";
+      case TOK_REALLIT: return "real literal";
       case TOK_STRLIT: return "string literal";
       case TOK_RETURN: return "return";
       case TOK_EXTERN: return "extern";
@@ -104,7 +118,7 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
         case '\"': sb_n_append(&sb, "\"", 1); break;
         case '\\': sb_n_append(&sb, "\\", 1); break;
         default:
-          fprintf(stderr, "[ERROR]: %zu:%zu: Unknown escape sequence", line, col);
+          fprintf(stderr, "[ERROR]: %zu:%zu: Unknown escape sequence\n", line, col);
           return NULL;
       }
 
@@ -112,7 +126,12 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
     } else {
       if      (**end == '\"') break;
       else if (**end == '\\') escape = 1;
-      else                    sb_appendf(&sb, "%c", **end);
+      else if (**end == '\n') {
+        fprintf(stderr, "[ERROR]: %zu:%zu: Missing closing `\"`\n", line, col);
+        return NULL;
+      }
+      else
+        sb_appendf(&sb, "%c", **end);
     }
     col++;
   }
@@ -121,6 +140,110 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
   const char* ret = arena_sprintf(&t->arena, "%.*s", (int)sb.count, sb.items);
   sb_free(&sb);
   return ret;
+}
+
+// TODO: support exp notation for reals 
+static inline int tok_num_literal(tokenizer_t* t, char** end, size_t line, size_t col, token_t* tok) {
+  int base = 10;
+  int64_t integer = 0;
+  double real = 0.0;
+  int sign = 1;
+
+  tok->start = *end;
+
+  lit_type_info_flags_t type_info = 0;
+
+  if (**end == '-') { sign = -1; (*end)++; }
+
+  if (**end == '0') {
+    switch (*(*end + 1)) {
+      case 'x': base = 16; (*end)+=2; col+=2; break;
+      case 'b': base = 2;  (*end)+=2; col+=2; break;
+      case 'o': base = 8;  (*end)+=2; col+=2; break;
+      default: break;
+    }
+  }
+
+  while(**end) {
+    int digit = 0;
+    
+    if      (**end >= '0' && **end <= '9')
+      digit = **end - '0';
+    
+    else if ( base == 16 && **end >= 'A' && **end <= 'F')
+      digit = **end - 'A' + 10;
+
+    else if ( base == 16 && **end >= 'a' && **end <= 'f')
+      digit = **end - 'a' + 10;
+    
+    else if (**end == '_')
+      continue;
+    
+    else if ( **end == 'U' || **end == 'u' || **end == 'L' || **end == 'l' )
+      break;
+    
+    else if ( base == 10 && (**end == 'F' || **end == 'f' ))
+      break;
+    
+    else if (base == 10 && **end == '.') {
+      type_info |= TI_REAL;
+      break;
+    }
+    
+    else break;
+
+    integer *= base;
+    integer += digit;
+
+    (*end)++;
+    col++;
+  }
+
+  if (type_info & TI_REAL) {
+    real = (double)integer;
+
+    int64_t power = 10;
+
+    while(isdigit(*++(*end))) {
+      col++;
+      real += (**end - '0') / power;
+      power *= 10;
+    }
+  }
+
+  switch (**end) {
+    case 'U':
+    case 'u': type_info |= TI_UNSIGNED; (*end)++; break;
+    case 'F':
+    case 'f': type_info |= TI_REAL; (*end)++; break;
+    case 'L':
+    case 'l': type_info |= TI_LONG; (*end)++; break;
+  }
+
+  if (type_info & TI_REAL) {
+    tok->as.r = sign * real;
+  } 
+
+  if (type_info & TI_UNSIGNED) {
+    if (sign < 0) {
+      fprintf(stderr, "[ERROR] %zu:%zu: Cannot declare a negative unsigned literal.\n", line, col);
+      return 1;
+    }
+
+    if (type_info & TI_REAL) {
+      fprintf(stderr, "[ERROR] %zu:%zu: Cannot declare an unsigned real literal.\n", line, col);
+      return 1;
+    }
+    tok->as.u = integer;
+  } else {
+    tok->as.i = integer;
+  }
+
+  tok->kind = type_info & TI_REAL ? TOK_REALLIT : TOK_INTLIT;
+  tok->type_info = type_info;
+  tok->len = (int)(*end - tok->start);
+
+  return 0;
 }
 
 static inline int tok_tokenize(tokenizer_t* t) {
@@ -140,16 +263,30 @@ static inline int tok_tokenize(tokenizer_t* t) {
 
     switch(*p) {
       case '(':
-      case ')': 
+      case ')':
       case '{':
-      case '}': 
+      case '}':
       case ',':
-      case ';': 
-      case ':': 
+      case ';':
+      case ':':
         tok = (token_t){ .kind = *p, .start = p, .len = 1 }; 
         break;
+      case '.':
+        if (isdigit(*(p + 1))) { 
+          char* end = p;
+          if(tok_num_literal(t, &end, line, col, &tok)) return 1;
+          break;
+        } 
+
+        tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+        break;
       case '-':
-        // TODO: handle negative number literals
+        if (isdigit(*(p + 1))) { 
+          char* end = p;
+          if(tok_num_literal(t, &end, line, col, &tok)) return 1;
+          break;
+        }
+
         switch(*(p + 1)) {
           case '>': tok = (token_t){ .kind = TOK_ARROW, .start = p, .len = 2 }; break;
           // case '=': tok = (token_t){ .kind = TOK_MINEQS }; break;
@@ -182,18 +319,13 @@ static inline int tok_tokenize(tokenizer_t* t) {
             .as.s = arena_sprintf(&t->arena, "%.*s", (int)(end - p), p),
           };
         } else if (isdigit(*p)) {
-          // TODO: lex int/real literals
-          // support _ notation for integers (10_000_000)
-          // support exp notation for reals (5e-3)
-          fprintf(stderr, "[FATAL]: Unimplemented: number literals\n");
-          abort();
+          char* end = p;
+          if(tok_num_literal(t, &end, line, col, &tok)) return 1;
+
         } else if (*p == '"') {
           char* end = p;
           const char* str = tok_string(t, &end, line, col);
-          if (!str) {
-            fprintf(stderr, "[ERROR]: %zu:%zu: Missing closing `\"`", line, col);
-            return 1;
-          }
+          if (!str) return 1;
           tok = (token_t){ 
             .kind = TOK_STRLIT,
             .len = (int)(end - p),
@@ -202,6 +334,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
           };
         } else {
           fprintf(stderr, "[ERROR]: %zu:%zu Unrecognized token near %.*s\n", line, col, 20, p);
+          // TODO: continue instead of returning
           return 1;
         }
     }
