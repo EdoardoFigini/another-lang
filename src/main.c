@@ -11,7 +11,6 @@
 #include "arena.h"
 
 const char* source = 
-  // "require raylib"
   "extern puts: (s: str) -> void;\n"
   "\n"
   "main : () -> i32 {\n"
@@ -30,9 +29,14 @@ typedef enum {
   TOK_EXTERN
 } tok_kind_t;
 
+typedef enum {
+  KW_RETURN = TOK_RETURN,
+  KW_EXTERN = TOK_EXTERN,
+} kw_kind_t;
+
 const char* tok_keywords[] = {
-  [TOK_RETURN] = "return",
-  [TOK_EXTERN] = "extern",
+  [KW_RETURN] = "return",
+  [KW_EXTERN] = "extern",
 };
 
 typedef enum {
@@ -112,9 +116,13 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
   while(*(++*end)) {
     if (escape) {
       switch(**end) {
+        case 'a' : sb_n_append(&sb, "\a", 1); break;
+        case 'b' : sb_n_append(&sb, "\b", 1); break;
+        case 'f' : sb_n_append(&sb, "\f", 1); break;
         case 'n' : sb_n_append(&sb, "\n", 1); break;
         case 't' : sb_n_append(&sb, "\t", 1); break;
         case 'r' : sb_n_append(&sb, "\r", 1); break;
+        case 'v' : sb_n_append(&sb, "\v", 1); break;
         case '\"': sb_n_append(&sb, "\"", 1); break;
         case '\\': sb_n_append(&sb, "\\", 1); break;
         default:
@@ -135,10 +143,11 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
     }
     col++;
   }
-  sb_appendf(&sb, "%c", *(*end)++);
 
   const char* ret = arena_sprintf(&t->arena, "%.*s", (int)sb.count, sb.items);
   sb_free(&sb);
+
+  (*end)++;
   return ret;
 }
 
@@ -364,6 +373,26 @@ typedef struct {
 } parser_t;
 
 typedef enum {
+  AST_ROOT = 1,
+  AST_EXPR,
+  AST_STMT,
+  AST_VAR_DECL,
+  AST_FUNC_DECL,
+  AST_FUNCALL,
+  AST_TYPE,
+  AST_BODY,
+  AST_PARAM,
+  AST_SIG,
+} ast_node_kind_t;
+
+#define AST_DEFAULT_FIELDS\
+  ast_node_kind_t ast_kind; \
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+} ast_node_t;
+
+typedef enum {
   SPEC_NONE = 0,
   SPEC_EXTERN = 1 << 0,
 } spec_flags_t;
@@ -406,14 +435,9 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
 
     token_t t = get_tok(p);
 
-    switch(t.kind) {
-      case TOK_EXTERN: cur_flag = SPEC_EXTERN; break;
-
-      case TOK_EOF:
-      case TOK_IDENT:
-      case TOK_STRLIT:
-      case TOK_RETURN:
-      case TOK_ARROW:
+    switch((kw_kind_t)t.kind) {
+      case KW_EXTERN: cur_flag = SPEC_EXTERN; break;
+      case KW_RETURN:
       default: return flags;
     }
 
@@ -434,28 +458,30 @@ typedef enum {
 } ast_decl_kind;
 
 typedef struct {
+  AST_DEFAULT_FIELDS;
   const char* name;
 } ast_type_t;
 
 typedef struct {
+  AST_DEFAULT_FIELDS;
   const char* name;
-  ast_type_t type;
+  ast_type_t* type;
 } ast_param_t;
 
 typedef struct {
+  AST_DEFAULT_FIELDS;
   struct {
     ast_param_t** items;
     size_t count;
     size_t capacity;
   } params;
-  ast_type_t ret;
+  ast_type_t* ret;
 } ast_sig_t;
 
-typedef struct {
-  void* __todo;
-} ast_body_t;
+typedef struct _ast_body_t ast_body_t;
 
 typedef struct {
+  AST_DEFAULT_FIELDS;
   const char* name;
   spec_flags_t flags;
   ast_decl_kind kind; 
@@ -470,16 +496,216 @@ typedef struct {
   } as;
 } ast_decl_t;
 
-// body = '{' statements '}'
+typedef struct _ast_expr_t ast_expr_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  const char* name;
+  struct {
+    ast_expr_t** items;
+    size_t count;
+    size_t capacity;
+  } args;
+} ast_funcall_t;
+
+typedef enum {
+  EXPR_STRING = 0,
+  EXPR_NUMBER,
+  EXPR_BINOP,
+  EXPR_SUUBEXPR,
+  EXPR_FUNCALL,
+} ast_expr_kind_t;
+
+struct _ast_expr_t {
+  AST_DEFAULT_FIELDS;
+  ast_expr_kind_t kind;
+  union {
+    const char* s;
+    struct {
+      lit_type_info_flags_t ti;
+      union {
+        uint64_t u;
+        int64_t i;
+        double r;
+      };
+    } number;
+    struct {
+      ast_expr_t* lhs;
+      ast_expr_t* rhs;
+    } binop;
+    ast_expr_t* subexpr;
+    ast_funcall_t* funcall;
+  } as;
+};
+
+typedef enum {
+  STMT_RET = 0,
+  STMT_FUNCALL,
+} ast_stmt_kind_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  ast_stmt_kind_t kind;
+  union {
+   ast_funcall_t* func;
+   ast_expr_t*    retval;
+  } as;
+} ast_stmt_t;
+
+struct _ast_body_t {
+  AST_DEFAULT_FIELDS;
+  struct {
+    ast_stmt_t** items;
+    size_t count;
+    size_t capacity;
+  } stmts;
+};
+
+static inline ast_expr_t* parse_expr(parser_t* p);
+
+// funcall = '(' [ arg ( ',' arg )* ] ')'
+static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
+  ast_funcall_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_FUNCALL;
+
+  if(!consume(p, '(')) return NULL;
+  next(p);
+
+  n->name = arena_strdup(&p->arena, name);
+
+  if (!peek(p, ')')) {
+    ast_expr_t* arg = parse_expr(p);
+    if(!arg) return NULL;
+    da_append(&n->args, arg);
+
+    while(peek(p, ',')) {
+      if(!consume(p, ',')) return NULL;
+      next(p);
+
+      arg = parse_expr(p);
+      if(!arg) return NULL;
+      da_append(&n->args, arg);
+    }
+  }
+  if(!consume(p, ')')) return NULL;
+  next(p);
+
+  return n;
+}
+
+// TODO: implement pratt parsing
+static inline ast_expr_t* parse_expr(parser_t* p) {
+  ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_EXPR;
+
+  if (peek(p, TOK_STRLIT)) {
+    n->kind = EXPR_STRING;
+
+    if(!consume(p, TOK_STRLIT)) return NULL;
+    const char* str = arena_strdup(&p->arena, get_tok(p).as.s);
+    next(p);
+    
+    if(!str) return NULL; 
+    n->as.s = str;
+  } else if (peek(p, TOK_INTLIT)) {
+    n->kind = EXPR_NUMBER;
+
+    if(!consume(p, TOK_INTLIT)) return NULL;
+    
+    lit_type_info_flags_t ti = get_tok(p).type_info;
+    n->as.number.ti = ti;
+    if (ti & TI_UNSIGNED) n->as.number.i = get_tok(p).as.i;
+    else                  n->as.number.u = get_tok(p).as.u;
+
+    next(p);
+  } else if (peek(p, TOK_REALLIT)) {
+    n->kind = EXPR_NUMBER;
+
+    if(!consume(p, TOK_REALLIT)) return NULL;
+    
+    n->as.number.ti = get_tok(p).type_info;
+    n->as.number.r  = get_tok(p).as.r;
+
+    next(p);
+  } else if (peek(p, '(')) {
+    if(!consume(p, '(')) return NULL;
+    next(p);
+
+    ast_expr_t* subexpr = parse_expr(p);
+    if(!subexpr) return NULL;
+    n->as.subexpr = subexpr;
+
+    if(!consume(p, ')')) return NULL;
+    next(p);
+  }
+
+  return n;
+}
+
+// stmt = return [ expr ] ';' 
+//      | ident funcall ';'
+//      | ident ':' [ type ] '=' expr ';'
+static inline ast_stmt_t* parse_stmt(parser_t* p) {
+  ast_stmt_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_STMT;
+
+  if (peek(p, TOK_RETURN)) {
+    if(!consume(p, TOK_RETURN)) return NULL;
+    next(p);
+
+    if (!peek(p, ';')) {
+      ast_expr_t* retval = parse_expr(p);
+      if(!retval) return NULL;
+      n->as.retval = retval;
+    }
+    if(!consume(p,';')) return NULL;
+    next(p);
+  } else if (peek(p, TOK_IDENT)) {
+    if (!consume(p, TOK_IDENT)) return NULL;
+    const char* name = get_tok(p).as.s; 
+    next(p);
+
+    if (peek(p, '(')) {
+      ast_funcall_t* fc = parse_funcall(p, name);
+      if(!fc) return NULL;
+      n->as.func = fc;
+    } else if (peek(p, ':')) {
+      // TODO: parse assignment
+    }
+    if(!consume(p,';')) return NULL;
+    next(p);
+  }
+
+  return n;
+}
+
+// body = '{' ( stmt )* '}'
 static inline ast_body_t* parse_body(parser_t* p) {
   ast_body_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_BODY;
 
   if(!consume(p, '{')) return NULL;
   next(p);
 
-  // TODO: parse statements
+  while(!peek(p, '}')) {
+    ast_stmt_t* stmt = parse_stmt(p);
+    if(!stmt) return NULL;
+    
+    da_append(&n->stmts, stmt);
+  }
 
   if(!consume(p, '}')) return NULL;
+  next(p);
+
+  return n;
+}
+
+static inline ast_type_t* parse_type(parser_t* p) {
+  ast_type_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_TYPE;
+
+  if(!consume_with_name(p, TOK_IDENT, "type")) return NULL;
+  n->name = arena_strdup(&p->arena, get_tok(p).as.s);
   next(p);
 
   return n;
@@ -488,6 +714,7 @@ static inline ast_body_t* parse_body(parser_t* p) {
 // param = ident ':' ident
 static inline ast_param_t* parse_param(parser_t* p) {
   ast_param_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_PARAM;
 
   if(!consume(p, TOK_IDENT)) return NULL;
   n->name = arena_strdup(&p->arena, get_tok(p).as.s);
@@ -496,16 +723,17 @@ static inline ast_param_t* parse_param(parser_t* p) {
   if(!consume(p, ':')) return NULL;
   next(p);
 
-  if(!consume_with_name(p, TOK_IDENT, "type")) return NULL;
-  n->type.name = arena_strdup(&p->arena, get_tok(p).as.s);
-  next(p);
+  ast_type_t* t = parse_type(p);
+  if(!t) return NULL;
+  n->type = t;
 
   return n;
 }
 
-// sig = '(' [ param ( ',' param )+ ] ')' -> ident ( ';' | body )
+// sig = '(' [ param ( ',' param )* ] ')' -> ident ( ';' | body )
 static inline ast_sig_t* parse_signature(parser_t* p) {
   ast_sig_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_SIG;
 
   if(!consume(p, '(')) return NULL;
   next(p);
@@ -540,9 +768,9 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
 
   if(!consume(p, TOK_ARROW)) return NULL;
   next(p);
-  if(!consume_with_name(p, TOK_IDENT, "return type")) return NULL;
-  n->ret.name = arena_strdup(&p->arena, get_tok(p).as.s);
-  next(p);
+  ast_type_t* t = parse_type(p);
+  if(!t) return NULL;
+  n->ret = t;
 
   return n;
 }
@@ -550,6 +778,7 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
 // func_decl = sig
 static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_flags_t flags) {
   ast_decl_t *n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_FUNC_DECL;
   n->flags = flags;
   n->name = arena_strdup(&p->arena, name);
   n->kind = DECL_KIND_FUNC;
@@ -585,6 +814,7 @@ static inline ast_decl_t* parse_top_level_declaration(parser_t* p) {
 }
 
 typedef struct {
+  AST_DEFAULT_FIELDS;
   struct {
     ast_decl_t** items;
     size_t count;
@@ -597,6 +827,7 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->current = 0;
 
   ast_root_t *n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_ROOT;
 
   while(!peek(p, TOK_EOF)) {
     ast_decl_t* decl = parse_top_level_declaration(p);
@@ -606,6 +837,115 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   }
 
   return n;
+}
+
+static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
+  switch(n->ast_kind) {
+    case AST_ROOT:
+      ast_root_t* root = (ast_root_t*)n;
+      fprintf(stream, "%*s%s\n", level, "","AST_ROOT");
+      da_foreach(ast_decl_t*, d, &root->top_level) {
+        print_ast(stream, (ast_node_t*)*d, level + 2);
+      }
+      break;
+    case AST_EXPR:
+      ast_expr_t* expr = (ast_expr_t*)n;
+      fprintf(stream, "%*s%s\n", level, "", "AST_EXPR");
+      switch(expr->kind) {
+        case EXPR_STRING:
+          fprintf(stream, "%*s%s\n", level + 2, "", expr->as.s);
+          break;
+        case EXPR_NUMBER:
+          if (expr->as.number.ti & TI_REAL) {
+            fprintf(stream, "%*s%lf\n", level + 2, "", expr->as.number.r);
+          } else if (expr->as.number.ti & TI_UNSIGNED) {
+            fprintf(stream, "%*s%lu (unsigned)\n", level + 2, "", expr->as.number.u);
+          } else {
+            fprintf(stream, "%*s%ld\n", level + 2, "", expr->as.number.i);
+          }
+          break;
+        case EXPR_BINOP:
+          fprintf(stream, "%*slhs:\n", level + 2, "");
+          print_ast(stream, (ast_node_t*)expr->as.binop.lhs, level + 2);
+          fprintf(stream, "%*srhs:\n", level + 2, "");
+          print_ast(stream, (ast_node_t*)expr->as.binop.rhs, level + 2);
+          break;
+        case EXPR_SUUBEXPR:
+          print_ast(stream, (ast_node_t*)expr->as.subexpr, level + 2);
+          break;
+        case EXPR_FUNCALL:
+          print_ast(stream, (ast_node_t*)expr->as.funcall, level + 2);
+          break;
+        default: break;
+      }
+      break;
+    case AST_STMT:
+      ast_stmt_t* stmt = (ast_stmt_t*)n;
+      fprintf(stream, "%*s%s\n", level, "", "AST_STMT");
+      switch(stmt->kind) {
+        case STMT_RET:
+          print_ast(stream, (ast_node_t*)stmt->as.retval, level + 2);
+          break;
+        case STMT_FUNCALL:
+          print_ast(stream, (ast_node_t*)stmt->as.func, level + 2);
+          break;
+        default: break;
+      }
+      break;
+    case AST_VAR_DECL:
+      fprintf(stream, "%*s%s\n", level, "", "AST_VAR_DECL");
+      break;
+    case AST_FUNC_DECL:
+      ast_decl_t* decl = (ast_decl_t*)n;
+      fprintf(stream, "%*s%s\n", level, "", "AST_FUNC_DECL");
+      fprintf(stream, "%*sName: %s\n", level + 2, "", decl->name);
+      fprintf(stream, "%*sFlags: ", level + 2, "");
+      if(decl->flags & SPEC_EXTERN) fprintf(stream, "extern ");
+      fprintf(stream, "\n");
+      print_ast(stream, (ast_node_t*)decl->as.fun.sig, level + 2);
+      if(decl->as.fun.body)
+        print_ast(stream, (ast_node_t*)decl->as.fun.body, level + 2);
+      break;
+    case AST_FUNCALL:
+      ast_funcall_t* fun = (ast_funcall_t*)n;
+      fprintf(stream, "%*s%s\n", level, "", "AST_FUNCALL");
+      fprintf(stream, "%*sName: %s\n", level + 2, "", fun->name);
+      fprintf(stream, "%*sArgs:\n", level + 2, "");
+      da_foreach(ast_expr_t*, a, &fun->args) {
+        print_ast(stream, (ast_node_t*)*a, level + 2);
+      }
+      break;
+    case AST_TYPE:
+      fprintf(stream, "%*s%s\n", level, "", "AST_TYPE");
+      fprintf(stream, "%*sName: %s\n", level + 2, "", ((ast_type_t*)n)->name);
+      break;
+    case AST_BODY:
+      fprintf(stream, "%*s%s\n", level, "", "AST_BODY");
+      da_foreach(ast_stmt_t*, stmt, &((ast_body_t*)n)->stmts) {
+        print_ast(stream, (ast_node_t*)*stmt, level + 2);
+      }
+      break;
+    case AST_PARAM:
+      ast_param_t* param = (ast_param_t*)n;
+      fprintf(stream, "%*s%s\n", level, "", "AST_PARAM");
+      fprintf(stream, "%*sName: %s\n", level + 2, "", param->name);
+      fprintf(stream, "%*sType:\n", level + 2, "");
+      print_ast(stream, (ast_node_t*)param->type, level + 2);
+      break;
+    case AST_SIG:
+      ast_sig_t* sig = (ast_sig_t*)n;
+      fprintf(stream, "%*s%s\n", level, "", "AST_SIG");
+      fprintf(stream, "%*sParams:\n", level + 2, "");
+      da_foreach(ast_param_t*, p, &sig->params) {
+        print_ast(stream, (ast_node_t*)*p, level + 2);
+      }
+      fprintf(stream, "%*sRet type:\n", level + 2, "");
+      print_ast(stream, (ast_node_t*)sig->ret, level + 2);
+      break;
+    default:
+      fprintf(stderr, "[ERROR] Unrecognized ast node.\n");
+      break;
+  }
 }
 
 int main() {
@@ -622,6 +962,8 @@ int main() {
 
   ast_root_t* root = parse(&parser, &tok);
   if(!root) return 1;
+
+  print_ast(stdout, (ast_node_t*)root, 0);
 
   tok_destroy(&tok);
 
