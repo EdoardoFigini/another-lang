@@ -539,7 +539,8 @@ struct _ast_expr_t {
 };
 
 typedef enum {
-  STMT_RET = 0,
+  STMT_EMPTY = 0,
+  STMT_RET,
   STMT_FUNCALL,
 } ast_stmt_kind_t;
 
@@ -547,8 +548,8 @@ typedef struct {
   AST_DEFAULT_FIELDS;
   ast_stmt_kind_t kind;
   union {
-   ast_funcall_t* func;
-   ast_expr_t*    retval;
+    ast_funcall_t* func;
+    ast_expr_t*    retval;
   } as;
 } ast_stmt_t;
 
@@ -645,13 +646,20 @@ static inline ast_expr_t* parse_expr(parser_t* p) {
 // stmt = return [ expr ] ';' 
 //      | ident funcall ';'
 //      | ident ':' [ type ] '=' expr ';'
+//      | ';'
 static inline ast_stmt_t* parse_stmt(parser_t* p) {
   ast_stmt_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_STMT;
 
-  if (peek(p, TOK_RETURN)) {
+  if(peek(p, ';')) {
+    if(!consume(p,';')) return NULL;
+    next(p);
+
+    n->kind = STMT_EMPTY;
+  } else if (peek(p, TOK_RETURN)) {
     if(!consume(p, TOK_RETURN)) return NULL;
     next(p);
+    n->kind = STMT_RET;
 
     if (!peek(p, ';')) {
       ast_expr_t* retval = parse_expr(p);
@@ -668,6 +676,7 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     if (peek(p, '(')) {
       ast_funcall_t* fc = parse_funcall(p, name);
       if(!fc) return NULL;
+      n->kind = STMT_FUNCALL;
       n->as.func = fc;
     } else if (peek(p, ':')) {
       // TODO: parse assignment
@@ -883,6 +892,7 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
       ast_stmt_t* stmt = (ast_stmt_t*)n;
       fprintf(stream, "%*s%s\n", level, "", "AST_STMT");
       switch(stmt->kind) {
+        case STMT_EMPTY: break;
         case STMT_RET:
           print_ast(stream, (ast_node_t*)stmt->as.retval, level + 2);
           break;
