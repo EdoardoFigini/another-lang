@@ -11,7 +11,7 @@
 #include "arena.h"
 
 const char* source = 
-  "extern puts: (s: str) -> void;\n"
+  "extern puts: (s: str) -> i32;\n"
   "\n"
   "main : () -> i32 {\n"
   " puts(\"Hello World!\\n\");\n"
@@ -366,11 +366,76 @@ void tok_destroy(tokenizer_t* t) {
   arena_free(&t->arena);
 }
 
+typedef enum {
+  TYPE_NONE,
+
+  // only 32 (normal - word) and 64 (long - double word)
+  TYPE_I32,
+  TYPE_I64,
+  
+  TYPE_U32,
+  TYPE_U64,
+  
+  TYPE_F32,
+  TYPE_F64,
+  
+  TYPE_STR,
+  
+  TYPE_ADDR, // akin to void* in C
+  
+  TYPE_STRUCT,
+  
+  TYPE_ALIAS,
+
+  TYPE_SIGNATURE,
+
+  TYPES_COUNT,
+} type_kind_t;
+
+typedef struct _type {
+  const char* name;
+  size_t size;
+  type_kind_t kind;
+  union {
+    struct {
+      void* __todo;
+      // TODO: fields
+    } structure;
+    struct {
+      struct _type* ret;
+      struct {
+        struct _type** items;
+        size_t count;
+        size_t capacity;
+      } params;
+    } func;
+    struct {
+      struct _type* target;
+    } alias; 
+  } as;
+} type_t;
+
+typedef struct _scope scope_t;
+
 typedef struct {
   arena_t arena;
   tokenarr_t tokens;
   size_t current;
+  scope_t* current_scope;
+  struct {
+    type_t* items;
+    size_t count;
+    size_t capacity;
+  } types;
 } parser_t;
+
+static inline type_t* resolve_type(parser_t* p, const char* name) {
+  da_foreach(type_t, t, &p->types) {
+    // OPTIMIZE
+    if(strcmp(t->name, name) == 0) return t;
+  }
+  return NULL;
+}
 
 typedef enum {
   AST_ROOT = 1,
@@ -426,6 +491,62 @@ static inline void next(parser_t* p) {
   p->current++;
 }
 
+typedef enum {
+  SYMB_VAR,
+  SYMB_FUNC,
+} symb_kind_t;
+
+typedef enum {
+  STO_SCOPE,
+  STO_EXTERN,
+} symb_storage_t;
+
+typedef struct {
+  const char* name;
+  symb_kind_t kind;
+  symb_storage_t storage;
+  type_t type;
+  size_t addr;
+} symbol_t;
+
+struct _scope {
+  const char* name;
+  struct _scope* parent;
+  // TODO: OPTIMIZE
+  // transform into hashmap
+  struct {
+    symbol_t* items;
+    size_t count;
+    size_t capacity;
+  } symbols;
+};
+
+static inline void make_symbol(scope_t* scope, symb_kind_t kind, symb_storage_t storage, const char* name, type_t type) {
+  da_append(&scope->symbols, ((symbol_t){ .name = name, .kind = kind, .storage = storage, .type = type }));
+}
+
+static inline symbol_t* resolve_symbol(scope_t* scope, const char* name) {
+  if (!scope) return NULL;
+
+  // OPTIMIZE
+  da_foreach(symbol_t, s, &scope->symbols) {
+    if(strcmp(s->name, name) == 0) return s;
+  }
+  return resolve_symbol(scope->parent, name);
+}
+
+static inline void enter_scope(parser_t* p, const char* name) {
+  scope_t* parent = p->current_scope;
+  p->current_scope = arena_alloc(&p->arena, sizeof(scope_t));
+  p->current_scope->name = name;
+  p->current_scope->parent = parent;
+  // fprintf(stderr, "[DEBUG] New scope %s, son of %s.\n", name, p->current_scope->parent ? p->current_scope->parent->name : "noone");
+}
+
+static inline void exit_scope(parser_t* p) {
+  p->current_scope = p->current_scope->parent;
+}
+
 // specifiers = ( specifier )*
 static inline spec_flags_t parse_specifiers(parser_t* p) {
   spec_flags_t flags = SPEC_NONE;
@@ -459,7 +580,7 @@ typedef enum {
 
 typedef struct {
   AST_DEFAULT_FIELDS;
-  const char* name;
+  type_t type;
 } ast_type_t;
 
 typedef struct {
@@ -476,6 +597,7 @@ typedef struct {
     size_t capacity;
   } params;
   ast_type_t* ret;
+  type_t type;
 } ast_sig_t;
 
 typedef struct _ast_body_t ast_body_t;
@@ -714,7 +836,13 @@ static inline ast_type_t* parse_type(parser_t* p) {
   n->ast_kind = AST_TYPE;
 
   if(!consume_with_name(p, TOK_IDENT, "type")) return NULL;
-  n->name = arena_strdup(&p->arena, get_tok(p).as.s);
+  token_t tok = get_tok(p);
+  type_t* type = resolve_type(p, tok.as.s);
+  if(!type) {
+    fprintf(stderr, "[ERROR] %zu:%zu: Undefined type `%s`.\n", tok.line, tok.col, tok.as.s);
+    return NULL;
+  }
+  n->type = *type;
   next(p);
 
   return n;
@@ -736,13 +864,16 @@ static inline ast_param_t* parse_param(parser_t* p) {
   if(!t) return NULL;
   n->type = t;
 
+  make_symbol(p->current_scope, SYMB_VAR, STO_SCOPE, n->name, t->type);
+
   return n;
 }
 
-// sig = '(' [ param ( ',' param )* ] ')' -> ident ( ';' | body )
+// sig = '(' [ param ( ',' param )* ] ')' -> ident 
 static inline ast_sig_t* parse_signature(parser_t* p) {
   ast_sig_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_SIG;
+  n->type.kind = TYPE_SIGNATURE;
 
   if(!consume(p, '(')) return NULL;
   next(p);
@@ -755,6 +886,7 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
     if(!param) return NULL;
 
     da_append(&n->params, param);
+    da_append(&n->type.as.func.params, &param->type->type);
 
     if (peek(p, ')')) {
       if(!consume(p, ')')) return NULL;
@@ -768,6 +900,7 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
         if(!param) return NULL;
 
         da_append(&n->params, param);
+        da_append(&n->type.as.func.params, &param->type->type);
       } 
 
       if(!consume(p, ')')) return NULL;
@@ -780,17 +913,21 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
   ast_type_t* t = parse_type(p);
   if(!t) return NULL;
   n->ret = t;
+  n->type.as.func.ret = &t->type;
 
   return n;
 }
 
-// func_decl = sig
+// TODO: distinguish between func definitions and declarations
+// func_decl = sig ( ';' | body )
 static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_flags_t flags) {
   ast_decl_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_FUNC_DECL;
   n->flags = flags;
   n->name = arena_strdup(&p->arena, name);
   n->kind = DECL_KIND_FUNC;
+
+  enter_scope(p, arena_sprintf(&p->arena, "fun_%s", name));
 
   n->as.fun.sig = parse_signature(p);
   if(!n->as.fun.sig) return NULL;
@@ -804,6 +941,10 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
 
     n->as.fun.body = body;
   }
+
+  exit_scope(p);
+
+  make_symbol(p->current_scope, SYMB_FUNC, STO_SCOPE, n->name, n->as.fun.sig->type);
 
   return n;
 }
@@ -829,14 +970,29 @@ typedef struct {
     size_t count;
     size_t capacity;
   } top_level;
+  scope_t* scope;
 } ast_root_t;
 
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->tokens = t->tokens;
   p->current = 0;
 
+  // init types
+  da_append(&p->types, ((type_t){ .kind = TYPE_NONE, .name = "none", .size = 0 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_I32,  .name = "i32",  .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_I64,  .name = "i64",  .size = 2 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_U32,  .name = "u32",  .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_U64,  .name = "u64",  .size = 2 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_U32,  .name = "f32",  .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_U64,  .name = "f64",  .size = 2 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_STR,  .name = "str",  .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_ADDR, .name = "addr", .size = 1 }));
+
+  enter_scope(p, "root");
+
   ast_root_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_ROOT;
+  n->scope = p->current_scope;
 
   while(!peek(p, TOK_EOF)) {
     ast_decl_t* decl = parse_top_level_declaration(p);
@@ -927,7 +1083,7 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
       break;
     case AST_TYPE:
       fprintf(stream, "%*s%s\n", level, "", "AST_TYPE");
-      fprintf(stream, "%*sName: %s\n", level + 2, "", ((ast_type_t*)n)->name);
+      fprintf(stream, "%*sName: %s\n", level + 2, "", ((ast_type_t*)n)->type.name);
       break;
     case AST_BODY:
       fprintf(stream, "%*s%s\n", level, "", "AST_BODY");
@@ -958,6 +1114,45 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
   }
 }
 
+static inline void print_type(FILE* stream, type_t* t) {
+  switch(t->kind) {
+    case TYPE_NONE:
+    case TYPE_I32:
+    case TYPE_I64:
+    case TYPE_U32:
+    case TYPE_U64:
+    case TYPE_F32:
+    case TYPE_F64:
+    case TYPE_STR:
+    case TYPE_ADDR:
+    case TYPE_ALIAS:
+      fprintf(stream, "%s", t->name);
+      break;
+    case TYPE_STRUCT:
+      fprintf(stream, "struct %s", t->name);
+      break;
+    case TYPE_SIGNATURE:
+      fprintf(stream, "(");
+      da_foreach(type_t*, typ, &t->as.func.params) {
+        print_type(stream, *typ);
+        fprintf(stream, ",");
+      }
+      fprintf(stream, ") -> ");
+      print_type(stream, t->as.func.ret);
+    case TYPES_COUNT:
+    default: break;
+  }
+}
+
+static inline void print_symbol_table(FILE* stream, scope_t* root) {
+  fprintf(stream, "Root symbol Table:\n");
+  da_foreach(symbol_t, s, &root->symbols) {
+    fprintf(stream, "%10s %10s ", s->name, root->name);
+    print_type(stream, &s->type);
+    fprintf(stream, "\n");
+  }
+}
+
 int main() {
   tokenizer_t tok = { 0 };
   sb_append(&tok.source, source);
@@ -973,7 +1168,9 @@ int main() {
   ast_root_t* root = parse(&parser, &tok);
   if(!root) return 1;
 
-  print_ast(stdout, (ast_node_t*)root, 0);
+  // print_ast(stdout, (ast_node_t*)root, 0);
+
+  print_symbol_table(stdout, root->scope);
 
   tok_destroy(&tok);
 
