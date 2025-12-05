@@ -13,7 +13,7 @@
 const char* source = 
   "extern puts: (s: str) -> i32;\n"
   "\n"
-  "main : () -> i32 {\n"
+  "export main : () -> i32 {\n"
   " puts(\"Hello World!\\n\");\n"
   " return 0;\n"
   "}";
@@ -26,17 +26,20 @@ typedef enum {
   TOK_REALLIT,
   TOK_STRLIT,
   TOK_RETURN,
-  TOK_EXTERN
+  TOK_EXTERN,
+  TOK_EXPORT,
 } tok_kind_t;
 
 typedef enum {
   KW_RETURN = TOK_RETURN,
   KW_EXTERN = TOK_EXTERN,
+  KW_EXPORT = TOK_EXPORT,
 } kw_kind_t;
 
 const char* tok_keywords[] = {
   [KW_RETURN] = "return",
   [KW_EXTERN] = "extern",
+  [KW_EXPORT] = "export",
 };
 
 typedef enum {
@@ -85,6 +88,7 @@ void tok_print(token_t tok) {
       case TOK_STRLIT: printf("%-20s", "TOK_STRLIT"); break;
       case TOK_RETURN: printf("%-20s", "TOK_RETURN"); break;
       case TOK_EXTERN: printf("%-20s", "TOK_EXTERN"); break;
+      case TOK_EXPORT: printf("%-20s", "TOK_EXPORT"); break;
       default: printf("%-20s", "<INVALID TOKEN>"); break;
     }
   }
@@ -103,6 +107,7 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_STRLIT: return "string literal";
       case TOK_RETURN: return "return";
       case TOK_EXTERN: return "extern";
+      case TOK_EXPORT: return "export";
       default: return "<INVALID TOKEN>";
     }
   }
@@ -261,7 +266,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
   size_t col  = 1;
 
   char* p = t->source.items;
-  while(*p) {
+  while(*p && ((size_t)(p - t->source.items) < t->source.count)) {
     if(*p == '\n') {
       line++;
       p++;
@@ -342,7 +347,12 @@ static inline int tok_tokenize(tokenizer_t* t) {
             .as.s = str
           };
         } else {
-          fprintf(stderr, "[ERROR]: %zu:%zu Unrecognized token near %.*s\n", line, col, 20, p);
+          char* line_start = p;
+          char* line_end   = p;
+          while(line_start != t->source.items && *(line_start-1) != '\n') line_start--;
+          while(*line_end && *line_end != '\n') line_end++;
+          int line_length = line_end - line_start;
+          fprintf(stderr, "[ERROR]: %zu:%zu Unrecognized token (%c, 0x%x)\n%.*s\n%*s^\n", line, col, *p, *p, line_length, line_start, (int)col - 1, "");
           // TODO: continue instead of returning
           return 1;
         }
@@ -460,6 +470,7 @@ typedef struct {
 typedef enum {
   SPEC_NONE = 0,
   SPEC_EXTERN = 1 << 0,
+  SPEC_EXPORT = 1 << 1,
 } spec_flags_t;
 
 static inline token_t get_tok(parser_t* p) {
@@ -499,6 +510,7 @@ typedef enum {
 typedef enum {
   STO_SCOPE,
   STO_EXTERN,
+  STO_EXPORT,
 } symb_storage_t;
 
 typedef struct {
@@ -525,14 +537,34 @@ static inline void make_symbol(scope_t* scope, symb_kind_t kind, symb_storage_t 
   da_append(&scope->symbols, ((symbol_t){ .name = name, .kind = kind, .storage = storage, .type = type }));
 }
 
-static inline symbol_t* resolve_symbol(scope_t* scope, const char* name) {
+static inline symbol_t* resolve_symbol_local_any(scope_t* scope, const char* name) { 
   if (!scope) return NULL;
 
   // OPTIMIZE
   da_foreach(symbol_t, s, &scope->symbols) {
     if(strcmp(s->name, name) == 0) return s;
   }
-  return resolve_symbol(scope->parent, name);
+  return NULL;
+}
+
+static inline symbol_t* resolve_symbol_local(scope_t* scope, const char* name, symb_kind_t kind) { 
+  if (!scope) return NULL;
+
+  // OPTIMIZE
+  da_foreach(symbol_t, s, &scope->symbols) {
+    if(strcmp(s->name, name) == 0 && s->kind == kind) return s;
+  }
+  return NULL;
+}
+
+static inline symbol_t* resolve_symbol(scope_t* scope, const char* name, symb_kind_t kind) {
+  if (!scope) return NULL;
+
+  // OPTIMIZE
+  da_foreach(symbol_t, s, &scope->symbols) {
+    if(strcmp(s->name, name) == 0 && s->kind == kind) return s;
+  }
+  return resolve_symbol(scope->parent, name, kind);
 }
 
 static inline void enter_scope(parser_t* p, const char* name) {
@@ -558,6 +590,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
 
     switch((kw_kind_t)t.kind) {
       case KW_EXTERN: cur_flag = SPEC_EXTERN; break;
+      case KW_EXPORT: cur_flag = SPEC_EXPORT; break;
       case KW_RETURN:
       default: return flags;
     }
@@ -688,6 +721,12 @@ static inline ast_expr_t* parse_expr(parser_t* p);
 
 // funcall = '(' [ arg ( ',' arg )* ] ')'
 static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
+  symbol_t* s = resolve_symbol(p->current_scope, name, SYMB_FUNC);
+  if(!s) {
+    fprintf(stderr, "[ERROR]: %zu:%zu: Undeclared function `%s`.\n", get_tok(p).line, get_tok(p).col, name);
+    return NULL;
+  }
+
   ast_funcall_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_FUNCALL;
 
@@ -944,7 +983,11 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
 
   exit_scope(p);
 
-  make_symbol(p->current_scope, SYMB_FUNC, STO_SCOPE, n->name, n->as.fun.sig->type);
+  symb_storage_t sto = STO_SCOPE;
+  if(flags & STO_EXTERN) sto = STO_EXTERN; 
+  if(flags & STO_EXPORT) sto = STO_EXPORT; 
+
+  make_symbol(p->current_scope, SYMB_FUNC, sto, n->name, n->as.fun.sig->type);
 
   return n;
 }
@@ -958,6 +1001,11 @@ static inline ast_decl_t* parse_top_level_declaration(parser_t* p) {
   next(p);
   if(!consume(p, ':')) return NULL;
   next(p);
+
+  if(resolve_symbol_local_any(p->current_scope, name)) {
+    fprintf(stderr, "[ERROR]: %zu:%zu: Symbol `%s` already declared in this scope.\n", get_tok(p).line, get_tok(p).col, name);
+    return NULL;
+  }
   
   if(peek(p, '(')) return parse_func_decl(p, name, flags);
   else             return NULL;
@@ -1067,6 +1115,7 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
       fprintf(stream, "%*sName: %s\n", level + 2, "", decl->name);
       fprintf(stream, "%*sFlags: ", level + 2, "");
       if(decl->flags & SPEC_EXTERN) fprintf(stream, "extern ");
+      if(decl->flags & SPEC_EXPORT) fprintf(stream, "export ");
       fprintf(stream, "\n");
       print_ast(stream, (ast_node_t*)decl->as.fun.sig, level + 2);
       if(decl->as.fun.body)
@@ -1145,9 +1194,20 @@ static inline void print_type(FILE* stream, type_t* t) {
 }
 
 static inline void print_symbol_table(FILE* stream, scope_t* root) {
+  if(!root) return;
   fprintf(stream, "Root symbol Table:\n");
+  fprintf(stream, "%-10s %-10s %-10s %s\n", "name", "scope", "storage", "type");
   da_foreach(symbol_t, s, &root->symbols) {
-    fprintf(stream, "%10s %10s ", s->name, root->name);
+    fprintf(stream, "%-10s %-10s ", s->name, root->name);
+    switch(s->storage) {
+      case STO_SCOPE:
+        fprintf(stream, "%-10s ", "scope"); break;
+      case STO_EXTERN:
+        fprintf(stream, "%-10s ", "extern"); break;
+      case STO_EXPORT:
+        fprintf(stream, "%-10s ", "export"); break;
+      default: break;
+    }
     print_type(stream, &s->type);
     fprintf(stream, "\n");
   }
@@ -1159,11 +1219,13 @@ int main() {
 
   parser_t parser = { 0 };
 
+  printf("%s\n\n", source);
+
   if(tok_tokenize(&tok)) return 1;
 
-  da_foreach(token_t, t, &tok.tokens) {
-    tok_print(*t);
-  }
+  // da_foreach(token_t, t, &tok.tokens) {
+  //   tok_print(*t);
+  // }
 
   ast_root_t* root = parse(&parser, &tok);
   if(!root) return 1;
