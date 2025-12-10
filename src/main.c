@@ -1,7 +1,10 @@
+#include <assert.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <ctype.h>
 #include <stdlib.h>
+
+#include <ffi.h>
 
 #define SB_IMPLEMENTATION
 #include "sb.h"
@@ -13,8 +16,7 @@
 #include "bytecode.h"
 
 const char* source = 
-  // NOTE: puts cannot expect str, but a raw pointer to chars (null terminated)
-  "extern puts: (s: str) -> i32;\n"
+  "extern puts: (s: char[]) -> i32;\n"
   "\n"
   "export main : () -> i32 {\n"
   " puts(\"Hello World!\\n\");\n"
@@ -281,6 +283,8 @@ static inline int tok_tokenize(tokenizer_t* t) {
     switch(*p) {
       case '(':
       case ')':
+      case '[':
+      case ']':
       case '{':
       case '}':
       case ',':
@@ -391,8 +395,13 @@ typedef enum {
   
   TYPE_F32,
   TYPE_F64,
+
+  TYPE_BOOL,
   
+  TYPE_CHAR,
   TYPE_STR,
+
+  TYPE_ARRAY,
   
   TYPE_ADDR, // akin to void* in C
   
@@ -400,7 +409,7 @@ typedef enum {
   
   TYPE_ALIAS,
 
-  TYPE_SIGNATURE,
+  TYPE_FUNC,
 
   TYPES_COUNT,
 } type_kind_t;
@@ -414,6 +423,10 @@ typedef struct _type {
       void* __todo;
       // TODO: fields
     } structure;
+    struct {
+      struct _type* inner;
+      size_t size;
+    } array;
     struct {
       struct _type* ret;
       struct {
@@ -442,12 +455,31 @@ typedef struct {
   } types;
 } parser_t;
 
-static inline type_t* resolve_type(parser_t* p, const char* name) {
+static inline type_t* get_or_create_array_of(parser_t* p, type_t* type) {
+  da_foreach(type_t, t, &p->types) {
+    if (t->kind == TYPE_ARRAY && t->as.array.inner == type) return t;
+  }
+
+  da_append(&p->types, ((type_t){ .kind = TYPE_ARRAY, .name = NULL, .size = 1, .as.array.inner = type }));
+  
+  return &da_last(&p->types);
+}
+
+static inline type_t* resolve_type(parser_t* p, const char* name, int depth) {
+  type_t* type = NULL;
+
   da_foreach(type_t, t, &p->types) {
     // OPTIMIZE
-    if(strcmp(t->name, name) == 0) return t;
+    if(strcmp(t->name, name) == 0) { type = t; break; }
   }
-  return NULL;
+
+  if (!type) return NULL;
+
+  while(depth-- > 0) {
+    type = get_or_create_array_of(p, type);
+  }
+
+  return type;
 }
 
 typedef enum {
@@ -884,13 +916,23 @@ static inline ast_type_t* parse_type(parser_t* p) {
 
   if(!consume_with_name(p, TOK_IDENT, "type")) return NULL;
   token_t tok = get_tok(p);
-  type_t* type = resolve_type(p, tok.as.s);
+  next(p);
+
+  int array_depth = 0;
+  while(peek(p, '[')) {
+    if (!consume(p, '[')) return NULL;
+    next(p);
+    if (!consume(p, ']')) return NULL;
+    next(p);
+    array_depth++;
+  }
+
+  type_t* type = resolve_type(p, tok.as.s, array_depth);
   if(!type) {
     fprintf(stderr, "[ERROR] %zu:%zu: Undefined type `%s`.\n", tok.line, tok.col, tok.as.s);
     return NULL;
   }
   n->type = *type;
-  next(p);
 
   return n;
 }
@@ -920,7 +962,7 @@ static inline ast_param_t* parse_param(parser_t* p) {
 static inline ast_sig_t* parse_signature(parser_t* p) {
   ast_sig_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_SIG;
-  n->type.kind = TYPE_SIGNATURE;
+  n->type.kind = TYPE_FUNC;
 
   if(!consume(p, '(')) return NULL;
   next(p);
@@ -1037,15 +1079,17 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->current = 0;
 
   // init types
-  da_append(&p->types, ((type_t){ .kind = TYPE_NONE, .name = "none", .size = 0 }));
-  da_append(&p->types, ((type_t){ .kind = TYPE_I32,  .name = "i32",  .size = 1 }));
-  da_append(&p->types, ((type_t){ .kind = TYPE_I64,  .name = "i64",  .size = 2 }));
-  da_append(&p->types, ((type_t){ .kind = TYPE_U32,  .name = "u32",  .size = 1 }));
-  da_append(&p->types, ((type_t){ .kind = TYPE_U64,  .name = "u64",  .size = 2 }));
-  da_append(&p->types, ((type_t){ .kind = TYPE_U32,  .name = "f32",  .size = 1 }));
-  da_append(&p->types, ((type_t){ .kind = TYPE_U64,  .name = "f64",  .size = 2 }));
-  da_append(&p->types, ((type_t){ .kind = TYPE_STR,  .name = "str",  .size = 1 }));
-  da_append(&p->types, ((type_t){ .kind = TYPE_ADDR, .name = "addr", .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_NONE,  .name = "none", .size = 0 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_I32,   .name = "i32",  .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_I64,   .name = "i64",  .size = 2 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_U32,   .name = "u32",  .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_U64,   .name = "u64",  .size = 2 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_U32,   .name = "f32",  .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_U64,   .name = "f64",  .size = 2 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_CHAR,  .name = "char", .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_BOOL,  .name = "bool", .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_STR,   .name = "str",  .size = 1 }));
+  da_append(&p->types, ((type_t){ .kind = TYPE_ADDR,  .name = "addr", .size = 1 }));
 
   enter_scope(p, "root");
 
@@ -1183,6 +1227,8 @@ static inline void print_type(FILE* stream, type_t* t) {
     case TYPE_U64:
     case TYPE_F32:
     case TYPE_F64:
+    case TYPE_BOOL:
+    case TYPE_CHAR:
     case TYPE_STR:
     case TYPE_ADDR:
     case TYPE_ALIAS:
@@ -1191,7 +1237,11 @@ static inline void print_type(FILE* stream, type_t* t) {
     case TYPE_STRUCT:
       fprintf(stream, "struct %s", t->name);
       break;
-    case TYPE_SIGNATURE:
+    case TYPE_ARRAY:
+      print_type(stream, t->as.array.inner);
+      fprintf(stream, "[]");
+      break;
+    case TYPE_FUNC:
       fprintf(stream, "(");
       da_foreach(type_t*, typ, &t->as.func.params) {
         print_type(stream, *typ);
@@ -1244,14 +1294,22 @@ typedef union {
 
 typedef struct {
   instrarr_t code;
-  struct {
+  struct _consts {
     data_t* items;
     size_t count;
     size_t capacity;
   } constants;
+  struct _externs {
+    ffi_cif* items;
+    size_t count;
+    size_t capacity;
+  } externs;
 } program_t;
 
 static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
+  (void)p;
+  (void)scope;
+  (void)e;
   fprintf(stderr, "[FATAL] Unimplemented: compile_expr\n");
   abort();
 }
@@ -1266,19 +1324,11 @@ static inline int compile_stmt(program_t* p, scope_t* scope, ast_stmt_t* s) {
         return 1;
       }
 
-      if (symbol->storage != STO_EXTERN) {
-        fprintf(stderr, "[FATAL] Unimplemented: FFI\n");
-        da_append(&p->code, INST_HOSTCALL);
-        // TODO: add symbol to list of externs in program_t 
-        da_append(&p->code, 0);
-      } else {
-        da_append(&p->code, INST_CALL);
-        da_append(&p->code, symbol->addr);
-      }
-
-      da_foreach(ast_expr_t*, a, &s->as.func->args) {
+      da_foreach(ast_expr_t*, a, &s->as.func->args)
         compile_expr(p, scope, *a);
-      }
+
+      da_append(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
+      da_append(&p->code, symbol->addr);
 
       return 0;
     }
@@ -1292,6 +1342,30 @@ static inline int compile_stmt(program_t* p, scope_t* scope, ast_stmt_t* s) {
   }
 }
 
+static inline ffi_type* type_to_ffi_type(type_t t) {
+  switch(t.kind) {
+    case TYPE_NONE:   return &ffi_type_void;
+    case TYPE_I32:    return &ffi_type_sint32;
+    case TYPE_I64:    return &ffi_type_sint64;
+    case TYPE_U32:    return &ffi_type_uint32;
+    case TYPE_U64:    return &ffi_type_uint64;
+    case TYPE_F32:    return &ffi_type_float;
+    case TYPE_F64:    return &ffi_type_double;
+    case TYPE_CHAR:   return &ffi_type_uchar;
+    case TYPE_BOOL:   return &ffi_type_uint8;
+    case TYPE_STR:    return NULL;
+    case TYPE_ADDR:   return &ffi_type_pointer;
+    case TYPE_ARRAY:  return &ffi_type_pointer;
+    case TYPE_STRUCT: return NULL;
+    case TYPE_ALIAS:  return type_to_ffi_type(*t.as.alias.target);
+    case TYPE_FUNC:   return &ffi_type_pointer; 
+    case TYPES_COUNT:
+    default:
+      fprintf(stderr, "[ERROR]: Invalid type `%s`", t.name);
+      return NULL;
+ }
+}
+
 static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
   symbol_t* symbol = resolve_symbol(d->as.fun.scope, d->name, SYMB_FUNC);
   if (!symbol) {
@@ -1299,23 +1373,44 @@ static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
     return 1;
   }
 
+  ast_sig_t* sig = d->as.fun.sig;
+
   if (d->flags & SPEC_EXTERN) {
-    // TODO: libffi
-    fprintf(stderr, "[FATAL] Unimplemented: FFI\n");
-    abort();
-  }
+    // TODO: add platform layer for malloc
+    ffi_type **param_types = malloc(sizeof(*param_types) * sig->params.count);
+    for(size_t i=0; i < sig->params.count; i++)
+      param_types[i] = type_to_ffi_type(sig->params.items[i]->type->type);
 
-  // patch symbol table
-  symbol->addr = p->code.count;
+    ffi_type* ret = type_to_ffi_type(sig->ret->type);
 
-  // store parameters in local variables
-  for (int i = d->as.fun.sig->params.count; i > 0; i--) {
-    da_append(&p->code, INST_STORE);
-    da_append(&p->code, i);
-  }
+    ffi_cif cif = { 0 };
+    ffi_status status = ffi_prep_cif(
+      &cif,
+      FFI_DEFAULT_ABI,
+      sig->params.count,
+      ret,
+      param_types
+    );
 
-  da_foreach(ast_stmt_t*, stmt, &d->as.fun.body->stmts) {
-    compile_stmt(p, d->as.fun.scope, *stmt);
+    if (status != FFI_OK) {
+      fprintf(stderr, "[ERROR]: Could not initialize FFI CIF\n");
+      return 1;
+    }
+
+    symbol->addr = p->externs.count; 
+    da_append(&p->externs, cif);
+  } else {
+    // patch symbol table
+    symbol->addr = p->code.count;
+
+    // store parameters in local variables
+    for (int i = sig->params.count; i > 0; i--) {
+      da_append(&p->code, INST_STORE);
+      da_append(&p->code, i);
+    }
+
+    da_foreach(ast_stmt_t*, stmt, &d->as.fun.body->stmts)
+      compile_stmt(p, d->as.fun.scope, *stmt);
   }
 
   return 0;

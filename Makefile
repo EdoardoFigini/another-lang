@@ -4,7 +4,7 @@ OBJS = $(patsubst src/%.c, build/%.o, $(SRCS))
 CFLAGS = -Wall -Wextra -Wswitch-enum -ggdb
 
 bin/main: $(OBJS) bin
-	gcc $(CFLAGS) -o $@ $(OBJS)
+	gcc $(CFLAGS) -o $@ $(OBJS) -lffi
 
 build/%.o: src/%.c build
 	gcc $(CFLAGS) -c $< -o $@
