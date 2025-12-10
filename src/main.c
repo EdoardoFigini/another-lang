@@ -10,6 +10,8 @@
 #define ARENA_IMPLEMENTATION
 #include "arena.h"
 
+#include "bytecode.h"
+
 const char* source = 
   "extern puts: (s: str) -> i32;\n"
   "\n"
@@ -1210,6 +1212,47 @@ static inline void print_symbol_table(FILE* stream, scope_t* root) {
     }
     print_type(stream, &s->type);
     fprintf(stream, "\n");
+  }
+}
+
+typedef union {
+  const char* s;
+  struct {
+    lit_type_info_flags_t ti;
+    union {
+      uint64_t u;
+      int64_t i;
+      double r;
+    };
+  } number;
+} data_t;
+
+typedef struct {
+  instrarr_t code;
+  struct {
+    data_t* items;
+    size_t count;
+    size_t capacity;
+  } constants;
+} program_t;
+
+static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
+  
+}
+
+int compile(program_t* p, ast_root_t* root) {
+  da_foreach(ast_decl_t, d, &root->top_level) {
+    switch(d->kind) {
+      case DECL_KIND_FUNC:
+        compile_func_decl(p, d);
+        break;
+      case DECL_KIND_VAR:
+        fprintf(stderr, "[FATAL] Unimplemented: compile_var_decl\n");
+        abort();
+      default:
+        fprintf(stderr, "[FATAL] UNREACHABLE\n");
+        abort();
+    }
   }
 }
 
