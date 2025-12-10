@@ -15,6 +15,7 @@ typedef uint32_t instruction_t; enum {
   INST_STOREG,
 
   INST_CALL,
+  INST_HOSTCALL,
   INST_RET,
 
   INST_COUNT,

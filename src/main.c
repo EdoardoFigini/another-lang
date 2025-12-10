@@ -13,6 +13,7 @@
 #include "bytecode.h"
 
 const char* source = 
+  // NOTE: puts cannot expect str, but a raw pointer to chars (null terminated)
   "extern puts: (s: str) -> i32;\n"
   "\n"
   "export main : () -> i32 {\n"
@@ -520,7 +521,7 @@ typedef struct {
   symb_kind_t kind;
   symb_storage_t storage;
   type_t type;
-  size_t addr;
+  uint32_t addr;
 } symbol_t;
 
 struct _scope {
@@ -535,8 +536,11 @@ struct _scope {
   } symbols;
 };
 
-static inline void make_symbol(scope_t* scope, symb_kind_t kind, symb_storage_t storage, const char* name, type_t type) {
+static inline void print_symbol_table(FILE* stream, scope_t* root);
+
+static inline symbol_t* make_symbol(scope_t* scope, symb_kind_t kind, symb_storage_t storage, const char* name, type_t type) {
   da_append(&scope->symbols, ((symbol_t){ .name = name, .kind = kind, .storage = storage, .type = type }));
+  return &da_last(&scope->symbols);
 }
 
 static inline symbol_t* resolve_symbol_local_any(scope_t* scope, const char* name) { 
@@ -646,6 +650,7 @@ typedef struct {
     struct {
       ast_sig_t* sig;
       ast_body_t* body;
+      scope_t* scope;
     } fun;
     struct {
       ast_type_t* type;
@@ -724,6 +729,7 @@ static inline ast_expr_t* parse_expr(parser_t* p);
 // funcall = '(' [ arg ( ',' arg )* ] ')'
 static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
   symbol_t* s = resolve_symbol(p->current_scope, name, SYMB_FUNC);
+  print_symbol_table(stdout, p->current_scope);
   if(!s) {
     fprintf(stderr, "[ERROR]: %zu:%zu: Undeclared function `%s`.\n", get_tok(p).line, get_tok(p).col, name);
     return NULL;
@@ -968,10 +974,19 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
   n->name = arena_strdup(&p->arena, name);
   n->kind = DECL_KIND_FUNC;
 
+  symb_storage_t sto = STO_SCOPE;
+  if(flags & STO_EXTERN) sto = STO_EXTERN; 
+  if(flags & STO_EXPORT) sto = STO_EXPORT; 
+
+  symbol_t* symbol = make_symbol(p->current_scope, SYMB_FUNC, sto, n->name, (type_t){ 0 });
+
   enter_scope(p, arena_sprintf(&p->arena, "fun_%s", name));
+  n->as.fun.scope = p->current_scope;
 
   n->as.fun.sig = parse_signature(p);
   if(!n->as.fun.sig) return NULL;
+
+  symbol->type = n->as.fun.sig->type;
 
   if (peek(p, ';')) {
     if(!consume(p, ';')) return NULL;
@@ -984,12 +999,6 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
   }
 
   exit_scope(p);
-
-  symb_storage_t sto = STO_SCOPE;
-  if(flags & STO_EXTERN) sto = STO_EXTERN; 
-  if(flags & STO_EXPORT) sto = STO_EXPORT; 
-
-  make_symbol(p->current_scope, SYMB_FUNC, sto, n->name, n->as.fun.sig->type);
 
   return n;
 }
@@ -1195,12 +1204,10 @@ static inline void print_type(FILE* stream, type_t* t) {
   }
 }
 
-static inline void print_symbol_table(FILE* stream, scope_t* root) {
-  if(!root) return;
-  fprintf(stream, "Root symbol Table:\n");
-  fprintf(stream, "%-10s %-10s %-10s %s\n", "name", "scope", "storage", "type");
-  da_foreach(symbol_t, s, &root->symbols) {
-    fprintf(stream, "%-10s %-10s ", s->name, root->name);
+static inline void print_symbol_table_entries(FILE* stream, scope_t* scope) {
+  if(!scope) return;
+  da_foreach(symbol_t, s, &scope->symbols) {
+    fprintf(stream, "%-10s %-10s ", s->name, scope->name);
     switch(s->storage) {
       case STO_SCOPE:
         fprintf(stream, "%-10s ", "scope"); break;
@@ -1213,6 +1220,14 @@ static inline void print_symbol_table(FILE* stream, scope_t* root) {
     print_type(stream, &s->type);
     fprintf(stream, "\n");
   }
+  print_symbol_table_entries(stream, scope->parent);
+}
+
+static inline void print_symbol_table(FILE* stream, scope_t* scope) {
+  if(!scope) return;
+  fprintf(stream, "%s symbol Table:\n", scope->name);
+  fprintf(stream, "%-10s %-10s %-10s %s\n", "name", "scope", "storage", "type");
+  print_symbol_table_entries(stream, scope);
 }
 
 typedef union {
@@ -1236,15 +1251,81 @@ typedef struct {
   } constants;
 } program_t;
 
+static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
+  fprintf(stderr, "[FATAL] Unimplemented: compile_expr\n");
+  abort();
+}
+
+static inline int compile_stmt(program_t* p, scope_t* scope, ast_stmt_t* s) {
+  switch(s->kind) {
+    case STMT_EMPTY: return 0;
+    case STMT_FUNCALL: {
+      symbol_t* symbol = resolve_symbol(scope, s->as.func->name, SYMB_FUNC);
+      if (!symbol) {
+        fprintf(stderr, "[ERROR]: Unresolved symbol `%s`", s->as.func->name);
+        return 1;
+      }
+
+      if (symbol->storage != STO_EXTERN) {
+        fprintf(stderr, "[FATAL] Unimplemented: FFI\n");
+        da_append(&p->code, INST_HOSTCALL);
+        // TODO: add symbol to list of externs in program_t 
+        da_append(&p->code, 0);
+      } else {
+        da_append(&p->code, INST_CALL);
+        da_append(&p->code, symbol->addr);
+      }
+
+      da_foreach(ast_expr_t*, a, &s->as.func->args) {
+        compile_expr(p, scope, *a);
+      }
+
+      return 0;
+    }
+    case STMT_RET: {
+      compile_expr(p, scope, s->as.retval);
+      // TODO: function epilog -> destroy frame, clean stack
+      da_append(&p->code, INST_RET);
+      return 0;
+    }
+    default: return 1;
+  }
+}
+
 static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
-  
+  symbol_t* symbol = resolve_symbol(d->as.fun.scope, d->name, SYMB_FUNC);
+  if (!symbol) {
+    fprintf(stderr, "[ERROR]: Unresolved symbol `%s`", d->name);
+    return 1;
+  }
+
+  if (d->flags & SPEC_EXTERN) {
+    // TODO: libffi
+    fprintf(stderr, "[FATAL] Unimplemented: FFI\n");
+    abort();
+  }
+
+  // patch symbol table
+  symbol->addr = p->code.count;
+
+  // store parameters in local variables
+  for (int i = d->as.fun.sig->params.count; i > 0; i--) {
+    da_append(&p->code, INST_STORE);
+    da_append(&p->code, i);
+  }
+
+  da_foreach(ast_stmt_t*, stmt, &d->as.fun.body->stmts) {
+    compile_stmt(p, d->as.fun.scope, *stmt);
+  }
+
+  return 0;
 }
 
 int compile(program_t* p, ast_root_t* root) {
-  da_foreach(ast_decl_t, d, &root->top_level) {
-    switch(d->kind) {
+  da_foreach(ast_decl_t*, d, &root->top_level) {
+    switch((*d)->kind) {
       case DECL_KIND_FUNC:
-        compile_func_decl(p, d);
+        compile_func_decl(p, *d);
         break;
       case DECL_KIND_VAR:
         fprintf(stderr, "[FATAL] Unimplemented: compile_var_decl\n");
@@ -1254,6 +1335,8 @@ int compile(program_t* p, ast_root_t* root) {
         abort();
     }
   }
+
+  return 0;
 }
 
 int main() {
@@ -1261,6 +1344,8 @@ int main() {
   sb_append(&tok.source, source);
 
   parser_t parser = { 0 };
+
+  program_t program = { 0 };
 
   printf("%s\n\n", source);
 
@@ -1275,7 +1360,9 @@ int main() {
 
   // print_ast(stdout, (ast_node_t*)root, 0);
 
-  print_symbol_table(stdout, root->scope);
+  // print_symbol_table(stdout, root->scope);
+
+  compile(&program, root);
 
   tok_destroy(&tok);
 
