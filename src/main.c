@@ -15,12 +15,18 @@
 
 #include "bytecode.h"
 
+#define UNREACHABLE(fmt, ...) \
+  do { \
+    fprintf(stderr, "[FATAL]: UNREACHABLE:\n%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);\
+    abort();\
+  } while(0);
+
 const char* source = 
   "extern puts: (s: char[]) -> i32;\n"
   "\n"
-  "export main : () -> i32 {\n"
+  "export main : () -> i64 {\n"
   " puts(\"Hello World!\\n\");\n"
-  " return 0;\n"
+  " return 0xFF000000000000CCL;\n"
   "}";
 
 typedef enum {
@@ -255,7 +261,7 @@ static inline int tok_num_literal(tokenizer_t* t, char** end, size_t line, size_
     }
     tok->as.u = integer;
   } else {
-    tok->as.i = integer;
+    tok->as.i = sign * integer;
   }
 
   tok->kind = type_info & TI_REAL ? TOK_REALLIT : TOK_INTLIT;
@@ -706,7 +712,7 @@ typedef enum {
   EXPR_STRING = 0,
   EXPR_NUMBER,
   EXPR_BINOP,
-  EXPR_SUUBEXPR,
+  EXPR_SUBEXPR,
   EXPR_FUNCALL,
 } ast_expr_kind_t;
 
@@ -761,7 +767,6 @@ static inline ast_expr_t* parse_expr(parser_t* p);
 // funcall = '(' [ arg ( ',' arg )* ] ')'
 static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
   symbol_t* s = resolve_symbol(p->current_scope, name, SYMB_FUNC);
-  print_symbol_table(stdout, p->current_scope);
   if(!s) {
     fprintf(stderr, "[ERROR]: %zu:%zu: Undeclared function `%s`.\n", get_tok(p).line, get_tok(p).col, name);
     return NULL;
@@ -1138,7 +1143,7 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
           fprintf(stream, "%*srhs:\n", level + 2, "");
           print_ast(stream, (ast_node_t*)expr->as.binop.rhs, level + 2);
           break;
-        case EXPR_SUUBEXPR:
+        case EXPR_SUBEXPR:
           print_ast(stream, (ast_node_t*)expr->as.subexpr, level + 2);
           break;
         case EXPR_FUNCALL:
@@ -1280,6 +1285,11 @@ static inline void print_symbol_table(FILE* stream, scope_t* scope) {
   print_symbol_table_entries(stream, scope);
 }
 
+typedef enum {
+  DK_STR = 0,
+  DK_NUMBER
+} data_kind_t;
+
 typedef union {
   const char* s;
   struct {
@@ -1293,9 +1303,14 @@ typedef union {
 } data_t;
 
 typedef struct {
+  data_kind_t kind;
+  data_t as;
+} constant_t;
+
+typedef struct {
   instrarr_t code;
   struct _consts {
-    data_t* items;
+    constant_t* items;
     size_t count;
     size_t capacity;
   } constants;
@@ -1306,32 +1321,65 @@ typedef struct {
   } externs;
 } program_t;
 
+static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e);
+
+static inline int compile_funcall(program_t* p, scope_t* scope, ast_funcall_t* f) {
+  symbol_t* symbol = resolve_symbol(scope, f->name, SYMB_FUNC);
+  if (!symbol) {
+    fprintf(stderr, "[ERROR]: Unresolved symbol `%s`", f->name);
+    return 1;
+  }
+
+  da_foreach(ast_expr_t*, a, &f->args)
+    compile_expr(p, scope, *a);
+
+  da_append(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
+  da_append(&p->code, symbol->addr);
+
+  return 0;
+}
+
 static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
-  (void)p;
   (void)scope;
-  (void)e;
-  fprintf(stderr, "[FATAL] Unimplemented: compile_expr\n");
-  abort();
+  
+  switch(e->kind) {
+      case EXPR_STRING:
+        da_append(&p->code, INST_LOADC);
+        da_append(&p->code, p->constants.count);\
+        da_append(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = e->as.s }));
+        break;
+      case EXPR_NUMBER:
+        if(e->as.number.ti & TI_LONG) {
+          da_append(&p->code, INST_PUSHL);
+          da_append(&p->code, e->as.number.u >> 32);
+          da_append(&p->code, e->as.number.u & (uint32_t)-1);
+        } else {
+          da_append(&p->code, INST_PUSH);
+          da_append(&p->code, e->as.number.u & (uint32_t)-1);
+        }
+        break;
+      case EXPR_BINOP:
+        compile_expr(p, scope, e->as.binop.lhs);
+        compile_expr(p, scope, e->as.binop.rhs);
+        fprintf(stderr, "[FATAL] Unimplemented: compile_expr (BINOP)\n");
+        abort();
+        break;
+      case EXPR_SUBEXPR:
+        return compile_expr(p, scope, e->as.subexpr);
+      case EXPR_FUNCALL:
+        return compile_funcall(p, scope, e->as.funcall);
+        break;
+      default:
+        UNREACHABLE("compile_expr");
+  }
+
+  return 0;
 }
 
 static inline int compile_stmt(program_t* p, scope_t* scope, ast_stmt_t* s) {
   switch(s->kind) {
     case STMT_EMPTY: return 0;
-    case STMT_FUNCALL: {
-      symbol_t* symbol = resolve_symbol(scope, s->as.func->name, SYMB_FUNC);
-      if (!symbol) {
-        fprintf(stderr, "[ERROR]: Unresolved symbol `%s`", s->as.func->name);
-        return 1;
-      }
-
-      da_foreach(ast_expr_t*, a, &s->as.func->args)
-        compile_expr(p, scope, *a);
-
-      da_append(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
-      da_append(&p->code, symbol->addr);
-
-      return 0;
-    }
+    case STMT_FUNCALL: return compile_funcall(p, scope, s->as.func);
     case STMT_RET: {
       compile_expr(p, scope, s->as.retval);
       // TODO: function epilog -> destroy frame, clean stack
@@ -1361,7 +1409,7 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
     case TYPE_FUNC:   return &ffi_type_pointer; 
     case TYPES_COUNT:
     default:
-      fprintf(stderr, "[ERROR]: Invalid type `%s`", t.name);
+      fprintf(stderr, "[ERROR]: Invalid type `%s`\n", t.name);
       return NULL;
  }
 }
@@ -1369,7 +1417,7 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
 static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
   symbol_t* symbol = resolve_symbol(d->as.fun.scope, d->name, SYMB_FUNC);
   if (!symbol) {
-    fprintf(stderr, "[ERROR]: Unresolved symbol `%s`", d->name);
+    fprintf(stderr, "[ERROR]: Unresolved symbol `%s`\n", d->name);
     return 1;
   }
 
@@ -1416,7 +1464,7 @@ static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
   return 0;
 }
 
-int compile(program_t* p, ast_root_t* root) {
+static inline int compile(program_t* p, ast_root_t* root) {
   da_foreach(ast_decl_t*, d, &root->top_level) {
     switch((*d)->kind) {
       case DECL_KIND_FUNC:
@@ -1426,12 +1474,119 @@ int compile(program_t* p, ast_root_t* root) {
         fprintf(stderr, "[FATAL] Unimplemented: compile_var_decl\n");
         abort();
       default:
-        fprintf(stderr, "[FATAL] UNREACHABLE\n");
-        abort();
+        UNREACHABLE("compile");
     }
   }
 
   return 0;
+}
+
+static inline void print_data(FILE* stream, constant_t c) {
+  switch(c.kind) {
+    case DK_NUMBER:
+      if (c.as.number.ti & TI_LONG) {
+        if (c.as.number.ti & TI_REAL) {
+          fprintf(stream, "%lf", c.as.number.r);
+        } else if (c.as.number.ti & TI_UNSIGNED) {
+          fprintf(stream, "%lu", c.as.number.u);
+        } else {
+          fprintf(stream, "%ld", c.as.number.i);
+        }
+      } else {
+        if (c.as.number.ti & TI_REAL) {
+          fprintf(stream, "%f", (float)c.as.number.r);
+        } else if (c.as.number.ti & TI_UNSIGNED) {
+          fprintf(stream, "%u", (uint32_t)c.as.number.u);
+        } else {
+          fprintf(stream, "%d", (int32_t)c.as.number.i);
+        }
+      }
+      break;
+    case DK_STR:
+      char* cursor = (char*)c.as.s;
+      fprintf(stream, "\"");
+      while(*cursor) {
+        switch(*cursor) {
+          case '\a': fprintf(stream, "\\a"); break;
+          case '\b': fprintf(stream, "\\b"); break;
+          case '\f': fprintf(stream, "\\f"); break;
+          case '\n': fprintf(stream, "\\n"); break;
+          case '\t': fprintf(stream, "\\t"); break;
+          case '\r': fprintf(stream, "\\r"); break;
+          case '\v': fprintf(stream, "\\v"); break;
+          default:
+            fprintf(stream, "%c", *cursor);
+            break;
+        }
+        cursor++;
+      }
+      fprintf(stream, "\"");
+      break;
+    default:
+      UNREACHABLE("print_data");
+  }
+}
+
+static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
+  for (size_t i = 0; i < p->code.count; i++) {
+    da_foreach(symbol_t, s, &root->symbols) {
+      if(i == s->addr && s->kind == SYMB_FUNC && s->storage != STO_EXTERN)
+        fprintf(stream, "function <%s>:\n", s->name);
+    }
+    switch(p->code.items[i]) {
+      case INST_NOP:
+        fprintf(stream, "  %-10s\n", "NOP"); break;
+      case INST_PUSH:
+        fprintf(stream, "  %-10s 0x%08X\n", "PUSH", p->code.items[++i]); break;
+      case INST_PUSHL:
+        fprintf(stream, "  %-10s 0x%016lX\n", "PUSHL", ((uint64_t)p->code.items[++i] << 32) | p->code.items[++i]); break;
+      case INST_POP:
+        fprintf(stream, "  %-10s\n", "POP"); break;
+      case INST_LOAD:
+        fprintf(stream, "  %-10s 0x%08X\n", "LOAD", p->code.items[++i]); break;
+      case INST_LOADG:
+        fprintf(stream, "  %-10s 0x%08X\n", "LOADG", p->code.items[++i]); break;
+      case INST_LOADC: {
+        uint32_t op = p->code.items[++i];
+        fprintf(stream, "  %-10s 0x%08X        ", "LOADC", op);
+        fprintf(stream, "    ->    ");
+        print_data(stream, p->constants.items[op]);
+        fprintf(stream, "\n");
+        break;
+      }
+      case INST_STORE:
+        fprintf(stream, "  %-10s 0x%08X\n", "STORE", p->code.items[++i]); break;
+      case INST_STOREG:
+        fprintf(stream, "  %-10s 0x%08X\n", "STOREG", p->code.items[++i]); break;
+      case INST_CALL: {
+        uint32_t op = p->code.items[++i];
+        fprintf(stream, "  %-10s 0x%08X        ", "CALL", op);
+        da_foreach(symbol_t, s, &root->symbols) {
+          if(op == s->addr && s->kind == SYMB_FUNC && s->storage != STO_EXTERN) {
+            fprintf(stream, "    ->    ");
+            fprintf(stream, "<%s>\n", s->name);
+          }
+        }
+        break;
+      }
+      case INST_HOSTCALL: {
+        uint32_t op = p->code.items[++i];
+        fprintf(stream, "  %-10s 0x%08X        ", "HOSTCALL", op);
+        da_foreach(symbol_t, s, &root->symbols) {
+          if(op == s->addr && s->kind == SYMB_FUNC && s->storage == STO_EXTERN) {
+            fprintf(stream, "    ->    ");
+            fprintf(stream, "<extern::%s>\n", s->name);
+          }
+        }
+        break;
+      }
+      case INST_RET:
+        fprintf(stream, "  %-10s\n", "RET"); break;
+      case INST_COUNT:
+      default:
+        UNREACHABLE("print_disass");
+    }
+  }
 }
 
 int main() {
@@ -1458,6 +1613,8 @@ int main() {
   // print_symbol_table(stdout, root->scope);
 
   compile(&program, root);
+
+  print_disass(stdout, &program, root->scope);
 
   tok_destroy(&tok);
 

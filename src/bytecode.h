@@ -7,10 +7,12 @@ typedef uint32_t instruction_t; enum {
   INST_NOP = 0,
 
   INST_PUSH,
+  INST_PUSHL, // long
   INST_POP,
 
   INST_LOAD,
   INST_LOADG,
+  INST_LOADC,
   INST_STORE,
   INST_STOREG,
 
