@@ -27,7 +27,7 @@ const char* source =
   "export main : () -> i64 {\n"
   " puts(\"Hello World!\\n\");\n"
   " return 0xFF000000000000CCL;\n"
-  "}";
+  "}\n";
 
 typedef enum {
   TOK_EOF = 256,
@@ -446,6 +446,45 @@ typedef struct _type {
     } alias; 
   } as;
 } type_t;
+
+static inline void print_type(FILE* stream, type_t *type);
+
+static inline int type_equals(type_t a, type_t b) {
+  while (a.kind == TYPE_ALIAS) a = *a.as.alias.target;
+  while (b.kind == TYPE_ALIAS) b = *a.as.alias.target;
+
+  if (a.kind != b.kind) return 0;
+
+  switch(a.kind) {
+    case TYPE_NONE:
+    case TYPE_I32:
+    case TYPE_I64:
+    case TYPE_U32:
+    case TYPE_U64:
+    case TYPE_F32:
+    case TYPE_F64:
+    case TYPE_BOOL:
+    case TYPE_CHAR:
+    case TYPE_STR:
+    case TYPE_ARRAY:
+    case TYPE_ADDR:
+      return 1;
+    case TYPE_STRUCT:
+      // TODO: compare fields
+      return 1;
+    case TYPE_FUNC:
+      if (!type_equals(*a.as.func.ret, *b.as.func.ret)) return 0;
+      if (a.as.func.params.count != b.as.func.params.count) return 0;
+      for (size_t i=0; i < a.as.func.params.count; i++) {
+        if (!type_equals(*a.as.func.params.items[i], *b.as.func.params.items[i])) return 0;
+      }
+      return 1;
+    case TYPE_ALIAS:
+    case TYPES_COUNT:
+    default:
+      UNREACHABLE("type_equals");
+  }
+}
 
 typedef struct _scope scope_t;
 
@@ -1033,6 +1072,14 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
   n->as.fun.sig = parse_signature(p);
   if(!n->as.fun.sig) return NULL;
 
+  symbol_t *s = resolve_symbol(p->current_scope, name, SYMB_FUNC);
+  if(s && s != symbol && type_equals(n->as.fun.sig->type,  s->type)) {
+    fprintf(stderr, "[ERROR]: %zu:%zu: Function `%s : ", get_tok(p).line, get_tok(p).col, name);
+    print_type(stderr, &s->type);
+    fprintf(stderr, "` already declared in this scope.\n");
+    return NULL;
+  }
+
   symbol->type = n->as.fun.sig->type;
 
   if (peek(p, ';')) {
@@ -1060,11 +1107,6 @@ static inline ast_decl_t* parse_top_level_declaration(parser_t* p) {
   if(!consume(p, ':')) return NULL;
   next(p);
 
-  if(resolve_symbol_local_any(p->current_scope, name)) {
-    fprintf(stderr, "[ERROR]: %zu:%zu: Symbol `%s` already declared in this scope.\n", get_tok(p).line, get_tok(p).col, name);
-    return NULL;
-  }
-  
   if(peek(p, '(')) return parse_func_decl(p, name, flags);
   else             return NULL;
 }
@@ -1079,6 +1121,9 @@ typedef struct {
   scope_t* scope;
 } ast_root_t;
 
+// TODO: 2-step compiler: first parse only declarations to build a symbol table,
+// then parse the statements with the already filled symbols, having only to 
+// patch the addresses after code generation
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->tokens = t->tokens;
   p->current = 0;
@@ -1272,6 +1317,7 @@ static inline void print_symbol_table_entries(FILE* stream, scope_t* scope) {
         fprintf(stream, "%-10s ", "export"); break;
       default: break;
     }
+    fprintf(stream, "0x%08X ", s->addr);
     print_type(stream, &s->type);
     fprintf(stream, "\n");
   }
@@ -1281,7 +1327,7 @@ static inline void print_symbol_table_entries(FILE* stream, scope_t* scope) {
 static inline void print_symbol_table(FILE* stream, scope_t* scope) {
   if(!scope) return;
   fprintf(stream, "%s symbol Table:\n", scope->name);
-  fprintf(stream, "%-10s %-10s %-10s %s\n", "name", "scope", "storage", "type");
+  fprintf(stream, "%-10s %-10s %-10s %-10s %s\n", "name", "scope", "storage", "addr", "type");
   print_symbol_table_entries(stream, scope);
 }
 
@@ -1533,6 +1579,7 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
       if(i == s->addr && s->kind == SYMB_FUNC && s->storage != STO_EXTERN)
         fprintf(stream, "function <%s>:\n", s->name);
     }
+    fprintf(stream, "  0x%08lX", i);
     switch(p->code.items[i]) {
       case INST_NOP:
         fprintf(stream, "  %-10s\n", "NOP"); break;
