@@ -26,13 +26,14 @@ const char* source =
   "\n"
   "export main : () -> i64 {\n"
   " puts(\"Hello World!\\n\");\n"
-  " return 0xFF000000000000CCL;\n"
+  " return 1 + 2 / 3 - 4 * ( 5 + 6 * 7 ) / 9;\n"
   "}\n";
 
 typedef enum {
   TOK_EOF = 256,
   TOK_IDENT,
   TOK_ARROW,
+  TOK_COLCOL,
   TOK_INTLIT,
   TOK_REALLIT,
   TOK_STRLIT,
@@ -94,6 +95,7 @@ void tok_print(token_t tok) {
       case TOK_EOF: printf("%-20s", "TOK_EOF"); break;
       case TOK_IDENT: printf("%-20s", "TOK_IDENT"); break;
       case TOK_ARROW: printf("%-20s", "TOK_ARROW"); break;
+      case TOK_COLCOL: printf("%-20s", "TOK_COLCOL"); break;
       case TOK_INTLIT: printf("%-20s", "TOK_INTLIT"); break;
       case TOK_REALLIT: printf("%-20s", "TOK_REALLIT"); break;
       case TOK_STRLIT: printf("%-20s", "TOK_STRLIT"); break;
@@ -113,6 +115,7 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_EOF: return "EOF";
       case TOK_IDENT: return "identifier";
       case TOK_ARROW: return "->";
+      case TOK_COLCOL: return "::";
       case TOK_INTLIT: return "integer literal";
       case TOK_REALLIT: return "real literal";
       case TOK_STRLIT: return "string literal";
@@ -295,8 +298,18 @@ static inline int tok_tokenize(tokenizer_t* t) {
       case '}':
       case ',':
       case ';':
-      case ':':
+      case '+':
+      case '*':
+      case '/':
         tok = (token_t){ .kind = *p, .start = p, .len = 1 }; 
+        break;
+      case ':':
+        switch(*(p + 1)) {
+          case ':': tok = (token_t){ .kind = TOK_COLCOL, .start = p, .len = 2 }; break;
+          default: 
+            tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+            break;
+        }
         break;
       case '.':
         if (isdigit(*(p + 1))) { 
@@ -751,9 +764,41 @@ typedef enum {
   EXPR_STRING = 0,
   EXPR_NUMBER,
   EXPR_BINOP,
+  EXPR_UNOP,
   EXPR_SUBEXPR,
-  EXPR_FUNCALL,
 } ast_expr_kind_t;
+
+typedef enum {
+  OP_INVALID = TOK_EOF,
+  OP_PLUS    = '+',
+  OP_MINUS   = '-',
+  OP_MULT    = '*',
+  OP_DIV     = '/',
+  OP_REM     = '%',
+  OP_CALL    = '(',
+  OP_MEMB    = '.',
+  OP_SCOPE   = TOK_COLCOL,
+} op_kind_t;
+
+enum _bp {
+  BP_NONE = 0,
+  BP_ADD,
+  BP_MULT,
+  BP_CALL,
+  BP_ACCESS,
+};
+
+const enum _bp expr_bp_table[] = {
+  [OP_INVALID] = BP_NONE,
+  [OP_PLUS]    = BP_ADD,
+  [OP_MINUS]   = BP_ADD, 
+  [OP_MULT]    = BP_MULT,
+  [OP_DIV]     = BP_MULT,
+  [OP_REM]     = BP_MULT,
+  [OP_CALL]    = BP_CALL,
+  [OP_MEMB]    = BP_ACCESS,
+  [OP_SCOPE]   = BP_ACCESS,
+};
 
 struct _ast_expr_t {
   AST_DEFAULT_FIELDS;
@@ -771,9 +816,14 @@ struct _ast_expr_t {
     struct {
       ast_expr_t* lhs;
       ast_expr_t* rhs;
+      op_kind_t op;
     } binop;
+    struct {
+      ast_expr_t* operand;
+      op_kind_t op;
+    } unop;
     ast_expr_t* subexpr;
-    ast_funcall_t* funcall;
+    // ast_funcall_t* funcall;
   } as;
 };
 
@@ -801,7 +851,7 @@ struct _ast_body_t {
   } stmts;
 };
 
-static inline ast_expr_t* parse_expr(parser_t* p);
+static inline ast_expr_t* parse_expr(parser_t* p, int bp);
 
 // funcall = '(' [ arg ( ',' arg )* ] ')'
 static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
@@ -820,7 +870,7 @@ static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
   n->name = arena_strdup(&p->arena, name);
 
   if (!peek(p, ')')) {
-    ast_expr_t* arg = parse_expr(p);
+    ast_expr_t* arg = parse_expr(p, 0);
     if(!arg) return NULL;
     da_append(&n->args, arg);
 
@@ -828,7 +878,7 @@ static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
       if(!consume(p, ',')) return NULL;
       next(p);
 
-      arg = parse_expr(p);
+      arg = parse_expr(p, 0);
       if(!arg) return NULL;
       da_append(&n->args, arg);
     }
@@ -839,8 +889,7 @@ static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
   return n;
 }
 
-// TODO: implement pratt parsing
-static inline ast_expr_t* parse_expr(parser_t* p) {
+static inline ast_expr_t* parse_primary_expr(parser_t* p) {
   ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_EXPR;
 
@@ -874,10 +923,12 @@ static inline ast_expr_t* parse_expr(parser_t* p) {
 
     next(p);
   } else if (peek(p, '(')) {
+    n->kind = EXPR_SUBEXPR;
+
     if(!consume(p, '(')) return NULL;
     next(p);
 
-    ast_expr_t* subexpr = parse_expr(p);
+    ast_expr_t* subexpr = parse_expr(p, 0);
     if(!subexpr) return NULL;
     n->as.subexpr = subexpr;
 
@@ -886,6 +937,40 @@ static inline ast_expr_t* parse_expr(parser_t* p) {
   }
 
   return n;
+}
+
+static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
+  ast_expr_t* lhs = parse_primary_expr(p);
+  if(!lhs) return NULL;
+
+  for(;;) {
+    op_kind_t op = OP_INVALID;
+    if (peek(p, '+'))      op = OP_PLUS;
+    else if (peek(p, '-')) op = OP_MINUS;
+    else if (peek(p, '*')) op = OP_MULT;
+    else if (peek(p, '/')) op = OP_DIV;
+    else return lhs; 
+
+    int curr_bp = expr_bp_table[op];
+    if (curr_bp < bp)
+      return lhs;
+
+    // NOTE: enum contains tokens
+    if(!consume(p, (tok_kind_t)op)) return NULL;
+    next(p);
+
+    ast_expr_t* rhs = parse_expr(p, curr_bp + 1);
+    if(!rhs) return NULL;
+
+    ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
+    n->ast_kind = AST_EXPR;
+    n->kind = EXPR_BINOP;
+    n->as.binop.lhs = lhs;
+    n->as.binop.rhs = rhs;
+    n->as.binop.op = op;
+
+    lhs = n;
+  }
 }
 
 // stmt = return [ expr ] ';' 
@@ -907,7 +992,7 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     n->kind = STMT_RET;
 
     if (!peek(p, ';')) {
-      ast_expr_t* retval = parse_expr(p);
+      ast_expr_t* retval = parse_expr(p, 0);
       if(!retval) return NULL;
       n->as.retval = retval;
     }
@@ -1168,12 +1253,14 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
       break;
     case AST_EXPR:
       ast_expr_t* expr = (ast_expr_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_EXPR");
+      fprintf(stream, "%*s%s", level, "", "AST_EXPR");
       switch(expr->kind) {
         case EXPR_STRING:
+          fprintf(stream, " (%s)\n", "EXPR_STRING");
           fprintf(stream, "%*s%s\n", level + 2, "", expr->as.s);
           break;
         case EXPR_NUMBER:
+          fprintf(stream, " (%s)\n", "EXPR_NUMBER");
           if (expr->as.number.ti & TI_REAL) {
             fprintf(stream, "%*s%lf\n", level + 2, "", expr->as.number.r);
           } else if (expr->as.number.ti & TI_UNSIGNED) {
@@ -1183,16 +1270,20 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
           }
           break;
         case EXPR_BINOP:
+          fprintf(stream, " (%s)\n", "EXPR_BINOP");
+          fprintf(stream, "%*sop: %c\n", level + 2, "", expr->as.binop.op);
           fprintf(stream, "%*slhs:\n", level + 2, "");
           print_ast(stream, (ast_node_t*)expr->as.binop.lhs, level + 2);
           fprintf(stream, "%*srhs:\n", level + 2, "");
           print_ast(stream, (ast_node_t*)expr->as.binop.rhs, level + 2);
           break;
-        case EXPR_SUBEXPR:
-          print_ast(stream, (ast_node_t*)expr->as.subexpr, level + 2);
+        case EXPR_UNOP:
+          fprintf(stream, " (%s)\n", "EXPR_UNOP");
+          fprintf(stderr, "[FATAL]: Unimplemented: print_ast (EXPR_UNOP)\n");
           break;
-        case EXPR_FUNCALL:
-          print_ast(stream, (ast_node_t*)expr->as.funcall, level + 2);
+        case EXPR_SUBEXPR:
+          fprintf(stream, " (%s)\n", "EXPR_SUBEXPR");
+          print_ast(stream, (ast_node_t*)expr->as.subexpr, level + 2);
           break;
         default: break;
       }
@@ -1410,11 +1501,12 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         fprintf(stderr, "[FATAL] Unimplemented: compile_expr (BINOP)\n");
         abort();
         break;
+      case EXPR_UNOP:
+        fprintf(stderr, "[FATAL] Unimplemented: compile_expr (BINOP)\n");
+        abort();
+        break;
       case EXPR_SUBEXPR:
         return compile_expr(p, scope, e->as.subexpr);
-      case EXPR_FUNCALL:
-        return compile_funcall(p, scope, e->as.funcall);
-        break;
       default:
         UNREACHABLE("compile_expr");
   }
@@ -1655,7 +1747,7 @@ int main() {
   ast_root_t* root = parse(&parser, &tok);
   if(!root) return 1;
 
-  // print_ast(stdout, (ast_node_t*)root, 0);
+  print_ast(stdout, (ast_node_t*)root, 0);
 
   // print_symbol_table(stdout, root->scope);
 
