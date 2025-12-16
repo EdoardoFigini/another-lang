@@ -26,8 +26,9 @@ const char* source =
   "\n"
   "export main : () -> i64 {\n"
   " puts(\"Hello World!\\n\");\n"
-  " return 1 + 2 / 3 - 4 * ( 5 + 6 * 7 ) / 9;\n"
-  "}\n";
+  " return 1 + 2 / 3 - 4 * ( 5l + 6 * 7 ) / 9L;\n"
+  "}\n"
+  ;
 
 typedef enum {
   TOK_EOF = 256,
@@ -501,6 +502,11 @@ static inline int type_equals(type_t a, type_t b) {
 
 typedef struct _scope scope_t;
 
+typedef enum {
+  PASS_DECL,
+  PASS_STMTS,
+} pass_t;
+
 typedef struct {
   arena_t arena;
   tokenarr_t tokens;
@@ -511,6 +517,7 @@ typedef struct {
     size_t count;
     size_t capacity;
   } types;
+  pass_t pass;
 } parser_t;
 
 static inline type_t* get_or_create_array_of(parser_t* p, type_t* type) {
@@ -546,6 +553,8 @@ typedef enum {
   AST_STMT,
   AST_VAR_DECL,
   AST_FUNC_DECL,
+  AST_FUNC_DEF,
+  AST_VAR_DEF,
   AST_FUNCALL,
   AST_TYPE,
   AST_BODY,
@@ -663,12 +672,16 @@ static inline symbol_t* resolve_symbol(scope_t* scope, const char* name, symb_ki
   return resolve_symbol(scope->parent, name, kind);
 }
 
-static inline void enter_scope(parser_t* p, const char* name) {
+static inline void enter_scope_new(parser_t* p, const char* name) {
   scope_t* parent = p->current_scope;
   p->current_scope = arena_alloc(&p->arena, sizeof(scope_t));
   p->current_scope->name = name;
   p->current_scope->parent = parent;
   // fprintf(stderr, "[DEBUG] New scope %s, son of %s.\n", name, p->current_scope->parent ? p->current_scope->parent->name : "noone");
+}
+
+static inline void enter_scope(parser_t* p, scope_t* s) {
+  p->current_scope = s;
 }
 
 static inline void exit_scope(parser_t* p) {
@@ -703,9 +716,9 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
 }
 
 typedef enum {
-  DECL_KIND_VAR,
-  DECL_KIND_FUNC,
-} ast_decl_kind;
+  DEF_KIND_VAR,
+  DEF_KIND_FUNC,
+} ast_def_kind;
 
 typedef struct {
   AST_DEFAULT_FIELDS;
@@ -735,17 +748,23 @@ typedef struct {
   AST_DEFAULT_FIELDS;
   const char* name;
   spec_flags_t flags;
-  ast_decl_kind kind; 
+  ast_def_kind kind; 
   union {
     struct {
       ast_sig_t* sig;
-      ast_body_t* body;
+      int has_body;
       scope_t* scope;
     } fun;
     struct {
       ast_type_t* type;
     } var;
   } as;
+} ast_def_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  ast_def_t* def;
+  ast_body_t* body;
 } ast_decl_t;
 
 typedef struct _ast_expr_t ast_expr_t;
@@ -1066,6 +1085,7 @@ static inline ast_type_t* parse_type(parser_t* p) {
   return n;
 }
 
+// TODO: convert param to variable definition
 // param = ident ':' ident
 static inline ast_param_t* parse_param(parser_t* p) {
   ast_param_t* n = arena_alloc(&p->arena, sizeof(*n));
@@ -1136,14 +1156,35 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
   return n;
 }
 
-// TODO: distinguish between func definitions and declarations
-// func_decl = sig ( ';' | body )
-static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_flags_t flags) {
+// func_decl = func_def body
+static inline ast_decl_t* parse_func_decl(parser_t* p, ast_def_t* def) {
+  // NOTE: skip until '{', assume definition has been correctly parsed by
+  // parse_func_def in previous pass
+  while(!peek(p, '{')) next(p);
+
   ast_decl_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_FUNC_DECL;
+  n->def = def;
+
+  enter_scope(p, n->def->as.fun.scope);
+
+  ast_body_t* body = parse_body(p);
+  if(!body) return NULL;
+
+  n->body = body;
+
+  exit_scope(p);
+
+  return n;
+}
+
+// func_def = sig ( ';' | '{' )
+static inline ast_def_t* parse_func_def(parser_t* p, const char* name, spec_flags_t flags) {
+  ast_def_t *n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_FUNC_DEF;
   n->flags = flags;
   n->name = arena_strdup(&p->arena, name);
-  n->kind = DECL_KIND_FUNC;
+  n->kind = DEF_KIND_FUNC;
 
   symb_storage_t sto = STO_SCOPE;
   if(flags & STO_EXTERN) sto = STO_EXTERN; 
@@ -1151,7 +1192,7 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
 
   symbol_t* symbol = make_symbol(p->current_scope, SYMB_FUNC, sto, n->name, (type_t){ 0 });
 
-  enter_scope(p, arena_sprintf(&p->arena, "fun_%s", name));
+  enter_scope_new(p, arena_sprintf(&p->arena, "fun_%s", name));
   n->as.fun.scope = p->current_scope;
 
   n->as.fun.sig = parse_signature(p);
@@ -1171,10 +1212,14 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
     if(!consume(p, ';')) return NULL;
     next(p);
   } else {
-    ast_body_t* body = parse_body(p);
-    if(!body) return NULL;
-
-    n->as.fun.body = body;
+    if(!consume(p, '{')) return NULL;
+    next(p);
+    n->as.fun.has_body = 1;
+    // NOTE: delay body parsing to parse_func_decl
+    for (int pars = 1; pars && !peek(p, TOK_EOF); next(p)) {
+      if      (peek(p,'{')) pars++;
+      else if (peek(p,'}')) pars--;
+    }
   }
 
   exit_scope(p);
@@ -1182,22 +1227,13 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
   return n;
 }
 
-// tl_decl = specifiers ident ':' ( func_decl | var_decl )
-static inline ast_decl_t* parse_top_level_declaration(parser_t* p) {
-  spec_flags_t flags = parse_specifiers(p);
-  
-  if(!consume(p, TOK_IDENT)) return NULL;
-  const char* name = get_tok(p).as.s; 
-  next(p);
-  if(!consume(p, ':')) return NULL;
-  next(p);
-
-  if(peek(p, '(')) return parse_func_decl(p, name, flags);
-  else             return NULL;
-}
-
 typedef struct {
   AST_DEFAULT_FIELDS;
+  struct {
+    ast_def_t** items;
+    size_t count;
+    size_t capacity;
+  } defs;
   struct {
     ast_decl_t** items;
     size_t count;
@@ -1212,6 +1248,7 @@ typedef struct {
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->tokens = t->tokens;
   p->current = 0;
+  p->pass = PASS_DECL;
 
   // init types
   da_append(&p->types, ((type_t){ .kind = TYPE_NONE,  .name = "none", .size = 0 }));
@@ -1226,15 +1263,42 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   da_append(&p->types, ((type_t){ .kind = TYPE_STR,   .name = "str",  .size = 1 }));
   da_append(&p->types, ((type_t){ .kind = TYPE_ADDR,  .name = "addr", .size = 1 }));
 
-  enter_scope(p, "root");
+  enter_scope_new(p, "root");
 
   ast_root_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_ROOT;
   n->scope = p->current_scope;
 
   while(!peek(p, TOK_EOF)) {
-    ast_decl_t* decl = parse_top_level_declaration(p);
-    if (!decl) return NULL;
+    spec_flags_t flags = parse_specifiers(p);
+    
+    if(!consume(p, TOK_IDENT)) return NULL;
+    const char* name = get_tok(p).as.s; 
+    next(p);
+    if(!consume(p, ':')) return NULL;
+    next(p);
+
+    if(peek(p, '(')) {
+      ast_def_t* def = parse_func_def(p, name, flags);
+      if (!def) return NULL;
+
+      da_append(&n->defs, def);
+    } else {
+      // TODO: variables 
+      fprintf(stderr, "[FATAL]: Unimplemented: variable definitions\n");
+      abort();
+    }
+  }
+
+  p->current = 0;
+  p->pass++;
+
+  da_foreach(ast_def_t*, def, &n->defs) {
+    if ((*def)->kind != DEF_KIND_FUNC) continue;
+    if (!(*def)->as.fun.has_body) continue;
+
+    ast_decl_t* decl = parse_func_decl(p, *def);
+    if(!decl) return NULL;
 
     da_append(&n->top_level, decl);
   }
@@ -1305,17 +1369,24 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
     case AST_VAR_DECL:
       fprintf(stream, "%*s%s\n", level, "", "AST_VAR_DECL");
       break;
+    case AST_VAR_DEF:
+      fprintf(stream, "%*s%s\n", level, "", "AST_VAR_DEF");
+      break;
+    case AST_FUNC_DEF:
+      ast_def_t* def = (ast_def_t*)n;
+      fprintf(stream, "%*s%s\n", level, "", "AST_FUNC_DECL");
+      fprintf(stream, "%*sName: %s\n", level + 2, "", def->name);
+      fprintf(stream, "%*sFlags: ", level + 2, "");
+      if(def->flags & SPEC_EXTERN) fprintf(stream, "extern ");
+      if(def->flags & SPEC_EXPORT) fprintf(stream, "export ");
+      fprintf(stream, "\n");
+      print_ast(stream, (ast_node_t*)def->as.fun.sig, level + 2);
+      break;
     case AST_FUNC_DECL:
       ast_decl_t* decl = (ast_decl_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_FUNC_DECL");
-      fprintf(stream, "%*sName: %s\n", level + 2, "", decl->name);
-      fprintf(stream, "%*sFlags: ", level + 2, "");
-      if(decl->flags & SPEC_EXTERN) fprintf(stream, "extern ");
-      if(decl->flags & SPEC_EXPORT) fprintf(stream, "export ");
-      fprintf(stream, "\n");
-      print_ast(stream, (ast_node_t*)decl->as.fun.sig, level + 2);
-      if(decl->as.fun.body)
-        print_ast(stream, (ast_node_t*)decl->as.fun.body, level + 2);
+      print_ast(stream, (ast_node_t*)decl->def, level + 2);
+      if(decl->body)
+        print_ast(stream, (ast_node_t*)decl->body, level + 2);
       break;
     case AST_FUNCALL:
       ast_funcall_t* fun = (ast_funcall_t*)n;
@@ -1502,7 +1573,7 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         abort();
         break;
       case EXPR_UNOP:
-        fprintf(stderr, "[FATAL] Unimplemented: compile_expr (BINOP)\n");
+        fprintf(stderr, "[FATAL] Unimplemented: compile_expr (UNOP)\n");
         abort();
         break;
       case EXPR_SUBEXPR:
@@ -1552,7 +1623,7 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
  }
 }
 
-static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
+static inline int compile_func_def(program_t* p, ast_def_t* d) {
   symbol_t* symbol = resolve_symbol(d->as.fun.scope, d->name, SYMB_FUNC);
   if (!symbol) {
     fprintf(stderr, "[ERROR]: Unresolved symbol `%s`\n", d->name);
@@ -1595,20 +1666,37 @@ static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
       da_append(&p->code, i);
     }
 
-    da_foreach(ast_stmt_t*, stmt, &d->as.fun.body->stmts)
-      compile_stmt(p, d->as.fun.scope, *stmt);
   }
 
   return 0;
 }
 
+static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
+  da_foreach(ast_stmt_t*, stmt, &d->body->stmts)
+    if(compile_stmt(p, d->def->as.fun.scope, *stmt)) return 1;
+
+  return 0;
+}
+
 static inline int compile(program_t* p, ast_root_t* root) {
-  da_foreach(ast_decl_t*, d, &root->top_level) {
+  da_foreach(ast_def_t*, d, &root->defs) {
     switch((*d)->kind) {
-      case DECL_KIND_FUNC:
-        compile_func_decl(p, *d);
+      case DEF_KIND_FUNC:
+        if(compile_func_def(p, *d)) return 1;
         break;
-      case DECL_KIND_VAR:
+      case DEF_KIND_VAR:
+        fprintf(stderr, "[FATAL] Unimplemented: compile_var_def\n");
+        abort();
+      default:
+        UNREACHABLE("compile");
+    }
+  }
+  da_foreach(ast_decl_t*, d, &root->top_level) {
+    switch((*d)->def->kind) {
+      case DEF_KIND_FUNC:
+        if(compile_func_decl(p, *d)) return 1;
+        break;
+      case DEF_KIND_VAR:
         fprintf(stderr, "[FATAL] Unimplemented: compile_var_decl\n");
         abort();
       default:
