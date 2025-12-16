@@ -17,8 +17,31 @@
 
 #define UNREACHABLE(fmt, ...) \
   do { \
-    fprintf(stderr, "[FATAL]: UNREACHABLE:\n%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);\
+    fprintf(stderr, "[FATAL]: UNREACHABLE\n  %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);\
     abort();\
+  } while(0);
+
+#define TODO(fmt, ...) \
+  do { \
+    fprintf(stderr, "[FATAL]: UNIMPLEMENTED\n  %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);\
+    abort();\
+  } while(0);
+
+#define DIAGF(p, lvl, fmt, ...) \
+  do { \
+    char* line_start = (char*)(p)->tokens.items[(p)->current].start; \
+    char* line_end   = (char*)(p)->tokens.items[(p)->current].start; \
+    while(line_start != (p)->source.items && *(line_start-1) != '\n') line_start--; \
+    while(line_end   != &da_last(&(p)->source) && *line_end != '\n')  line_end++;   \
+    int line_len = line_end - line_start;\
+    fprintf( \
+        stderr, \
+        "[" #lvl "]\n  %zu:%zu: " fmt "\n    %.*s\n    %*s^\n\n", \
+        (p)->line, (p)->col, \
+        ## __VA_ARGS__, \
+        line_len, line_start, \
+        (int)(p)->col-1, "" \
+    );\
   } while(0);
 
 const char* source = 
@@ -508,6 +531,10 @@ typedef enum {
 } pass_t;
 
 typedef struct {
+  sb_t source;
+  size_t line;
+  size_t col;
+
   arena_t arena;
   tokenarr_t tokens;
   size_t current;
@@ -590,7 +617,8 @@ static inline int peek(parser_t* p, tok_kind_t kind) {
 static inline int consume_with_name(parser_t* p, tok_kind_t kind, const char* exp_name) {
   token_t t = get_tok(p);
   if (t.kind != kind) {
-    fprintf(stderr, "[ERROR]: %zu:%zu: Expected %s, found %s\n", t.line, t.col, exp_name, tok_kind_str(&p->arena, t.kind));
+    DIAGF(p, ERROR, "Expected %s, found %s", exp_name, tok_kind_str(&p->arena, t.kind));
+    abort();
     return 0;
   }
   return 1;
@@ -602,6 +630,8 @@ static inline int consume(parser_t* p, tok_kind_t kind) {
 
 static inline void next(parser_t* p) {
   p->current++;
+  p->line = get_tok(p).line;
+  p->col = get_tok(p).col;
 }
 
 typedef enum {
@@ -705,7 +735,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
     }
 
     if (flags & cur_flag)
-      fprintf(stderr, "[WARN]: %zu:%zu: Duplicate specifier `%.*s`, will be considered as one.\n", t.line, t.col, t.len, t.start);
+      DIAGF(p, WARN, "Duplicate specifier `%.*s`, will be considered as one.\n", t.len, t.start);
 
     flags |= cur_flag;
 
@@ -876,7 +906,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp);
 static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
   symbol_t* s = resolve_symbol(p->current_scope, name, SYMB_FUNC);
   if(!s) {
-    fprintf(stderr, "[ERROR]: %zu:%zu: Undeclared function `%s`.\n", get_tok(p).line, get_tok(p).col, name);
+    DIAGF(p, ERROR, "Undeclared function `%s`.\n", name);
     return NULL;
   }
 
@@ -1077,7 +1107,7 @@ static inline ast_type_t* parse_type(parser_t* p) {
 
   type_t* type = resolve_type(p, tok.as.s, array_depth);
   if(!type) {
-    fprintf(stderr, "[ERROR] %zu:%zu: Undefined type `%s`.\n", tok.line, tok.col, tok.as.s);
+    DIAGF(p, ERROR, "Undefined type `%s`.\n", tok.as.s);
     return NULL;
   }
   n->type = *type;
@@ -1200,6 +1230,7 @@ static inline ast_def_t* parse_func_def(parser_t* p, const char* name, spec_flag
 
   symbol_t *s = resolve_symbol(p->current_scope, name, SYMB_FUNC);
   if(s && s != symbol && type_equals(n->as.fun.sig->type,  s->type)) {
+    // TODO: use DIAGF macro -> print_type should print to sb_t
     fprintf(stderr, "[ERROR]: %zu:%zu: Function `%s : ", get_tok(p).line, get_tok(p).col, name);
     print_type(stderr, &s->type);
     fprintf(stderr, "` already declared in this scope.\n");
@@ -1246,6 +1277,7 @@ typedef struct {
 // then parse the statements with the already filled symbols, having only to 
 // patch the addresses after code generation
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
+  p->source = t->source;
   p->tokens = t->tokens;
   p->current = 0;
   p->pass = PASS_DECL;
@@ -1285,8 +1317,7 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
       da_append(&n->defs, def);
     } else {
       // TODO: variables 
-      fprintf(stderr, "[FATAL]: Unimplemented: variable definitions\n");
-      abort();
+      TODO("variable definitions");
     }
   }
 
@@ -1343,7 +1374,7 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
           break;
         case EXPR_UNOP:
           fprintf(stream, " (%s)\n", "EXPR_UNOP");
-          fprintf(stderr, "[FATAL]: Unimplemented: print_ast (EXPR_UNOP)\n");
+          TODO("print_ast (EXPR_UNOP)");
           break;
         case EXPR_SUBEXPR:
           fprintf(stream, " (%s)\n", "EXPR_SUBEXPR");
@@ -1425,8 +1456,7 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
       print_ast(stream, (ast_node_t*)sig->ret, level + 2);
       break;
     default:
-      fprintf(stderr, "[ERROR] Unrecognized ast node.\n");
-      break;
+      UNREACHABLE("print_ast");
   }
 }
 
@@ -1569,12 +1599,10 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
       case EXPR_BINOP:
         compile_expr(p, scope, e->as.binop.lhs);
         compile_expr(p, scope, e->as.binop.rhs);
-        fprintf(stderr, "[FATAL] Unimplemented: compile_expr (BINOP)\n");
-        abort();
+        TODO("compile_expr (BINOP)");
         break;
       case EXPR_UNOP:
-        fprintf(stderr, "[FATAL] Unimplemented: compile_expr (UNOP)\n");
-        abort();
+        TODO("compile_expr (UNOP)");
         break;
       case EXPR_SUBEXPR:
         return compile_expr(p, scope, e->as.subexpr);
@@ -1618,8 +1646,7 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
     case TYPE_FUNC:   return &ffi_type_pointer; 
     case TYPES_COUNT:
     default:
-      fprintf(stderr, "[ERROR]: Invalid type `%s`\n", t.name);
-      return NULL;
+      UNREACHABLE("type_to_ffi_type - Invalid type");
  }
 }
 
@@ -1685,7 +1712,7 @@ static inline int compile(program_t* p, ast_root_t* root) {
         if(compile_func_def(p, *d)) return 1;
         break;
       case DEF_KIND_VAR:
-        fprintf(stderr, "[FATAL] Unimplemented: compile_var_def\n");
+        TODO("compile_var_def");
         abort();
       default:
         UNREACHABLE("compile");
@@ -1697,7 +1724,7 @@ static inline int compile(program_t* p, ast_root_t* root) {
         if(compile_func_decl(p, *d)) return 1;
         break;
       case DEF_KIND_VAR:
-        fprintf(stderr, "[FATAL] Unimplemented: compile_var_decl\n");
+        TODO("compile_var_decl");
         abort();
       default:
         UNREACHABLE("compile");
