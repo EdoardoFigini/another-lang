@@ -610,11 +610,11 @@ static inline token_t get_tok(parser_t* p) {
   return p->tokens.items[p->current];
 }
 
-static inline int peek(parser_t* p, tok_kind_t kind) {
+static inline int tok_is(parser_t* p, tok_kind_t kind) {
   return get_tok(p).kind == kind; 
 }
 
-static inline int consume_with_name(parser_t* p, tok_kind_t kind, const char* exp_name) {
+static inline int expect_with_name(parser_t* p, tok_kind_t kind, const char* exp_name) {
   token_t t = get_tok(p);
   if (t.kind != kind) {
     DIAGF(p, ERROR, "Expected %s, found %s", exp_name, tok_kind_str(&p->arena, t.kind));
@@ -624,8 +624,8 @@ static inline int consume_with_name(parser_t* p, tok_kind_t kind, const char* ex
   return 1;
 }
 
-static inline int consume(parser_t* p, tok_kind_t kind) {
-  return consume_with_name(p, kind, tok_kind_str(&p->arena, kind));
+static inline int expect(parser_t* p, tok_kind_t kind) {
+  return expect_with_name(p, kind, tok_kind_str(&p->arena, kind));
 }
 
 static inline void next(parser_t* p) {
@@ -913,18 +913,18 @@ static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
   ast_funcall_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_FUNCALL;
 
-  if(!consume(p, '(')) return NULL;
+  if(!expect(p, '(')) return NULL;
   next(p);
 
   n->name = arena_strdup(&p->arena, name);
 
-  if (!peek(p, ')')) {
+  if (!tok_is(p, ')')) {
     ast_expr_t* arg = parse_expr(p, 0);
     if(!arg) return NULL;
     da_append(&n->args, arg);
 
-    while(peek(p, ',')) {
-      if(!consume(p, ',')) return NULL;
+    while(tok_is(p, ',')) {
+      if(!expect(p, ',')) return NULL;
       next(p);
 
       arg = parse_expr(p, 0);
@@ -932,7 +932,7 @@ static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
       da_append(&n->args, arg);
     }
   }
-  if(!consume(p, ')')) return NULL;
+  if(!expect(p, ')')) return NULL;
   next(p);
 
   return n;
@@ -942,19 +942,19 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
   ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_EXPR;
 
-  if (peek(p, TOK_STRLIT)) {
+  if (tok_is(p, TOK_STRLIT)) {
     n->kind = EXPR_STRING;
 
-    if(!consume(p, TOK_STRLIT)) return NULL;
+    if(!expect(p, TOK_STRLIT)) return NULL;
     const char* str = arena_strdup(&p->arena, get_tok(p).as.s);
     next(p);
     
     if(!str) return NULL; 
     n->as.s = str;
-  } else if (peek(p, TOK_INTLIT)) {
+  } else if (tok_is(p, TOK_INTLIT)) {
     n->kind = EXPR_NUMBER;
 
-    if(!consume(p, TOK_INTLIT)) return NULL;
+    if(!expect(p, TOK_INTLIT)) return NULL;
     
     lit_type_info_flags_t ti = get_tok(p).type_info;
     n->as.number.ti = ti;
@@ -962,26 +962,26 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
     else                  n->as.number.u = get_tok(p).as.u;
 
     next(p);
-  } else if (peek(p, TOK_REALLIT)) {
+  } else if (tok_is(p, TOK_REALLIT)) {
     n->kind = EXPR_NUMBER;
 
-    if(!consume(p, TOK_REALLIT)) return NULL;
+    if(!expect(p, TOK_REALLIT)) return NULL;
     
     n->as.number.ti = get_tok(p).type_info;
     n->as.number.r  = get_tok(p).as.r;
 
     next(p);
-  } else if (peek(p, '(')) {
+  } else if (tok_is(p, '(')) {
     n->kind = EXPR_SUBEXPR;
 
-    if(!consume(p, '(')) return NULL;
+    if(!expect(p, '(')) return NULL;
     next(p);
 
     ast_expr_t* subexpr = parse_expr(p, 0);
     if(!subexpr) return NULL;
     n->as.subexpr = subexpr;
 
-    if(!consume(p, ')')) return NULL;
+    if(!expect(p, ')')) return NULL;
     next(p);
   }
 
@@ -994,10 +994,10 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
 
   for(;;) {
     op_kind_t op = OP_INVALID;
-    if (peek(p, '+'))      op = OP_PLUS;
-    else if (peek(p, '-')) op = OP_MINUS;
-    else if (peek(p, '*')) op = OP_MULT;
-    else if (peek(p, '/')) op = OP_DIV;
+    if (tok_is(p, '+'))      op = OP_PLUS;
+    else if (tok_is(p, '-')) op = OP_MINUS;
+    else if (tok_is(p, '*')) op = OP_MULT;
+    else if (tok_is(p, '/')) op = OP_DIV;
     else return lhs; 
 
     int curr_bp = expr_bp_table[op];
@@ -1005,7 +1005,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
       return lhs;
 
     // NOTE: enum contains tokens
-    if(!consume(p, (tok_kind_t)op)) return NULL;
+    if(!expect(p, (tok_kind_t)op)) return NULL;
     next(p);
 
     ast_expr_t* rhs = parse_expr(p, curr_bp + 1);
@@ -1030,37 +1030,37 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
   ast_stmt_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_STMT;
 
-  if(peek(p, ';')) {
-    if(!consume(p,';')) return NULL;
+  if(tok_is(p, ';')) {
+    if(!expect(p,';')) return NULL;
     next(p);
 
     n->kind = STMT_EMPTY;
-  } else if (peek(p, TOK_RETURN)) {
-    if(!consume(p, TOK_RETURN)) return NULL;
+  } else if (tok_is(p, TOK_RETURN)) {
+    if(!expect(p, TOK_RETURN)) return NULL;
     next(p);
     n->kind = STMT_RET;
 
-    if (!peek(p, ';')) {
+    if (!tok_is(p, ';')) {
       ast_expr_t* retval = parse_expr(p, 0);
       if(!retval) return NULL;
       n->as.retval = retval;
     }
-    if(!consume(p,';')) return NULL;
+    if(!expect(p,';')) return NULL;
     next(p);
-  } else if (peek(p, TOK_IDENT)) {
-    if (!consume(p, TOK_IDENT)) return NULL;
+  } else if (tok_is(p, TOK_IDENT)) {
+    if (!expect(p, TOK_IDENT)) return NULL;
     const char* name = get_tok(p).as.s; 
     next(p);
 
-    if (peek(p, '(')) {
+    if (tok_is(p, '(')) {
       ast_funcall_t* fc = parse_funcall(p, name);
       if(!fc) return NULL;
       n->kind = STMT_FUNCALL;
       n->as.func = fc;
-    } else if (peek(p, ':')) {
+    } else if (tok_is(p, ':')) {
       // TODO: parse assignment
     }
-    if(!consume(p,';')) return NULL;
+    if(!expect(p,';')) return NULL;
     next(p);
   }
 
@@ -1072,17 +1072,17 @@ static inline ast_body_t* parse_body(parser_t* p) {
   ast_body_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_BODY;
 
-  if(!consume(p, '{')) return NULL;
+  if(!expect(p, '{')) return NULL;
   next(p);
 
-  while(!peek(p, '}')) {
+  while(!tok_is(p, '}')) {
     ast_stmt_t* stmt = parse_stmt(p);
     if(!stmt) return NULL;
     
     da_append(&n->stmts, stmt);
   }
 
-  if(!consume(p, '}')) return NULL;
+  if(!expect(p, '}')) return NULL;
   next(p);
 
   return n;
@@ -1092,15 +1092,15 @@ static inline ast_type_t* parse_type(parser_t* p) {
   ast_type_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_TYPE;
 
-  if(!consume_with_name(p, TOK_IDENT, "type")) return NULL;
+  if(!expect_with_name(p, TOK_IDENT, "type")) return NULL;
   token_t tok = get_tok(p);
   next(p);
 
   int array_depth = 0;
-  while(peek(p, '[')) {
-    if (!consume(p, '[')) return NULL;
+  while(tok_is(p, '[')) {
+    if (!expect(p, '[')) return NULL;
     next(p);
-    if (!consume(p, ']')) return NULL;
+    if (!expect(p, ']')) return NULL;
     next(p);
     array_depth++;
   }
@@ -1121,11 +1121,11 @@ static inline ast_param_t* parse_param(parser_t* p) {
   ast_param_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_PARAM;
 
-  if(!consume(p, TOK_IDENT)) return NULL;
+  if(!expect(p, TOK_IDENT)) return NULL;
   n->name = arena_strdup(&p->arena, get_tok(p).as.s);
   next(p);
 
-  if(!consume(p, ':')) return NULL;
+  if(!expect(p, ':')) return NULL;
   next(p);
 
   ast_type_t* t = parse_type(p);
@@ -1143,11 +1143,11 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
   n->ast_kind = AST_SIG;
   n->type.kind = TYPE_FUNC;
 
-  if(!consume(p, '(')) return NULL;
+  if(!expect(p, '(')) return NULL;
   next(p);
 
-  if (peek(p, ')')) {
-    if(!consume(p, ')')) return NULL;
+  if (tok_is(p, ')')) {
+    if(!expect(p, ')')) return NULL;
     next(p);
   } else { 
     ast_param_t* param = parse_param(p);
@@ -1156,12 +1156,12 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
     da_append(&n->params, param);
     da_append(&n->type.as.func.params, &param->type->type);
 
-    if (peek(p, ')')) {
-      if(!consume(p, ')')) return NULL;
+    if (tok_is(p, ')')) {
+      if(!expect(p, ')')) return NULL;
       next(p);
     } else {
-      while(peek(p, ',')) {
-        if (!consume(p, ',')) return NULL;
+      while(tok_is(p, ',')) {
+        if (!expect(p, ',')) return NULL;
         next(p);
 
         param = parse_param(p);
@@ -1171,12 +1171,12 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
         da_append(&n->type.as.func.params, &param->type->type);
       } 
 
-      if(!consume(p, ')')) return NULL;
+      if(!expect(p, ')')) return NULL;
       next(p);
     }
   }
 
-  if(!consume(p, TOK_ARROW)) return NULL;
+  if(!expect(p, TOK_ARROW)) return NULL;
   next(p);
   ast_type_t* t = parse_type(p);
   if(!t) return NULL;
@@ -1190,7 +1190,7 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
 static inline ast_decl_t* parse_func_decl(parser_t* p, ast_def_t* def) {
   // NOTE: skip until '{', assume definition has been correctly parsed by
   // parse_func_def in previous pass
-  while(!peek(p, '{')) next(p);
+  while(!tok_is(p, '{')) next(p);
 
   ast_decl_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_FUNC_DECL;
@@ -1239,17 +1239,17 @@ static inline ast_def_t* parse_func_def(parser_t* p, const char* name, spec_flag
 
   symbol->type = n->as.fun.sig->type;
 
-  if (peek(p, ';')) {
-    if(!consume(p, ';')) return NULL;
+  if (tok_is(p, ';')) {
+    if(!expect(p, ';')) return NULL;
     next(p);
   } else {
-    if(!consume(p, '{')) return NULL;
+    if(!expect(p, '{')) return NULL;
     next(p);
     n->as.fun.has_body = 1;
     // NOTE: delay body parsing to parse_func_decl
-    for (int pars = 1; pars && !peek(p, TOK_EOF); next(p)) {
-      if      (peek(p,'{')) pars++;
-      else if (peek(p,'}')) pars--;
+    for (int pars = 1; pars && !tok_is(p, TOK_EOF); next(p)) {
+      if      (tok_is(p,'{')) pars++;
+      else if (tok_is(p,'}')) pars--;
     }
   }
 
@@ -1301,16 +1301,16 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   n->ast_kind = AST_ROOT;
   n->scope = p->current_scope;
 
-  while(!peek(p, TOK_EOF)) {
+  while(!tok_is(p, TOK_EOF)) {
     spec_flags_t flags = parse_specifiers(p);
     
-    if(!consume(p, TOK_IDENT)) return NULL;
+    if(!expect(p, TOK_IDENT)) return NULL;
     const char* name = get_tok(p).as.s; 
     next(p);
-    if(!consume(p, ':')) return NULL;
+    if(!expect(p, ':')) return NULL;
     next(p);
 
-    if(peek(p, '(')) {
+    if(tok_is(p, '(')) {
       ast_def_t* def = parse_func_def(p, name, flags);
       if (!def) return NULL;
 
