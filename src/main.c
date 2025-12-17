@@ -49,7 +49,7 @@ const char* source =
   "\n"
   "export main : () -> i64 {\n"
   " puts(\"Hello World!\\n\");\n"
-  " return 1 + 2 / 3 - 4 * ( 5l + 6 * 7 ) / 9L;\n"
+  " return 1 + 2 / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   "}\n"
   ;
 
@@ -325,6 +325,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
       case '+':
       case '*':
       case '/':
+      case '%':
         tok = (token_t){ .kind = *p, .start = p, .len = 1 }; 
         break;
       case ':':
@@ -994,17 +995,28 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
 
   for(;;) {
     op_kind_t op = OP_INVALID;
-    if (tok_is(p, '+'))      op = OP_PLUS;
-    else if (tok_is(p, '-')) op = OP_MINUS;
-    else if (tok_is(p, '*')) op = OP_MULT;
-    else if (tok_is(p, '/')) op = OP_DIV;
-    else return lhs; 
+
+    // NOTE: enum contains tokens
+    switch((op_kind_t)get_tok(p).kind) {
+      case OP_PLUS:
+      case OP_MINUS: 
+      case OP_MULT: 
+      case OP_DIV:
+      case OP_REM:
+      case OP_CALL: 
+      case OP_MEMB: 
+      case OP_SCOPE: 
+        op = (op_kind_t)get_tok(p).kind;
+        break;
+      case OP_INVALID:
+      default:
+        return lhs;
+    }
 
     int curr_bp = expr_bp_table[op];
     if (curr_bp < bp)
       return lhs;
 
-    // NOTE: enum contains tokens
     if(!expect(p, (tok_kind_t)op)) return NULL;
     next(p);
 
@@ -1058,7 +1070,7 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
       n->kind = STMT_FUNCALL;
       n->as.func = fc;
     } else if (tok_is(p, ':')) {
-      // TODO: parse assignment
+      TODO("parse_stmt: assignments");
     }
     if(!expect(p,';')) return NULL;
     next(p);
@@ -1273,9 +1285,6 @@ typedef struct {
   scope_t* scope;
 } ast_root_t;
 
-// TODO: 2-step compiler: first parse only declarations to build a symbol table,
-// then parse the statements with the already filled symbols, having only to 
-// patch the addresses after code generation
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->source = t->source;
   p->tokens = t->tokens;
@@ -1316,7 +1325,6 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
 
       da_append(&n->defs, def);
     } else {
-      // TODO: variables 
       TODO("variable definitions");
     }
   }
@@ -1561,6 +1569,7 @@ typedef struct {
 
 static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e);
 
+// TODO: delay address resolution after compilation
 static inline int compile_funcall(program_t* p, scope_t* scope, ast_funcall_t* f) {
   symbol_t* symbol = resolve_symbol(scope, f->name, SYMB_FUNC);
   if (!symbol) {
@@ -1588,18 +1597,36 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         break;
       case EXPR_NUMBER:
         if(e->as.number.ti & TI_LONG) {
-          da_append(&p->code, INST_PUSHL);
-          da_append(&p->code, e->as.number.u >> 32);
-          da_append(&p->code, e->as.number.u & (uint32_t)-1);
+          TODO("compile_expr: handle long/wide data");
+          // da_append(&p->code, INST_PUSHL);
+          // da_append(&p->code, e->as.number.u >> 32);
+          // da_append(&p->code, e->as.number.u & (uint32_t)-1);
         } else {
           da_append(&p->code, INST_PUSH);
           da_append(&p->code, e->as.number.u & (uint32_t)-1);
         }
         break;
       case EXPR_BINOP:
+        // TODO: handle operator length, signdess and type (when implementing type checker)
         compile_expr(p, scope, e->as.binop.lhs);
         compile_expr(p, scope, e->as.binop.rhs);
-        TODO("compile_expr (BINOP)");
+        // NOTE: if operators are objects, check if implements interface and 
+        // emit icall instruction to operator implementation
+        switch(e->as.binop.op){
+          case OP_PLUS: da_append(&p->code, INST_ADD); break;
+          case OP_MINUS: da_append(&p->code, INST_SUB); break;
+          case OP_MULT: da_append(&p->code, INST_MULT); break;
+          case OP_DIV: da_append(&p->code, INST_DIVI); break;
+          case OP_REM: da_append(&p->code, INST_REM); break;
+          case OP_MEMB:
+            TODO("compile_expr: member access binop");
+          case OP_SCOPE:
+            TODO("compile_expr: scope access binop");
+          case OP_CALL:
+          case OP_INVALID:
+          default:
+            UNREACHABLE("compile expr: Invalid binary operation: %d", e->as.binop.op);
+        }
         break;
       case EXPR_UNOP:
         TODO("compile_expr (UNOP)");
@@ -1792,8 +1819,8 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
         fprintf(stream, "  %-10s\n", "NOP"); break;
       case INST_PUSH:
         fprintf(stream, "  %-10s 0x%08X\n", "PUSH", p->code.items[++i]); break;
-      case INST_PUSHL:
-        fprintf(stream, "  %-10s 0x%016lX\n", "PUSHL", ((uint64_t)p->code.items[++i] << 32) | p->code.items[++i]); break;
+      // case INST_PUSHL:
+      //   fprintf(stream, "  %-10s 0x%016lX\n", "PUSHL", ((uint64_t)p->code.items[++i] << 32) | p->code.items[++i]); break;
       case INST_POP:
         fprintf(stream, "  %-10s\n", "POP"); break;
       case INST_LOAD:
@@ -1836,6 +1863,28 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
       }
       case INST_RET:
         fprintf(stream, "  %-10s\n", "RET"); break;
+      case INST_ADD:
+        fprintf(stream, "  %-10s\n", "INST_ADD"); break;
+      case INST_SUB:
+        fprintf(stream, "  %-10s\n", "INST_SUB"); break;
+      case INST_MULT:
+        fprintf(stream, "  %-10s\n", "INST_MULT"); break;
+      case INST_DIVI:
+        fprintf(stream, "  %-10s\n", "INST_DIVI"); break;
+      case INST_DIVU:
+        fprintf(stream, "  %-10s\n", "INST_DIVU"); break;
+      case INST_REM:
+        fprintf(stream, "  %-10s\n", "INST_REM"); break;
+      case INST_ADDF:
+        fprintf(stream, "  %-10s\n", "INST_ADDF"); break;
+      case INST_SUBF:
+        fprintf(stream, "  %-10s\n", "INST_SUBF"); break;
+      case INST_MULTF:
+        fprintf(stream, "  %-10s\n", "INST_MULTF"); break;
+      case INST_DIVF:
+        fprintf(stream, "  %-10s\n", "INST_DIVF"); break;
+
+
       case INST_COUNT:
       default:
         UNREACHABLE("print_disass");
@@ -1862,7 +1911,7 @@ int main() {
   ast_root_t* root = parse(&parser, &tok);
   if(!root) return 1;
 
-  print_ast(stdout, (ast_node_t*)root, 0);
+  // print_ast(stdout, (ast_node_t*)root, 0);
 
   // print_symbol_table(stdout, root->scope);
 

@@ -7,8 +7,9 @@ typedef uint32_t instruction_t; enum {
   INST_NOP = 0,
 
   INST_PUSH,
-  INST_PUSHL, // long
+  // INST_PUSHL, // long
   INST_POP,
+  // INST_POPL,
 
   INST_LOAD,
   INST_LOADG,
@@ -18,7 +19,19 @@ typedef uint32_t instruction_t; enum {
 
   INST_CALL,
   INST_HOSTCALL,
+  INST_ICALL, // interface call
   INST_RET,
+
+  INST_ADD,
+  INST_SUB,
+  INST_MULT,
+  INST_DIVI,
+  INST_DIVU,
+  INST_REM,
+  INST_ADDF,
+  INST_SUBF,
+  INST_MULTF,
+  INST_DIVF,
 
   INST_COUNT,
 };
