@@ -49,7 +49,7 @@ const char* source =
   "\n"
   "export main : () -> i64 {\n"
   " puts(\"Hello World!\\n\");\n"
-  " return 1 + 2 / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
+  " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   "}\n"
   ;
 
@@ -693,6 +693,16 @@ static inline symbol_t* resolve_symbol_local(scope_t* scope, const char* name, s
   return NULL;
 }
 
+static inline symbol_t* resolve_symbol_any(scope_t* scope, const char* name) {
+  if (!scope) return NULL;
+
+  // OPTIMIZE
+  da_foreach(symbol_t, s, &scope->symbols) {
+    if(strcmp(s->name, name) == 0) return s;
+  }
+  return resolve_symbol_any(scope->parent, name);
+}
+
 static inline symbol_t* resolve_symbol(scope_t* scope, const char* name, symb_kind_t kind) {
   if (!scope) return NULL;
 
@@ -811,14 +821,6 @@ typedef struct {
 } ast_funcall_t;
 
 typedef enum {
-  EXPR_STRING = 0,
-  EXPR_NUMBER,
-  EXPR_BINOP,
-  EXPR_UNOP,
-  EXPR_SUBEXPR,
-} ast_expr_kind_t;
-
-typedef enum {
   OP_INVALID = TOK_EOF,
   OP_PLUS    = '+',
   OP_MINUS   = '-',
@@ -850,10 +852,22 @@ const enum _bp expr_bp_table[] = {
   [OP_SCOPE]   = BP_ACCESS,
 };
 
+typedef enum {
+  EXPR_SYMBOL = 0,
+  EXPR_STRING,
+  EXPR_NUMBER,
+  EXPR_BINOP,
+  EXPR_UNOP,
+  EXPR_ACCESS,
+  EXPR_FUNCALL,
+  EXPR_SUBEXPR,
+} ast_expr_kind_t;
+
 struct _ast_expr_t {
   AST_DEFAULT_FIELDS;
   ast_expr_kind_t kind;
   union {
+    const char* symbol;
     const char* s;
     struct {
       lit_type_info_flags_t ti;
@@ -872,8 +886,20 @@ struct _ast_expr_t {
       ast_expr_t* operand;
       op_kind_t op;
     } unop;
+    struct {
+      ast_expr_t* owner;
+      const char* field;
+      op_kind_t op;
+    } access;
+    struct { 
+      ast_expr_t* callee;
+      struct _args {
+        ast_expr_t** items;
+        size_t count;
+        size_t capacity;
+      } args;
+    } funcall;
     ast_expr_t* subexpr;
-    // ast_funcall_t* funcall;
   } as;
 };
 
@@ -943,7 +969,16 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
   ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_EXPR;
 
-  if (tok_is(p, TOK_STRLIT)) {
+  if (tok_is(p, TOK_IDENT)) {
+    n->kind = EXPR_SYMBOL;
+
+    if(!expect(p, TOK_IDENT)) return NULL;
+    const char* name = arena_strdup(&p->arena, get_tok(p).as.s);
+    next(p);
+
+    if(!name) return NULL;
+    n->as.symbol = name;
+  } else if (tok_is(p, TOK_STRLIT)) {
     n->kind = EXPR_STRING;
 
     if(!expect(p, TOK_STRLIT)) return NULL;
@@ -995,6 +1030,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
 
   for(;;) {
     op_kind_t op = OP_INVALID;
+    ast_expr_kind_t kind = EXPR_SUBEXPR; // ok?
 
     // NOTE: enum contains tokens
     switch((op_kind_t)get_tok(p).kind) {
@@ -1003,15 +1039,20 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
       case OP_MULT: 
       case OP_DIV:
       case OP_REM:
+        kind = EXPR_BINOP;
+        break;
       case OP_CALL: 
+        kind = EXPR_FUNCALL;
+        break;
       case OP_MEMB: 
       case OP_SCOPE: 
-        op = (op_kind_t)get_tok(p).kind;
+        kind = EXPR_ACCESS;
         break;
       case OP_INVALID:
       default:
         return lhs;
     }
+    op = (op_kind_t)get_tok(p).kind;
 
     int curr_bp = expr_bp_table[op];
     if (curr_bp < bp)
@@ -1020,17 +1061,73 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
     if(!expect(p, (tok_kind_t)op)) return NULL;
     next(p);
 
-    ast_expr_t* rhs = parse_expr(p, curr_bp + 1);
-    if(!rhs) return NULL;
+    switch(kind) {
+      case EXPR_BINOP: {
+        ast_expr_t* rhs = parse_expr(p, curr_bp + 1);
+        if(!rhs) return NULL;
 
-    ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
-    n->ast_kind = AST_EXPR;
-    n->kind = EXPR_BINOP;
-    n->as.binop.lhs = lhs;
-    n->as.binop.rhs = rhs;
-    n->as.binop.op = op;
+        ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
+        n->ast_kind = AST_EXPR;
+        n->kind = kind;
+        n->as.binop.lhs = lhs;
+        n->as.binop.rhs = rhs;
+        n->as.binop.op = op;
 
-    lhs = n;
+        lhs = n;
+        break;
+      }
+      case EXPR_UNOP:
+        TODO("parse_expr: EXPR_UNOP");
+      case EXPR_ACCESS: {
+        if (!expect(p, TOK_IDENT)) return NULL;
+
+        ast_expr_t* n = arena_alloc(&p->arena, sizeof(*n));
+        n->ast_kind = AST_EXPR;
+        n->kind = kind;
+
+        n->as.access.owner = lhs;
+        n->as.access.field = arena_strdup(&p->arena, get_tok(p).as.s);
+        n->as.access.op    = op;
+
+        next(p);
+
+        lhs = n;
+        break;
+      }
+      case EXPR_FUNCALL: {
+        ast_expr_t* n = arena_alloc(&p->arena, sizeof(*n));
+        n->ast_kind = AST_EXPR;
+        n->kind = kind;
+
+        if (!tok_is(p, ')')) {
+          ast_expr_t* arg = parse_expr(p, 0);
+          if(!arg) return NULL;
+          da_append(&n->as.funcall.args, arg);
+
+          while(tok_is(p, ',')) {
+            if(!expect(p, ',')) return NULL;
+            next(p);
+
+            arg = parse_expr(p, 0);
+            if(!arg) return NULL;
+            da_append(&n->as.funcall.args, arg);
+          }
+        }
+        if(!expect(p, ')')) return NULL;
+        next(p);
+
+        n->as.funcall.callee = lhs;
+
+        lhs = n;
+        break;
+      }
+      case EXPR_SYMBOL:
+      case EXPR_STRING:
+      case EXPR_NUMBER:
+      case EXPR_SUBEXPR:
+      default:
+        UNREACHABLE("parse_expr");
+    }
   }
 }
 
@@ -1223,7 +1320,7 @@ static inline ast_def_t* parse_func_def(parser_t* p, ast_decl_t* decl) {
 // func_decl = sig ( ';' | '{' )
 static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_flags_t flags) {
   ast_decl_t *n = arena_alloc(&p->arena, sizeof(*n));
-  n->ast_kind = AST_FUNC_DEF;
+  n->ast_kind = AST_FUNC_DECL;
   n->flags = flags;
   n->name = arena_strdup(&p->arena, name);
   n->kind = DECL_KIND_FUNC;
@@ -1359,6 +1456,10 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
       ast_expr_t* expr = (ast_expr_t*)n;
       fprintf(stream, "%*s%s", level, "", "AST_EXPR");
       switch(expr->kind) {
+        case EXPR_SYMBOL:
+          fprintf(stream, " (%s)\n", "EXPR_SYMBOL");
+          fprintf(stream, "%*s%s\n", level + 2, "", expr->as.symbol);
+          break;
         case EXPR_STRING:
           fprintf(stream, " (%s)\n", "EXPR_STRING");
           fprintf(stream, "%*s%s\n", level + 2, "", expr->as.s);
@@ -1385,11 +1486,33 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
           fprintf(stream, " (%s)\n", "EXPR_UNOP");
           TODO("print_ast (EXPR_UNOP)");
           break;
+        case EXPR_ACCESS:
+          fprintf(stream, " (%s)\n", "EXPR_ACCESS");
+          if(expr->as.access.op == OP_MEMB) {
+            fprintf(stream, "%*sobject:\n", level + 2, "");
+          } else if (expr->as.access.op == OP_SCOPE) {
+            fprintf(stream, "%*smodule:\n", level + 2, "");
+          } else {
+            UNREACHABLE("print_ast: ACCESS op");
+          }
+          print_ast(stream, (ast_node_t*)expr->as.access.owner, level + 2);
+          fprintf(stream, "%*sfield:\n", level + 2, "");
+          fprintf(stream, "%*s%s\n", level + 2, "", expr->as.access.field);
+          break;
+        case EXPR_FUNCALL:
+          fprintf(stream, " (%s)\n", "EXPR_FUNCALL");
+          fprintf(stream, "%*scallee:\n", level + 2, "");
+          print_ast(stream, (ast_node_t*)expr->as.funcall.callee, level + 2);
+          fprintf(stream, "%*sArgs:\n", level + 2, "");
+          da_foreach(ast_expr_t*, a, &expr->as.funcall.args) {
+            print_ast(stream, (ast_node_t*)*a, level + 2);
+          }
+          break;
         case EXPR_SUBEXPR:
           fprintf(stream, " (%s)\n", "EXPR_SUBEXPR");
           print_ast(stream, (ast_node_t*)expr->as.subexpr, level + 2);
           break;
-        default: break;
+        // default: break;
       }
       break;
     case AST_STMT:
@@ -1465,7 +1588,7 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
       print_ast(stream, (ast_node_t*)sig->ret, level + 2);
       break;
     default:
-      UNREACHABLE("print_ast");
+      UNREACHABLE("print_ast %d", n->ast_kind);
   }
 }
 
@@ -1591,9 +1714,12 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
   (void)scope;
   
   switch(e->kind) {
+      case EXPR_SYMBOL:
+        TODO("compile_expr: EXPR_SYMBOL");
+        // switch upon symbol kind, if func do nothing, symbol used by funcall
       case EXPR_STRING:
         da_append(&p->code, INST_LOADC);
-        da_append(&p->code, p->constants.count);\
+        da_append(&p->code, p->constants.count);
         da_append(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = e->as.s }));
         break;
       case EXPR_NUMBER:
@@ -1632,6 +1758,10 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
       case EXPR_UNOP:
         TODO("compile_expr (UNOP)");
         break;
+      case EXPR_ACCESS:
+        TODO("compile_expr: EXPR_ACCESS");
+      case EXPR_FUNCALL:
+        TODO("compile_expr: EXPR_FUNCALL");
       case EXPR_SUBEXPR:
         return compile_expr(p, scope, e->as.subexpr);
       default:
@@ -1912,9 +2042,11 @@ int main() {
   ast_root_t* root = parse(&parser, &tok);
   if(!root) return 1;
 
-  // print_ast(stdout, (ast_node_t*)root, 0);
+  print_ast(stdout, (ast_node_t*)root, 0);
 
   // print_symbol_table(stdout, root->scope);
+
+  // TODO: type checker !!IMPORTANT!!
 
   compile(&program, root);
 
