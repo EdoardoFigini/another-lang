@@ -48,7 +48,7 @@ const char* source =
   "extern puts: (s: char[]) -> i32;\n"
   "\n"
   "export main : () -> i64 {\n"
-  " puts(\"Hello World!\\n\");\n"
+  " puts(\"Hello World!\\n\".c_str());\n"
   " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   "}\n"
   ;
@@ -362,7 +362,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
         break;
 
       default:
-        if(isalpha(*p)) {
+        if(isalpha(*p) || *p == '_') {
           uint8_t kw = 0;
           for(size_t i=0; i < sizeof(tok_keywords)/sizeof(*tok_keywords); i++) {
             if (!tok_keywords[i]) continue;
@@ -376,7 +376,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
           if(kw) break;
 
           char* end = p;
-          for (; *end && (isalpha(*end) || isdigit(*end)); end++);
+          for (; *end && (isalpha(*end) || isdigit(*end) || *end == '_'); end++);
           tok = (token_t){
             .kind = TOK_IDENT,
             .len = (int)(end - p),
