@@ -49,9 +49,10 @@ const char* source =
   "extern puts: (s: char[]) -> i32;\n"
   "\n"
   "export main : () -> i64 {\n"
-  " puts(\"Hello World!\\n\".c_str());\n"
-  " bar();\n"
-  " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
+  // " puts(\"Hello World!\\n\".c_str());\n"
+  " bar(5);\n"
+  // " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
+  " return 1 / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   "}\n"
   "\n"
   "bar : () -> str {\n"
@@ -513,7 +514,7 @@ static inline void next(parser_t* p) {
 }
 
 typedef struct _type type_t;
-static inline void print_type(FILE* stream, type_t* t);
+static inline void print_type(FILE* stream, const type_t* t);
 
 typedef enum {
   SYMB_VAR,
@@ -548,6 +549,7 @@ struct _scope {
 
 static inline void print_symbol_table(FILE* stream, scope_t* root);
 
+// FIXME: dangling pointers
 static inline symbol_t* make_symbol(scope_t* scope, symb_kind_t kind, symb_storage_t storage, const char* name, type_t* type) {
   da_append(&scope->symbols, ((symbol_t){ .name = name, .kind = kind, .storage = storage, .type = type }));
   return &da_last(&scope->symbols);
@@ -752,7 +754,7 @@ typedef enum {
 struct _ast_expr_t {
   AST_DEFAULT_FIELDS;
   ast_expr_kind_t kind;
-  type_t *type;
+  type_t const* type;
   union {
     const char* symbol;
     const char* s;
@@ -1122,7 +1124,6 @@ static inline ast_param_t* parse_param(parser_t* p) {
   if(!t) return NULL;
   n->type = t;
 
-  // TODO: make symbol with no type, update type in typechecker
   n->symbol = make_symbol(p->current_scope, SYMB_VAR, STO_SCOPE, n->name, NULL);
 
   return n;
@@ -1496,6 +1497,7 @@ typedef enum {
   TYPE_ADDR, // akin to void* in C
   
   TYPE_STRUCT,
+  TYPE_MODULE,
   
   TYPE_ALIAS,
 
@@ -1552,6 +1554,7 @@ static inline int type_equals(type_t a, type_t b) {
     case TYPE_ADDR:
       return 1;
     case TYPE_STRUCT:
+    case TYPE_MODULE:
       // TODO: compare fields
       return 1;
     case TYPE_FUNC:
@@ -1568,7 +1571,7 @@ static inline int type_equals(type_t a, type_t b) {
   }
 }
 
-static inline void print_type(FILE* stream, type_t* t) {
+static inline void print_type(FILE* stream, const type_t* t) {
   if(!t) UNREACHABLE("print_type: null type*");
   switch(t->kind) {
     case TYPE_NONE:
@@ -1588,6 +1591,9 @@ static inline void print_type(FILE* stream, type_t* t) {
     case TYPE_STRUCT:
       fprintf(stream, "struct %s", t->name);
       break;
+    case TYPE_MODULE:
+      fprintf(stream, "module %s", t->name);
+      break;
     case TYPE_ARRAY:
       print_type(stream, t->as.array.inner);
       fprintf(stream, "[]");
@@ -1606,21 +1612,48 @@ static inline void print_type(FILE* stream, type_t* t) {
 }
 
 typedef struct {
+  arena_t arena;
   struct {
-    type_t* items;
+    type_t** items;
     size_t count;
     size_t capacity;
-  } types;
+  } custom_types; // use for interning
+  struct {
+    type_t const* none;
+    type_t const* i32;
+    type_t const* i64;
+    type_t const* u32;
+    type_t const* u64;
+    type_t const* f32;
+    type_t const* f64;
+    type_t const* boolean;
+    type_t const* character;
+    type_t const* str;
+    type_t const* array;
+    type_t const* addr;
+  } builtins;
+  scope_t* current_scope;
 } typechecker_t;
 
+static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* name, size_t size) {
+  type_t* type = arena_alloc(&t->arena, sizeof(*type));
+  type->kind = k;
+  type->name = name;
+  type->size = size;
+
+  return type;
+}
+
 static inline type_t* get_or_create_array_of(typechecker_t* t, type_t* type) {
-  da_foreach(type_t, typ, &t->types) {
-    if (typ->kind == TYPE_ARRAY && typ->as.array.inner == type) return typ;
+  da_foreach(type_t*, typ, &t->custom_types) {
+    if ((*typ)->kind == TYPE_ARRAY && (*typ)->as.array.inner == type) return *typ;
   }
 
-  da_append(&t->types, ((type_t){ .kind = TYPE_ARRAY, .name = NULL, .size = 1, .as.array.inner = type }));
+  type_t* typ = make_type(t, TYPE_ARRAY, NULL, 1);
+  typ->as.array.inner = type;
+  da_append(&t->custom_types, typ);
   
-  return &da_last(&t->types);
+  return typ; 
 }
 
 static inline type_t* get_or_create_type_from_sig(typechecker_t* t, ast_sig_t* sig) {
@@ -1632,9 +1665,36 @@ static inline type_t* get_or_create_type_from_sig(typechecker_t* t, ast_sig_t* s
 static inline type_t* resolve_type(typechecker_t* t, const char* name, int depth) {
   type_t* res = NULL;
 
-  da_foreach(type_t, type, &t->types) {
-    // OPTIMIZE
-    if(strcmp(type->name, name) == 0) { res = type; break; }
+  if (strcmp(name, t->builtins.none->name) == 0) 
+    res = (type_t*)t->builtins.none;
+  else if (strcmp(name, t->builtins.i32->name) == 0) 
+    res = (type_t*)t->builtins.i32;
+  else if (strcmp(name, t->builtins.i64->name) == 0) 
+    res = (type_t*)t->builtins.i64;
+  else if (strcmp(name, t->builtins.u32->name) == 0) 
+    res = (type_t*)t->builtins.u32;
+  else if (strcmp(name, t->builtins.u64->name) == 0) 
+    res = (type_t*)t->builtins.u64;
+  else if (strcmp(name, t->builtins.f32->name) == 0) 
+    res = (type_t*)t->builtins.f32;
+  else if (strcmp(name, t->builtins.f64->name) == 0) 
+    res = (type_t*)t->builtins.f64;
+  else if (strcmp(name, t->builtins.boolean->name) == 0) 
+    res = (type_t*)t->builtins.boolean;
+  else if (strcmp(name, t->builtins.character->name) == 0) 
+    res = (type_t*)t->builtins.character;
+  else if (strcmp(name, t->builtins.str->name) == 0) 
+    res = (type_t*)t->builtins.str;
+  else if (strcmp(name, t->builtins.array->name) == 0) 
+    res = (type_t*)t->builtins.array;
+  else if (strcmp(name, t->builtins.addr->name) == 0) 
+    res = (type_t*)t->builtins.addr;
+
+  if (!res) {
+    da_foreach(type_t*, type, &t->custom_types) {
+      // OPTIMIZE
+      if((*type)->name && strcmp((*type)->name, name) == 0) { res = *type; break; }
+    }
   }
 
   if (!res) return NULL;
@@ -1647,32 +1707,102 @@ static inline type_t* resolve_type(typechecker_t* t, const char* name, int depth
 }
 
 static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
-  (void)t;
   switch(expr->kind) {
-   case EXPR_SYMBOL:
-     TODO("typecheck_expr: EXPR_SYMBOL");
-     break;
-   case EXPR_STRING:
-     TODO("typecheck_expr: EXPR_STRING");
-     break;
-   case EXPR_NUMBER:
-     TODO("typecheck_expr: EXPR_NUMBER");
-     break;
-   case EXPR_BINOP:
-     TODO("typecheck_expr: EXPR_BINOP");
-     break;
-   case EXPR_UNOP:
-     TODO("typecheck_expr: EXPR_UNOP");
-     break;
-   case EXPR_ACCESS:
-     TODO("typecheck_expr: EXPR_ACCESS");
-     break;
-   case EXPR_FUNCALL:
-     TODO("typecheck_expr: EXPR_FUNCALL");
-     break;
-   case EXPR_SUBEXPR:
-     TODO("typecheck_expr: EXPR_SUBEXPR");
-     break;
+    case EXPR_SYMBOL:
+      TODO("typecheck_expr: EXPR_SYMBOL");
+      break;
+    case EXPR_STRING:
+      expr->type = t->builtins.str;
+      return true;
+    case EXPR_NUMBER:
+      if (expr->as.number.ti & TI_REAL) {
+        if (expr->as.number.ti & TI_LONG)
+          expr->type = t->builtins.f64;
+        else
+          expr->type = t->builtins.f32;
+      } else if (expr->as.number.ti & TI_UNSIGNED) {
+        if (expr->as.number.ti & TI_LONG)
+          expr->type = t->builtins.u64;
+        else
+          expr->type = t->builtins.u32;
+      } else {
+        if (expr->as.number.ti & TI_LONG)
+          expr->type = t->builtins.i64;
+        else
+          expr->type = t->builtins.i32;
+      }
+      return true;
+    case EXPR_BINOP:
+      if(!typecheck_expr(t, expr->as.binop.lhs)) return false;
+      if(!typecheck_expr(t, expr->as.binop.rhs)) return false;
+
+      TODO("typecheck_expr: EXPR_BINOP - supported operator");
+      TODO("typecheck_expr: EXPR_BINOP - result type");
+
+      return true;
+    case EXPR_UNOP:
+      TODO("typecheck_expr: EXPR_UNOP");
+      break;
+    case EXPR_ACCESS:
+      if (expr->as.access.op == OP_SCOPE) {
+        if (expr->as.access.owner->type->kind != TYPE_MODULE) {
+          fprintf(stderr, "[ERROR]: Typechecker\n Is not a module.\n");
+          return false;
+        }
+        TODO("typecheck_expr: EXPR_ACCESS - module fields");
+      } else if (expr->as.access.op == OP_MEMB) {
+        if (expr->as.access.owner->type->kind != TYPE_STRUCT) {
+          fprintf(stderr, "[ERROR]: Typechecker\n Is not a structure.\n");
+          return false;
+        }
+        TODO("typecheck_expr: EXPR_ACCESS - struct fields");
+      } else {
+        UNREACHABLE("typecheck_expr: EXPR_ACCESS");
+      }
+      break;
+    case EXPR_FUNCALL:
+      if(expr->as.funcall.callee->kind == EXPR_SYMBOL) {
+        symbol_t* symb = resolve_symbol_any(t->current_scope, expr->as.funcall.callee->as.symbol); 
+        if(!symb) {
+          fprintf(stderr, "[ERROR]: Typechecker\n No symbol `%s` in current scope.\n", expr->as.funcall.callee->as.symbol);
+          return false;
+        }
+
+        if (symb->kind != SYMB_FUNC) {
+          TODO("typecheck_expr: EXPR_FUNCALL - callee symbol not a function");
+        }
+
+        if (expr->as.funcall.args.count != symb->type->as.func.params.count) {
+            fprintf(
+              stderr, 
+              "[ERROR]: Typechecker\n Mismatched number of arguments in function call: expected %zu, got %zu.\n",
+              symb->type->as.func.params.count,
+              expr->as.funcall.args.count
+            );
+            return false;
+        }
+
+        for(size_t i = 0; i < expr->as.funcall.args.count; i++) {
+          type_t const* a = da_at(expr->as.funcall.args, i)->type;
+          type_t const* b = da_at(symb->type->as.func.params, i);
+          if (!type_equals(*a, *b)) {
+            // TODO: find way to retrieve argument name for better diagnostics
+            fprintf(stderr, "[ERROR]: Typechecker\n Mismatched type for argument %zu in function call.\n", i);
+            return false;
+          }
+        }
+
+        // TODO: change type type in symbol struct.
+        expr->type = symb->type->as.func.ret;
+        return true;
+      } else {
+        TODO("typecheck_expr: EXPR_FUNCALL - callee not a symbol");
+      }
+      TODO("typecheck_expr: EXPR_FUNCALL");
+      return true;
+    case EXPR_SUBEXPR:
+      TODO("typecheck_expr: EXPR_SUBEXPR");
+      break;
   }
   return true;
 }
@@ -1718,40 +1848,36 @@ static inline bool resolve_type_decl(typechecker_t* t, ast_type_t* type) {
 static inline bool resolve_func_decl(typechecker_t* t, ast_decl_t* decl) {
   // TODO: use get_or_create_type_from_sig to avoid having duplicate types,
   // especially for very common signatures (() -> none, () -> bool, etc.)
-  type_t sig_type = (type_t) {
-    .kind = TYPE_FUNC,
-    .name = "",
-    .size = 1,
-  };
+  type_t* sig_type = make_type(t, TYPE_FUNC, "", 1);
 
   da_foreach(ast_param_t*, p, &decl->as.fun.sig->params) {
     if(!resolve_type_decl(t, (*p)->type)) return false;
-    da_append(&sig_type.as.func.params, (*p)->type->resolved_type);
+    da_append(&sig_type->as.func.params, (*p)->type->resolved_type);
   }
 
   if(!resolve_type_decl(t, decl->as.fun.sig->ret)) return false;
-  sig_type.as.func.ret = decl->as.fun.sig->ret->resolved_type;
+  sig_type->as.func.ret = decl->as.fun.sig->ret->resolved_type;
 
-  da_append(&t->types, sig_type);
-  decl->as.fun.sig->resolved_type = &da_last(&t->types);
-  decl->symbol->type = &da_last(&t->types);
+  da_append(&t->custom_types, sig_type);
+  decl->as.fun.sig->resolved_type = sig_type; 
+  decl->symbol->type = sig_type;
 
   return true;
 }
 
 static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   // init builtin types
-  da_append(&t->types, ((type_t){ .kind = TYPE_NONE,  .name = "none", .size = 0 }));
-  da_append(&t->types, ((type_t){ .kind = TYPE_I32,   .name = "i32",  .size = 1 }));
-  da_append(&t->types, ((type_t){ .kind = TYPE_I64,   .name = "i64",  .size = 2 }));
-  da_append(&t->types, ((type_t){ .kind = TYPE_U32,   .name = "u32",  .size = 1 }));
-  da_append(&t->types, ((type_t){ .kind = TYPE_U64,   .name = "u64",  .size = 2 }));
-  da_append(&t->types, ((type_t){ .kind = TYPE_U32,   .name = "f32",  .size = 1 }));
-  da_append(&t->types, ((type_t){ .kind = TYPE_U64,   .name = "f64",  .size = 2 }));
-  da_append(&t->types, ((type_t){ .kind = TYPE_CHAR,  .name = "char", .size = 1 }));
-  da_append(&t->types, ((type_t){ .kind = TYPE_BOOL,  .name = "bool", .size = 1 }));
-  da_append(&t->types, ((type_t){ .kind = TYPE_STR,   .name = "str",  .size = 1 }));
-  da_append(&t->types, ((type_t){ .kind = TYPE_ADDR,  .name = "addr", .size = 1 }));
+  t->builtins.none      = make_type(t, TYPE_NONE, "none", 0);
+  t->builtins.i32       = make_type(t, TYPE_I32,  "i32",  1);
+  t->builtins.i64       = make_type(t, TYPE_I64,  "i64",  2);
+  t->builtins.u32       = make_type(t, TYPE_U32,  "u32",  1);
+  t->builtins.u64       = make_type(t, TYPE_U64,  "u64",  2);
+  t->builtins.f32       = make_type(t, TYPE_U32,  "f32",  1);
+  t->builtins.f64       = make_type(t, TYPE_U64,  "f64",  2);
+  t->builtins.character = make_type(t, TYPE_CHAR, "char", 1);
+  t->builtins.boolean   = make_type(t, TYPE_BOOL, "bool", 1);
+  t->builtins.str       = make_type(t, TYPE_STR,  "str",  1);
+  t->builtins.addr      = make_type(t, TYPE_ADDR, "addr", 1);
 
   da_foreach(ast_decl_t*, d, &root->decls) {
     switch((*d)->kind) {
@@ -1786,6 +1912,8 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
             return false;
           }
         }
+
+        t->current_scope = (*d)->decl->as.fun.scope;
         da_foreach(ast_stmt_t*, stmt, &(*d)->body->stmts) {
           if(!typecheck_stmt(t, *stmt, (*d)->decl->as.fun.sig->ret->resolved_type)) return false;
         }
@@ -1857,8 +1985,6 @@ static inline int compile_funcall(program_t* p, scope_t* scope, ast_funcall_t* f
 }
 
 static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
-  (void)scope;
-  
   switch(e->kind) {
       case EXPR_SYMBOL:
         TODO("compile_expr: EXPR_SYMBOL");
@@ -1946,6 +2072,7 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
     case TYPE_ADDR:   return &ffi_type_pointer;
     case TYPE_ARRAY:  return &ffi_type_pointer;
     case TYPE_STRUCT: return NULL;
+    case TYPE_MODULE: return NULL;
     case TYPE_ALIAS:  return type_to_ffi_type(*t.as.alias.target);
     case TYPE_FUNC:   return &ffi_type_pointer; 
     case TYPES_COUNT:
@@ -2188,7 +2315,7 @@ int main() {
   ast_root_t* root = parse(&parser, &tok);
   if(!root) return 1;
 
-  print_ast(stdout, (ast_node_t*)root, 0);
+  // print_ast(stdout, (ast_node_t*)root, 0);
 
   if(!typecheck(&tc, root)) return 1;
 

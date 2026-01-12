@@ -23,3 +23,8 @@ clean:
 run: bin/main
 	./bin/main
 .PHONY: run
+
+debug: bin/main
+	gdb ./bin/main
+.PHONY: run
+
