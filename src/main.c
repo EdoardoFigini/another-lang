@@ -50,7 +50,7 @@ const char* source =
   "\n"
   "export main : () -> i64 {\n"
   // " puts(\"Hello World!\\n\".c_str());\n"
-  " bar(5);\n"
+  " bar();\n"
   // " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   " return 1 / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   "}\n"
@@ -461,7 +461,6 @@ typedef enum {
   AST_FUNC_DECL,
   AST_FUNC_DEF,
   AST_VAR_DEF,
-  AST_FUNCALL,
   AST_TYPE,
   AST_BODY,
   AST_PARAM,
@@ -698,16 +697,6 @@ typedef struct {
 
 typedef struct _ast_expr_t ast_expr_t;
 
-typedef struct {
-  AST_DEFAULT_FIELDS;
-  const char* name;
-  struct {
-    ast_expr_t** items;
-    size_t count;
-    size_t capacity;
-  } args;
-} ast_funcall_t;
-
 typedef enum {
   OP_INVALID = TOK_EOF,
   OP_PLUS    = '+',
@@ -795,15 +784,15 @@ struct _ast_expr_t {
 typedef enum {
   STMT_EMPTY = 0,
   STMT_RET,
-  STMT_FUNCALL,
+  STMT_EXPR,
 } ast_stmt_kind_t;
 
 typedef struct {
   AST_DEFAULT_FIELDS;
   ast_stmt_kind_t kind;
   union {
-    ast_funcall_t* func;
-    ast_expr_t*    retval;
+    ast_expr_t* expression;
+    ast_expr_t* retval;
   } as;
 } ast_stmt_t;
 
@@ -817,42 +806,6 @@ struct _ast_body_t {
 };
 
 static inline ast_expr_t* parse_expr(parser_t* p, int bp);
-
-// funcall = '(' [ arg ( ',' arg )* ] ')'
-static inline ast_funcall_t* parse_funcall(parser_t* p, const char* name) {
-  symbol_t* s = resolve_symbol(p->current_scope, name, SYMB_FUNC);
-  if(!s) {
-    DIAGF(p, ERROR, "Undeclared function `%s`.\n", name);
-    return NULL;
-  }
-
-  ast_funcall_t* n = arena_alloc(&p->arena, sizeof(*n));
-  n->ast_kind = AST_FUNCALL;
-
-  if(!expect(p, '(')) return NULL;
-  next(p);
-
-  n->name = arena_strdup(&p->arena, name);
-
-  if (!tok_is(p, ')')) {
-    ast_expr_t* arg = parse_expr(p, 0);
-    if(!arg) return NULL;
-    da_append(&n->args, arg);
-
-    while(tok_is(p, ',')) {
-      if(!expect(p, ',')) return NULL;
-      next(p);
-
-      arg = parse_expr(p, 0);
-      if(!arg) return NULL;
-      da_append(&n->args, arg);
-    }
-  }
-  if(!expect(p, ')')) return NULL;
-  next(p);
-
-  return n;
-}
 
 static inline ast_expr_t* parse_primary_expr(parser_t* p) {
   ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
@@ -1045,19 +998,11 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     }
     if(!expect(p,';')) return NULL;
     next(p);
-  } else if (tok_is(p, TOK_IDENT)) {
-    if (!expect(p, TOK_IDENT)) return NULL;
-    const char* name = get_tok(p).as.s; 
-    next(p);
-
-    if (tok_is(p, '(')) {
-      ast_funcall_t* fc = parse_funcall(p, name);
-      if(!fc) return NULL;
-      n->kind = STMT_FUNCALL;
-      n->as.func = fc;
-    } else if (tok_is(p, ':')) {
-      TODO("parse_stmt: assignments");
-    }
+  } else {
+    n->kind = STMT_EXPR;
+    ast_expr_t* e = parse_expr(p, 0);
+    if(!e) return NULL;
+    n->as.expression = e; 
     if(!expect(p,';')) return NULL;
     next(p);
   }
@@ -1378,8 +1323,8 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
         case STMT_RET:
           print_ast(stream, (ast_node_t*)stmt->as.retval, level + 2);
           break;
-        case STMT_FUNCALL:
-          print_ast(stream, (ast_node_t*)stmt->as.func, level + 2);
+        case STMT_EXPR:
+          print_ast(stream, (ast_node_t*)stmt->as.expression, level + 2);
           break;
         default: break;
       }
@@ -1405,15 +1350,6 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
       print_ast(stream, (ast_node_t*)def->decl, level + 2);
       if(def->body)
         print_ast(stream, (ast_node_t*)def->body, level + 2);
-      break;
-    case AST_FUNCALL:
-      ast_funcall_t* fun = (ast_funcall_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_FUNCALL");
-      fprintf(stream, "%*sName: %s\n", level + 2, "", fun->name);
-      fprintf(stream, "%*sArgs:\n", level + 2, "");
-      da_foreach(ast_expr_t*, a, &fun->args) {
-        print_ast(stream, (ast_node_t*)*a, level + 2);
-      }
       break;
     case AST_TYPE:
       fprintf(stream, "%*s%s\n", level, "", "AST_TYPE");
@@ -1822,10 +1758,8 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         return false; 
       }
       break;
-    case STMT_FUNCALL:
-      da_foreach(ast_expr_t*, expr, &stmt->as.func->args) {
-        if(!typecheck_expr(t, *expr)) return false;
-      }
+    case STMT_EXPR:
+      if(!typecheck_expr(t, stmt->as.expression)) return false;
       break;
     default:
       UNREACHABLE("typecheck_stmt");
@@ -1967,6 +1901,7 @@ typedef struct {
 
 static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e);
 
+#if 0
 // TODO: delay address resolution after compilation
 static inline int compile_funcall(program_t* p, scope_t* scope, ast_funcall_t* f) {
   symbol_t* symbol = resolve_symbol(scope, f->name, SYMB_FUNC);
@@ -1983,6 +1918,7 @@ static inline int compile_funcall(program_t* p, scope_t* scope, ast_funcall_t* f
 
   return 0;
 }
+#endif
 
 static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
   switch(e->kind) {
@@ -2046,7 +1982,7 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
 static inline int compile_stmt(program_t* p, scope_t* scope, ast_stmt_t* s) {
   switch(s->kind) {
     case STMT_EMPTY: return 0;
-    case STMT_FUNCALL: return compile_funcall(p, scope, s->as.func);
+    case STMT_EXPR: return compile_expr(p, scope, s->as.expression);
     case STMT_RET: {
       compile_expr(p, scope, s->as.retval);
       // TODO: function epilog -> destroy frame, clean stack
