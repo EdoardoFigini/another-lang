@@ -18,13 +18,13 @@
 
 #define UNREACHABLE(fmt, ...) \
   do { \
-    fprintf(stderr, "[FATAL]: UNREACHABLE\n  %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);\
+    fprintf(stderr, "[FATAL] UNREACHABLE\n  %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);\
     abort();\
   } while(0);
 
 #define TODO(fmt, ...) \
   do { \
-    fprintf(stderr, "[FATAL]: UNIMPLEMENTED\n  %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);\
+    fprintf(stderr, "[FATAL] UNIMPLEMENTED\n  %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);\
     abort();\
   } while(0);
 
@@ -50,7 +50,7 @@ const char* source =
   "\n"
   "export main : () -> i64 {\n"
   // " puts(\"Hello World!\\n\".c_str());\n"
-  " bar();\n"
+  " ciao = bar();\n"
   // " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   " return 1 / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   "}\n"
@@ -176,7 +176,7 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
         case '\"': sb_n_append(&sb, "\"", 1); break;
         case '\\': sb_n_append(&sb, "\\", 1); break;
         default:
-          fprintf(stderr, "[ERROR]: %zu:%zu: Unknown escape sequence\n", line, col);
+          fprintf(stderr, "[ERROR] %zu:%zu: Unknown escape sequence\n", line, col);
           return NULL;
       }
 
@@ -185,7 +185,7 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
       if      (**end == '\"') break;
       else if (**end == '\\') escape = 1;
       else if (**end == '\n') {
-        fprintf(stderr, "[ERROR]: %zu:%zu: Missing closing `\"`\n", line, col);
+        fprintf(stderr, "[ERROR] %zu:%zu: Missing closing `\"`\n", line, col);
         return NULL;
       }
       else
@@ -332,6 +332,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
       case '+':
       case '*':
       case '/':
+      case '=':
       case '%':
         tok = (token_t){ .kind = *p, .start = p, .len = 1 }; 
         break;
@@ -410,7 +411,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
           while(line_start != t->source.items && *(line_start-1) != '\n') line_start--;
           while(*line_end && *line_end != '\n') line_end++;
           int line_length = line_end - line_start;
-          fprintf(stderr, "[ERROR]: %zu:%zu Unrecognized token (%c, 0x%x)\n%.*s\n%*s^\n", line, col, *p, *p, line_length, line_start, (int)col - 1, "");
+          fprintf(stderr, "[ERROR] Lexer:\n  %zu:%zu Unrecognized token (%c, 0x%x)\n%.*s\n%*s^\n", line, col, *p, *p, line_length, line_start, (int)col - 1, "");
           // TODO: continue instead of returning
           return 1;
         }
@@ -482,7 +483,7 @@ typedef enum {
 
 static inline token_t get_tok(parser_t* p) {
   if (p->current >= p->tokens.count) {
-    fprintf(stderr, "[FATAL]: No more tokens.");
+    fprintf(stderr, "[FATAL] Lexer\n  No more tokens.");
     abort();
   }
   return p->tokens.items[p->current];
@@ -705,12 +706,14 @@ typedef enum {
   OP_DIV     = '/',
   OP_REM     = '%',
   OP_CALL    = '(',
+  OP_ASSIGN  = '=',
   OP_MEMB    = '.',
   OP_SCOPE   = TOK_COLCOL,
 } op_kind_t;
 
 enum _bp {
   BP_NONE = 0,
+  BP_ASSIGN,
   BP_ADD,
   BP_MULT,
   BP_CALL,
@@ -725,6 +728,7 @@ const enum _bp expr_bp_table[] = {
   [OP_DIV]     = BP_MULT,
   [OP_REM]     = BP_MULT,
   [OP_CALL]    = BP_CALL,
+  [OP_ASSIGN]  = BP_ASSIGN,
   [OP_MEMB]    = BP_ACCESS,
   [OP_SCOPE]   = BP_ACCESS,
 };
@@ -738,6 +742,7 @@ typedef enum {
   EXPR_ACCESS,
   EXPR_FUNCALL,
   EXPR_SUBEXPR,
+  EXPR_ASSIGNMENT,
 } ast_expr_kind_t;
 
 struct _ast_expr_t {
@@ -777,6 +782,10 @@ struct _ast_expr_t {
         size_t capacity;
       } args;
     } funcall;
+    struct {
+      ast_expr_t* lhs;
+      ast_expr_t* rhs;
+    } assign;
     ast_expr_t* subexpr;
   } as;
 };
@@ -886,6 +895,9 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
       case OP_CALL: 
         kind = EXPR_FUNCALL;
         break;
+      case OP_ASSIGN:
+        kind = EXPR_ASSIGNMENT;
+        break;
       case OP_MEMB: 
       case OP_SCOPE: 
         kind = EXPR_ACCESS;
@@ -963,6 +975,19 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
         lhs = n;
         break;
       }
+      case EXPR_ASSIGNMENT: {
+        ast_expr_t* rhs = parse_expr(p, curr_bp + 1);
+        if(!rhs) return NULL;
+
+        ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
+        n->ast_kind = AST_EXPR;
+        n->kind = kind;
+        n->as.assign.lhs = lhs;
+        n->as.assign.rhs = rhs;
+
+        lhs = n;
+        break;
+      }
       case EXPR_SYMBOL:
       case EXPR_STRING:
       case EXPR_NUMBER:
@@ -974,8 +999,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
 }
 
 // stmt = return [ expr ] ';' 
-//      | ident funcall ';'
-//      | ident ':' [ type ] '=' expr ';'
+//      | expr ';'
 //      | ';'
 static inline ast_stmt_t* parse_stmt(parser_t* p) {
   ast_stmt_t* n = arena_alloc(&p->arena, sizeof(*n));
@@ -1004,6 +1028,7 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     if(!e) return NULL;
     n->as.expression = e; 
     if(!expect(p,';')) return NULL;
+    // DIAGF(p, WARN, "Unused expression result");
     next(p);
   }
 
@@ -1311,6 +1336,13 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
         case EXPR_SUBEXPR:
           fprintf(stream, " (%s)\n", "EXPR_SUBEXPR");
           print_ast(stream, (ast_node_t*)expr->as.subexpr, level + 2);
+          break;
+        case EXPR_ASSIGNMENT:
+          fprintf(stream, " (%s)\n", "EXPR_ASSIGNMENT");
+          fprintf(stream, "%*slhs:\n", level + 2, "");
+          print_ast(stream, (ast_node_t*)expr->as.assign.lhs, level + 2);
+          fprintf(stream, "%*srhs:\n", level + 2, "");
+          print_ast(stream, (ast_node_t*)expr->as.assign.rhs, level + 2);
           break;
         // default: break;
       }
@@ -1682,13 +1714,13 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
     case EXPR_ACCESS:
       if (expr->as.access.op == OP_SCOPE) {
         if (expr->as.access.owner->type->kind != TYPE_MODULE) {
-          fprintf(stderr, "[ERROR]: Typechecker\n Is not a module.\n");
+          fprintf(stderr, "[ERROR] Typechecker\n Is not a module.\n");
           return false;
         }
         TODO("typecheck_expr: EXPR_ACCESS - module fields");
       } else if (expr->as.access.op == OP_MEMB) {
         if (expr->as.access.owner->type->kind != TYPE_STRUCT) {
-          fprintf(stderr, "[ERROR]: Typechecker\n Is not a structure.\n");
+          fprintf(stderr, "[ERROR] Typechecker\n Is not a structure.\n");
           return false;
         }
         TODO("typecheck_expr: EXPR_ACCESS - struct fields");
@@ -1700,7 +1732,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       if(expr->as.funcall.callee->kind == EXPR_SYMBOL) {
         symbol_t* symb = resolve_symbol_any(t->current_scope, expr->as.funcall.callee->as.symbol); 
         if(!symb) {
-          fprintf(stderr, "[ERROR]: Typechecker\n No symbol `%s` in current scope.\n", expr->as.funcall.callee->as.symbol);
+          fprintf(stderr, "[ERROR] Typechecker\n No symbol `%s` in current scope.\n", expr->as.funcall.callee->as.symbol);
           return false;
         }
 
@@ -1711,7 +1743,8 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         if (expr->as.funcall.args.count != symb->type->as.func.params.count) {
             fprintf(
               stderr, 
-              "[ERROR]: Typechecker\n Mismatched number of arguments in function call: expected %zu, got %zu.\n",
+              "[ERROR] Typechecker\n  "
+              "Mismatched number of arguments in function call: expected %zu, got %zu.\n",
               symb->type->as.func.params.count,
               expr->as.funcall.args.count
             );
@@ -1723,22 +1756,27 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
           type_t const* b = da_at(symb->type->as.func.params, i);
           if (!type_equals(*a, *b)) {
             // TODO: find way to retrieve argument name for better diagnostics
-            fprintf(stderr, "[ERROR]: Typechecker\n Mismatched type for argument %zu in function call.\n", i);
+            fprintf(stderr, "[ERROR] Typechecker\n Mismatched type for argument %zu in function call.\n", i);
             return false;
           }
         }
 
-        // TODO: change type type in symbol struct.
         expr->type = symb->type->as.func.ret;
         return true;
       } else {
         TODO("typecheck_expr: EXPR_FUNCALL - callee not a symbol");
       }
-      TODO("typecheck_expr: EXPR_FUNCALL");
       return true;
     case EXPR_SUBEXPR:
-      TODO("typecheck_expr: EXPR_SUBEXPR");
-      break;
+      if (!typecheck_expr(t, expr->as.subexpr)) return false;
+      expr->type = expr->as.subexpr->type;
+      return true; 
+    case EXPR_ASSIGNMENT:
+      expr->type = t->builtins.none;
+      TODO("typecheck_expr: EXPR_ASSIGNMENT");
+      return true;
+    default:
+      UNREACHABLE("typecheck_expr");
   }
   return true;
 }
@@ -1750,7 +1788,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
     case STMT_RET:
       if(!typecheck_expr(t, stmt->as.retval)) return false;
       if(!type_equals(*stmt->as.retval->type, *ret_type)) {
-        fprintf(stderr, "[ERROR]: Typechecker\n  Incompatible return type: have ");
+        fprintf(stderr, "[ERROR] Typechecker\n  Incompatible return type: have ");
         print_type(stderr, stmt->as.retval->type);
         fprintf(stderr, ", expect ");
         print_type(stderr, ret_type);
@@ -1819,7 +1857,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
         if(!resolve_func_decl(t, *d)) return false;
 
         if(!(*d)->as.fun.has_body && !((*d)->flags & SPEC_EXTERN)) {
-          fprintf(stderr, "[ERROR]: Typechecker\n  Cannot define a non-extern function without a body.\n");
+          fprintf(stderr, "[ERROR] Typechecker\n  Cannot define a non-extern function without a body.\n");
           return false;
         }
         break;
@@ -1906,7 +1944,7 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e);
 static inline int compile_funcall(program_t* p, scope_t* scope, ast_funcall_t* f) {
   symbol_t* symbol = resolve_symbol(scope, f->name, SYMB_FUNC);
   if (!symbol) {
-    fprintf(stderr, "[ERROR]: Unresolved symbol `%s`", f->name);
+    fprintf(stderr, "[ERROR] Unresolved symbol `%s`", f->name);
     return 1;
   }
 
@@ -1957,6 +1995,7 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
             TODO("compile_expr: member access binop");
           case OP_SCOPE:
             TODO("compile_expr: scope access binop");
+          case OP_ASSIGN:
           case OP_CALL:
           case OP_INVALID:
           default:
@@ -1972,6 +2011,8 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         TODO("compile_expr: EXPR_FUNCALL");
       case EXPR_SUBEXPR:
         return compile_expr(p, scope, e->as.subexpr);
+      case EXPR_ASSIGNMENT:
+        TODO("compile_expr: EXPR_ASSIGNMENT");
       default:
         UNREACHABLE("compile_expr");
   }
@@ -2020,7 +2061,7 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
 static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
   symbol_t* symbol = resolve_symbol(d->as.fun.scope, d->name, SYMB_FUNC);
   if (!symbol) {
-    fprintf(stderr, "[ERROR]: Unresolved symbol `%s`\n", d->name);
+    fprintf(stderr, "[ERROR] Codegen\n  Unresolved symbol `%s`\n", d->name);
     return 1;
   }
 
@@ -2044,7 +2085,7 @@ static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
     );
 
     if (status != FFI_OK) {
-      fprintf(stderr, "[ERROR]: Could not initialize FFI CIF\n");
+      fprintf(stderr, "[ERROR] Codegen\n  Could not initialize FFI CIF\n");
       return 1;
     }
 
