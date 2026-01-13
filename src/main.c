@@ -49,6 +49,14 @@ const char* source =
   "extern puts: (s: char[]) -> i32;\n"
   "extern floor: (f: f32) -> i32;\n"
   "\n"
+  // "struct hello {\n"
+  // " foo: i32,\n"
+  // " baz: f32,\n"
+  // "}\n"
+  "pippo : i32 = 0;\n"
+  "pluto : f32[];\n"
+  "extern topolino : str;\n"
+  "\n"
   "export main : () -> i32 {\n"
   // " puts(\"Hello World!\\n\".c_str());\n"
   " bar();\n"
@@ -682,23 +690,28 @@ typedef struct {
   union {
     struct {
       ast_sig_t* sig;
-      int has_body;
+      bool has_body;
       scope_t* scope;
     } fun;
     struct {
       ast_type_t* type;
+      bool initialized;
     } var;
   } as;
   symbol_t* symbol;
+  size_t tok_idx;
 } ast_decl_t;
+
+typedef struct _ast_expr_t ast_expr_t;
 
 typedef struct {
   AST_DEFAULT_FIELDS;
   ast_decl_t* decl;
-  ast_body_t* body;
+  union {
+    ast_body_t* body;
+    ast_expr_t* init;
+  };
 } ast_def_t;
-
-typedef struct _ast_expr_t ast_expr_t;
 
 typedef enum {
   OP_INVALID = TOK_EOF,
@@ -1148,7 +1161,7 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
 
 // func_def = func_decl body
 static inline ast_def_t* parse_func_def(parser_t* p, ast_decl_t* decl) {
-  // NOTE: skip until '{', assume definition has been correctly parsed by
+  // NOTE: skip until '{', assume declaration has been correctly parsed by
   // parse_func_decl in previous pass
   while(!tok_is(p, '{')) next(p);
 
@@ -1168,6 +1181,28 @@ static inline ast_def_t* parse_func_def(parser_t* p, ast_decl_t* decl) {
   return n;
 }
 
+// var_def = var_decl [ '=' expr ] ';'
+static inline ast_def_t* parse_var_def(parser_t* p, ast_decl_t* decl) {
+  while(!tok_is(p, '=') && !tok_is(p, ';')) next(p);
+
+  ast_def_t *n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_VAR_DEF;
+  n->decl = decl;
+
+  if(tok_is(p, '=')) {
+    if(!expect(p, '=')) return NULL;
+    next(p);
+    ast_expr_t* init = parse_expr(p, 0);
+    if(!init) return NULL;
+    n->init = init;
+  }
+
+  if(!expect(p, ';')) return NULL;
+  next(p);
+
+  return n;
+}
+
 // func_decl = sig ( ';' | '{' )
 static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_flags_t flags) {
   ast_decl_t *n = arena_alloc(&p->arena, sizeof(*n));
@@ -1175,10 +1210,11 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
   n->flags = flags;
   n->name = arena_strdup(&p->arena, name);
   n->kind = DECL_KIND_FUNC;
+  n->tok_idx = p->current;
 
   symb_storage_t sto = STO_SCOPE;
-  if(flags & STO_EXTERN) sto = STO_EXTERN; 
-  if(flags & STO_EXPORT) sto = STO_EXPORT; 
+  if(flags & SPEC_EXTERN) sto = STO_EXTERN; 
+  if(flags & SPEC_EXPORT) sto = STO_EXPORT; 
 
   n->symbol = make_symbol(p->current_scope, SYMB_FUNC, sto, n->name, NULL);
 
@@ -1194,7 +1230,7 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
   } else {
     if(!expect(p, '{')) return NULL;
     next(p);
-    n->as.fun.has_body = 1;
+    n->as.fun.has_body = true;
     // NOTE: delay body parsing to parse_func_decl
     for (int pars = 1; pars && !tok_is(p, TOK_EOF); next(p)) {
       if      (tok_is(p,'{')) pars++;
@@ -1203,6 +1239,33 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
   }
 
   exit_scope(p);
+
+  return n;
+}
+
+static inline ast_decl_t* parse_var_decl(parser_t* p, const char* name, spec_flags_t flags) {
+  ast_decl_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_VAR_DECL;
+  n->flags = flags;
+  n->name = arena_strdup(&p->arena, name);
+  n->kind = DECL_KIND_VAR;
+  n->tok_idx = p->current;
+
+  symb_storage_t sto = STO_SCOPE;
+  if(flags & SPEC_EXTERN) sto = STO_EXTERN; 
+  if(flags & SPEC_EXPORT) sto = STO_EXPORT;
+
+  n->symbol = make_symbol(p->current_scope, SYMB_VAR, sto, n->name, NULL);
+
+  ast_type_t* type = parse_type(p);
+  if(!type) return NULL;
+  n->as.var.type = type;
+
+  if(tok_is(p, '=')) n->as.var.initialized = true;
+  while(!tok_is(p, ';')) next(p); // skip initialization if present
+
+  if(!expect(p, ';')) return NULL;
+  next(p);
 
   return n;
 }
@@ -1223,6 +1286,7 @@ typedef struct {
 } ast_root_t;
 
 // root: ( ident ':' func_decl [ func_def ] )* 
+//     | ident ':' var_def
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->source = t->source;
   p->tokens = t->tokens;
@@ -1250,7 +1314,10 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
 
       da_append(&n->decls, decl);
     } else {
-      TODO("variable definitions");
+      ast_decl_t* decl = parse_var_decl(p, name, flags);
+      if (!decl) return NULL;
+
+      da_append(&n->decls, decl);
     }
   }
 
@@ -1258,10 +1325,18 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->pass++;
 
   da_foreach(ast_decl_t*, decl, &n->decls) {
-    if ((*decl)->kind != DECL_KIND_FUNC) continue;
-    if (!(*decl)->as.fun.has_body) continue;
+    if((*decl)->flags & SPEC_EXTERN) continue;
 
-    ast_def_t* def = parse_func_def(p, *decl);
+    ast_def_t* def = NULL;
+    p->current = (*decl)->tok_idx;
+    if ((*decl)->kind == DECL_KIND_FUNC) {
+      def = parse_func_def(p, *decl);
+    } else if ((*decl)->kind == DECL_KIND_VAR) {
+      def = parse_var_def(p, *decl);
+    } else {
+      UNREACHABLE("parse definition");
+    }
+
     if(!def) return NULL;
 
     da_append(&n->top_level, def);
@@ -1760,9 +1835,9 @@ typedef struct {
       void* __todo;
     } func;
   } as;
-} impl_t;
+} i_method_t;
 
-impl_t* find_binop_impl(const type_t* owner, op_kind_t op, const type_t* other) {
+i_method_t* find_binop_impl(const type_t* owner, op_kind_t op, const type_t* other) {
   (void)owner;
   (void)op;
   (void)other;
@@ -1794,7 +1869,7 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
     }
 
     // TODO: is this actually the correct way? 
-    impl_t* impl = NULL;
+    i_method_t* impl = NULL;
     if      (left->kind  == TYPE_STRUCT) impl = find_binop_impl(left, op, right);
     else if (right->kind == TYPE_STRUCT) impl = find_binop_impl(right, op, left);
     if (!impl) {
@@ -1987,7 +2062,7 @@ static inline bool resolve_func_decl(typechecker_t* t, ast_decl_t* decl) {
   sig_type->as.func.ret = decl->as.fun.sig->ret->resolved_type;
 
   da_append(&t->custom_types, sig_type);
-  decl->as.fun.sig->resolved_type = sig_type; 
+  decl->as.fun.sig->resolved_type = sig_type;
   decl->symbol->type = sig_type;
 
   return true;
@@ -2007,6 +2082,8 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   t->builtins.str       = make_type(t, TYPE_STR,  "str",  1);
   t->builtins.addr      = make_type(t, TYPE_ADDR, "addr", 1);
 
+  t->current_scope = root->scope;
+
   da_foreach(ast_decl_t*, d, &root->decls) {
     switch((*d)->kind) {
       case DECL_KIND_FUNC:
@@ -2016,10 +2093,21 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
           fprintf(stderr, "[ERROR] Typechecker\n  Cannot define a non-extern function without a body.\n");
           return false;
         }
+        if((*d)->as.fun.has_body && ((*d)->flags & SPEC_EXTERN)) {
+          fprintf(stderr, "[ERROR] Typechecker\n  Cannot define an extern function with a body.\n");
+          return false;
+        }
         break;
       case DECL_KIND_VAR:
-        TODO("resolve_var_decl");
-        abort();
+        if(!resolve_type_decl(t, (*d)->as.var.type)) return false;
+        (*d)->symbol->type = (*d)->as.var.type->resolved_type;
+
+        if((*d)->as.var.initialized && ((*d)->flags & SPEC_EXTERN)) {
+          fprintf(stderr, "[ERROR] Typechecker\n  Cannot initialize an extern variable.\n");
+          return false;
+        }
+
+        break;
       default:
         UNREACHABLE("typecheck");
     }
@@ -2027,7 +2115,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   da_foreach(ast_def_t*, d, &root->top_level) {
     switch((*d)->decl->kind) {
       case DECL_KIND_FUNC:
-        da_foreach(symbol_t, symb, &(*d)->decl->as.fun.scope->parent->symbols) {
+        da_foreach(symbol_t, symb, &t->current_scope->symbols) {
           if (
               symb != (*d)->decl->symbol && 
               symb->kind == SYMB_FUNC &&
@@ -2036,19 +2124,38 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
           ) {
             fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for function `%s` with type ", (*d)->decl->name);
             print_type(stderr, (*d)->decl->as.fun.sig->resolved_type);
-            fprintf(stderr, "in this scope.\n");
+            fprintf(stderr, " in this scope.\n");
             return false;
           }
         }
+        // NOTE: allow shadowing -> do not check in parent scope
+        // TODO: maybe issue shadowing warning?
 
         t->current_scope = (*d)->decl->as.fun.scope;
         da_foreach(ast_stmt_t*, stmt, &(*d)->body->stmts) {
           if(!typecheck_stmt(t, *stmt, (*d)->decl->as.fun.sig->ret->resolved_type)) return false;
         }
+        t->current_scope = t->current_scope->parent; 
         break;
       case DECL_KIND_VAR:
-        TODO("typecheck_var_def");
-        abort();
+        da_foreach(symbol_t, symb, &t->current_scope->symbols) {
+          if (
+              symb != (*d)->decl->symbol && 
+              symb->kind == SYMB_VAR &&
+              strcmp((*d)->decl->name, symb->name) == 0
+          ) {
+            fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope", (*d)->decl->name);
+            return false;
+          }
+          // NOTE: allow shadowing -> do not check in parent scope
+          // TODO: maybe issue shadowing warning?
+        }
+
+        if((*d)->decl->as.var.initialized) {
+          if(!typecheck_expr(t, (*d)->init)) return false;
+          // TODO: initialization should be constant
+        }
+        break;
       default:
         UNREACHABLE("typeckeck");
     }
