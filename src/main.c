@@ -47,12 +47,14 @@
  
 const char* source = 
   "extern puts: (s: char[]) -> i32;\n"
+  "extern floor: (f: f32) -> i32;\n"
   "\n"
-  "export main : () -> i64 {\n"
+  "export main : () -> i32 {\n"
   // " puts(\"Hello World!\\n\".c_str());\n"
-  " ciao = bar();\n"
+  " bar();\n"
   // " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
-  " return 1 / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
+  " return floor(1 / 3.0);\n" 
+  // " return 1 / 3 - 4.0 * ( 5 + 6 * 7 ) % 9;\n"
   "}\n"
   "\n"
   "bar : () -> str {\n"
@@ -1674,6 +1676,157 @@ static inline type_t* resolve_type(typechecker_t* t, const char* name, int depth
   return res;
 }
 
+static inline bool is_op_cmp(op_kind_t op) {
+  (void)op;
+  // no comparison operator for now
+  // TODO: add cmp operators here
+  return 0;
+}
+
+static inline bool is_op_arithmetic(op_kind_t op) {
+  return op == OP_PLUS  || 
+         op == OP_MINUS ||
+         op == OP_MULT  ||
+         op == OP_DIV   ||
+         op == OP_REM;
+}
+
+typedef enum {
+  RK_BOOL = 0,
+  RK_U32,
+  RK_I32,
+  RK_U64,
+  RK_I64,
+  RK_F32,
+  RK_F64,
+} num_rank_t;
+
+static inline num_rank_t get_type_rank(const type_t* t) {
+  switch(t->kind) {
+    case TYPE_BOOL: return RK_BOOL;
+    case TYPE_U32:  return RK_U32; 
+    case TYPE_I32:  return RK_I32; 
+    case TYPE_I64:  return RK_I64; 
+    case TYPE_ADDR:
+    case TYPE_U64:  return RK_U64; 
+    case TYPE_F32:  return RK_F32; 
+    case TYPE_F64:  return RK_F64; 
+    case TYPE_CHAR:
+    case TYPE_STR:
+    case TYPE_ARRAY:
+    case TYPE_STRUCT:
+    case TYPE_MODULE:
+    case TYPE_ALIAS:
+    case TYPE_FUNC:
+    case TYPE_NONE:
+    case TYPES_COUNT:
+    default:
+      UNREACHABLE("get_type_rank - not a number");
+  }
+}
+
+static inline type_t const* find_common_type(const type_t* a, const type_t* b) {
+  num_rank_t ra = get_type_rank(a);
+  num_rank_t rb = get_type_rank(b);
+
+  return ra >= rb ? a : b;
+}
+
+static inline bool is_numeric(const type_t* t) {
+  if (t->kind == TYPE_ALIAS) return is_numeric(t->as.alias.target);
+  return t->kind == TYPE_I32 ||
+         t->kind == TYPE_I64 ||
+         t->kind == TYPE_U32 ||
+         t->kind == TYPE_U64 ||
+         t->kind == TYPE_F32 ||
+         t->kind == TYPE_F64 ||
+         t->kind == TYPE_ADDR;
+}
+
+typedef enum {
+  IMPL_BINOP,
+  IMPL_FUNC
+} impl_kind_t;
+
+typedef struct {
+  type_t* owner;
+  impl_kind_t kind;
+  union {
+    struct {
+      op_kind_t op;
+      type_t* other;
+    } binop;
+    struct {
+      void* __todo;
+    } func;
+  } as;
+} impl_t;
+
+impl_t* find_binop_impl(const type_t* owner, op_kind_t op, const type_t* other) {
+  (void)owner;
+  (void)op;
+  (void)other;
+  TODO("find_binop_impl");
+}
+
+static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
+  type_t const* left  = e->as.binop.lhs->type;
+  type_t const* right = e->as.binop.rhs->type;
+  op_kind_t op = e->as.binop.op;
+
+  if (is_op_cmp(op)) {
+    if (type_equals(*left, *right) && is_numeric(left)) {
+      e->type = t->builtins.boolean; 
+      return true;
+    }
+
+    // TODO: look for compare interface implementation in left and right
+
+  } else if (is_op_arithmetic(op)) {
+    if (is_numeric(left) && is_numeric(right)) {
+      const type_t* try_promotion = find_common_type(left, right);
+      if (!try_promotion) {
+        fprintf(stderr, "[ERROR] Typechecker\n  ");
+        return false;
+      }
+      e->type = try_promotion;
+      return true;
+    }
+
+    // TODO: is this actually the correct way? 
+    impl_t* impl = NULL;
+    if      (left->kind  == TYPE_STRUCT) impl = find_binop_impl(left, op, right);
+    else if (right->kind == TYPE_STRUCT) impl = find_binop_impl(right, op, left);
+    if (!impl) {
+      fprintf(stderr, "[ERROR] Typechecker\n  ");
+      print_type(stderr, left);
+      fprintf(stderr, " does not implement interface for `%s` operator and ", tok_kind_str(&t->arena, (tok_kind_t)op));
+      print_type(stderr, right);
+      fprintf(stderr, " operand");
+      fprintf(stderr, "[ERROR] Typechecker\n  ");
+      print_type(stderr, right);
+      fprintf(stderr, " does not implement interface for `%s` operator and ", tok_kind_str(&t->arena, (tok_kind_t)op));
+      print_type(stderr, left);
+      fprintf(stderr, " operand");
+      return false;
+    }
+    e->type = impl->owner;
+    return true;
+  }
+
+  // TODO: unhardcode concat/extend operation (impl?)
+  if (op == OP_PLUS && left->kind == TYPE_STR && right->kind == TYPE_STR) {
+    e->type = t->builtins.str;
+    return true;
+  }
+  if (op == OP_PLUS && left->kind == TYPE_ARRAY && type_equals(*left, *right)) {
+    e->type = left;
+    return true;
+  }
+
+  return false;
+}
+
 static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
   switch(expr->kind) {
     case EXPR_SYMBOL:
@@ -1704,10 +1857,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       if(!typecheck_expr(t, expr->as.binop.lhs)) return false;
       if(!typecheck_expr(t, expr->as.binop.rhs)) return false;
 
-      TODO("typecheck_expr: EXPR_BINOP - supported operator");
-      TODO("typecheck_expr: EXPR_BINOP - result type");
-
-      return true;
+      return resolve_type_binop(t, expr);
     case EXPR_UNOP:
       TODO("typecheck_expr: EXPR_UNOP");
       break;
@@ -1752,11 +1902,17 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         }
 
         for(size_t i = 0; i < expr->as.funcall.args.count; i++) {
-          type_t const* a = da_at(expr->as.funcall.args, i)->type;
+          ast_expr_t* arg = da_at(expr->as.funcall.args, i);
+          if(!typecheck_expr(t, arg)) return false;
+          type_t const* a = arg->type;
           type_t const* b = da_at(symb->type->as.func.params, i);
           if (!type_equals(*a, *b)) {
             // TODO: find way to retrieve argument name for better diagnostics
-            fprintf(stderr, "[ERROR] Typechecker\n Mismatched type for argument %zu in function call.\n", i);
+            fprintf(stderr, "[ERROR] Typechecker\n Mismatched type for argument %zu in function call: expected ", i);
+            print_type(stderr, b);
+            fprintf(stderr, ", got ");
+            print_type(stderr, a);
+            fprintf(stderr, ".\n");
             return false;
           }
         }
@@ -1792,7 +1948,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         print_type(stderr, stmt->as.retval->type);
         fprintf(stderr, ", expect ");
         print_type(stderr, ret_type);
-        fprintf(stderr, ".");
+        fprintf(stderr, ".\n");
         return false; 
       }
       break;
@@ -1844,8 +2000,8 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   t->builtins.i64       = make_type(t, TYPE_I64,  "i64",  2);
   t->builtins.u32       = make_type(t, TYPE_U32,  "u32",  1);
   t->builtins.u64       = make_type(t, TYPE_U64,  "u64",  2);
-  t->builtins.f32       = make_type(t, TYPE_U32,  "f32",  1);
-  t->builtins.f64       = make_type(t, TYPE_U64,  "f64",  2);
+  t->builtins.f32       = make_type(t, TYPE_F32,  "f32",  1);
+  t->builtins.f64       = make_type(t, TYPE_F64,  "f64",  2);
   t->builtins.character = make_type(t, TYPE_CHAR, "char", 1);
   t->builtins.boolean   = make_type(t, TYPE_BOOL, "bool", 1);
   t->builtins.str       = make_type(t, TYPE_STR,  "str",  1);
@@ -1983,6 +2139,8 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         // TODO: handle operator length, signdess and type (when implementing type checker)
         compile_expr(p, scope, e->as.binop.lhs);
         compile_expr(p, scope, e->as.binop.rhs);
+        //TODO: implicit cast if either type is different from the result
+
         // NOTE: if operators are objects, check if implements interface and 
         // emit icall instruction to operator implementation
         switch(e->as.binop.op){
