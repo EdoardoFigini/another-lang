@@ -59,7 +59,7 @@ const char* source =
   "\n"
   "export main : () -> i32 {\n"
   // " puts(\"Hello World!\\n\".c_str());\n"
-  " bar();\n"
+  " baz : str = bar();\n"
   // " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   " return floor(1 / 3.0);\n" 
   // " return 1 / 3 - 4.0 * ( 5 + 6 * 7 ) % 9;\n"
@@ -81,18 +81,21 @@ typedef enum {
   TOK_RETURN,
   TOK_EXTERN,
   TOK_EXPORT,
+  TOK_CONST,
 } tok_kind_t;
 
 typedef enum {
   KW_RETURN = TOK_RETURN,
   KW_EXTERN = TOK_EXTERN,
   KW_EXPORT = TOK_EXPORT,
+  KW_CONST  = TOK_CONST,
 } kw_kind_t;
 
 const char* tok_keywords[] = {
   [KW_RETURN] = "return",
   [KW_EXTERN] = "extern",
   [KW_EXPORT] = "export",
+  [KW_CONST]  = "const",
 };
 
 typedef enum {
@@ -143,6 +146,7 @@ void tok_print(token_t tok) {
       case TOK_RETURN: printf("%-20s", "TOK_RETURN"); break;
       case TOK_EXTERN: printf("%-20s", "TOK_EXTERN"); break;
       case TOK_EXPORT: printf("%-20s", "TOK_EXPORT"); break;
+      case TOK_CONST: printf("%-20s", "TOK_CONST"); break;
       default: printf("%-20s", "<INVALID TOKEN>"); break;
     }
   }
@@ -160,9 +164,11 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_INTLIT: return "integer literal";
       case TOK_REALLIT: return "real literal";
       case TOK_STRLIT: return "string literal";
-      case TOK_RETURN: return "return";
-      case TOK_EXTERN: return "extern";
-      case TOK_EXPORT: return "export";
+      case TOK_RETURN:
+      case TOK_EXTERN:
+      case TOK_EXPORT:
+      case TOK_CONST:
+        return tok_keywords[k];
       default: return "<INVALID TOKEN>";
     }
   }
@@ -489,6 +495,7 @@ typedef enum {
   SPEC_NONE = 0,
   SPEC_EXTERN = 1 << 0,
   SPEC_EXPORT = 1 << 1,
+  SPEC_CONST  = 1 << 2,
 } spec_flags_t;
 
 static inline token_t get_tok(parser_t* p) {
@@ -623,6 +630,18 @@ static inline void exit_scope(parser_t* p) {
   p->current_scope = p->current_scope->parent;
 }
 
+static inline bool tok_is_specifier(parser_t* p) {
+  switch((kw_kind_t)get_tok(p).kind) {
+    case KW_EXTERN:
+    case KW_EXPORT:
+    case KW_CONST:
+      return true;
+    case KW_RETURN:
+    default: 
+      return false;
+  }
+}
+
 // specifiers = ( specifier )*
 static inline spec_flags_t parse_specifiers(parser_t* p) {
   spec_flags_t flags = SPEC_NONE;
@@ -635,6 +654,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
     switch((kw_kind_t)t.kind) {
       case KW_EXTERN: cur_flag = SPEC_EXTERN; break;
       case KW_EXPORT: cur_flag = SPEC_EXPORT; break;
+      case KW_CONST: cur_flag = SPEC_CONST; break;
       case KW_RETURN:
       default: return flags;
     }
@@ -764,6 +784,7 @@ struct _ast_expr_t {
   AST_DEFAULT_FIELDS;
   ast_expr_kind_t kind;
   type_t const* type;
+  bool is_const;
   union {
     const char* symbol;
     const char* s;
@@ -809,6 +830,7 @@ typedef enum {
   STMT_EMPTY = 0,
   STMT_RET,
   STMT_EXPR,
+  STMT_VAR_DEF,
 } ast_stmt_kind_t;
 
 typedef struct {
@@ -817,6 +839,14 @@ typedef struct {
   union {
     ast_expr_t* expression;
     ast_expr_t* retval;
+    struct {
+      const char* name;
+      ast_type_t* type;
+      spec_flags_t flags;
+      symbol_t* symbol;
+      bool initialized;
+      ast_expr_t* init;
+    } var_def;
   } as;
 } ast_stmt_t;
 
@@ -1013,7 +1043,32 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
   }
 }
 
+static inline ast_type_t* parse_type(parser_t* p) {
+  ast_type_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_TYPE;
+
+  if(!expect_with_name(p, TOK_IDENT, "type")) return NULL;
+  token_t tok = get_tok(p);
+  next(p);
+
+  n->name = arena_strdup(&p->arena, tok.as.s);
+  n->array_depth = 0;
+  while(tok_is(p, '[')) {
+    if (!expect(p, '[')) return NULL;
+    next(p);
+    if (!expect(p, ']')) return NULL;
+    next(p);
+    n->array_depth++;
+  }
+
+  return n;
+}
+
+static inline ast_decl_t* parse_var_decl(parser_t* p, const char* name, spec_flags_t flags);
+static inline ast_def_t* parse_var_def(parser_t* p, ast_decl_t* decl);
+
 // stmt = return [ expr ] ';' 
+//      | ( 'specifier' )* ident ':' type [ '=' expr ] ';'
 //      | expr ';'
 //      | ';'
 static inline ast_stmt_t* parse_stmt(parser_t* p) {
@@ -1025,6 +1080,8 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     next(p);
 
     n->kind = STMT_EMPTY;
+    return n;
+ 
   } else if (tok_is(p, TOK_RETURN)) {
     if(!expect(p, TOK_RETURN)) return NULL;
     next(p);
@@ -1037,16 +1094,56 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     }
     if(!expect(p,';')) return NULL;
     next(p);
-  } else {
-    n->kind = STMT_EXPR;
-    ast_expr_t* e = parse_expr(p, 0);
-    if(!e) return NULL;
-    n->as.expression = e; 
-    if(!expect(p,';')) return NULL;
-    // DIAGF(p, WARN, "Unused expression result");
+    return n;
+
+  } else if (tok_is(p, TOK_IDENT) || tok_is_specifier(p)) {
+    size_t saved = p->current;
+    spec_flags_t flags = 0;
+    if(tok_is_specifier(p)) flags = parse_specifiers(p);
+
+    if(!expect(p, TOK_IDENT)) return NULL;
+    const char* name = get_tok(p).as.s;
     next(p);
+
+    if(tok_is(p, ':')) {
+      if(!expect(p, ':')) return NULL;
+      next(p);
+      n->as.var_def.name = arena_strdup(&p->arena, name);
+      n->as.var_def.flags = flags;
+      n->kind = STMT_VAR_DEF;
+
+      // TODO:  type inference
+      ast_type_t* t = parse_type(p);
+      if(!t) return NULL;
+      n->as.var_def.type = t;
+
+      n->as.var_def.symbol = make_symbol(p->current_scope, SYMB_VAR, STO_SCOPE, n->as.var_def.name, NULL);
+
+      if (tok_is(p, '=')) {
+        n->as.var_def.initialized = true;
+        if(!expect(p, '=')) return NULL;
+        next(p);
+
+        ast_expr_t* init = parse_expr(p, 0);
+        if(!init) return NULL;
+        n->as.var_def.init = init;
+      }
+
+      if(!expect(p,';')) return NULL;
+      next(p);
+      return n;
+    }
+
+    p->current = saved;
   }
 
+  n->kind = STMT_EXPR;
+  ast_expr_t* e = parse_expr(p, 0);
+  if(!e) return NULL;
+  n->as.expression = e; 
+  if(!expect(p,';')) return NULL;
+  // DIAGF(p, WARN, "Unused expression result");
+  next(p);
   return n;
 }
 
@@ -1067,27 +1164,6 @@ static inline ast_body_t* parse_body(parser_t* p) {
 
   if(!expect(p, '}')) return NULL;
   next(p);
-
-  return n;
-}
-
-static inline ast_type_t* parse_type(parser_t* p) {
-  ast_type_t* n = arena_alloc(&p->arena, sizeof(*n));
-  n->ast_kind = AST_TYPE;
-
-  if(!expect_with_name(p, TOK_IDENT, "type")) return NULL;
-  token_t tok = get_tok(p);
-  next(p);
-
-  n->name = arena_strdup(&p->arena, tok.as.s);
-  n->array_depth = 0;
-  while(tok_is(p, '[')) {
-    if (!expect(p, '[')) return NULL;
-    next(p);
-    if (!expect(p, ']')) return NULL;
-    next(p);
-    n->array_depth++;
-  }
 
   return n;
 }
@@ -1257,6 +1333,7 @@ static inline ast_decl_t* parse_var_decl(parser_t* p, const char* name, spec_fla
 
   n->symbol = make_symbol(p->current_scope, SYMB_VAR, sto, n->name, NULL);
 
+  // TODO:  type inference
   ast_type_t* type = parse_type(p);
   if(!type) return NULL;
   n->as.var.type = type;
@@ -1350,8 +1427,13 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
     case AST_ROOT:
       ast_root_t* root = (ast_root_t*)n;
       fprintf(stream, "%*s%s\n", level, "","AST_ROOT");
+      fprintf(stream, "%*s%s\n", level + 2, "","DECLARATIONS:");
+      da_foreach(ast_decl_t*, d, &root->decls) {
+        print_ast(stream, (ast_node_t*)*d, level + 4);
+      }
+      fprintf(stream, "%*s%s\n", level + 2, "","DEFINITIONS:");
       da_foreach(ast_def_t*, d, &root->top_level) {
-        print_ast(stream, (ast_node_t*)*d, level + 2);
+        print_ast(stream, (ast_node_t*)*d, level + 4);
       }
       break;
     case AST_EXPR:
@@ -1435,27 +1517,50 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
         case STMT_EXPR:
           print_ast(stream, (ast_node_t*)stmt->as.expression, level + 2);
           break;
+        case STMT_VAR_DEF:
+          fprintf(stream, "%*s%s\n", level, "", "STMT_VAR_DEF");
+          fprintf(stream, "%*sName: %s\n", level + 2, "", stmt->as.var_def.name);
+          fprintf(stream, "%*sFlags: ", level + 2, "");
+          if(stmt->as.var_def.flags & SPEC_EXTERN) fprintf(stream, "extern ");
+          if(stmt->as.var_def.flags & SPEC_EXPORT) fprintf(stream, "export ");
+          if(stmt->as.var_def.flags & SPEC_CONST)  fprintf(stream, "const ");
+          fprintf(stream, "\n");
+          if (stmt->as.var_def.initialized)
+            print_ast(stream, (ast_node_t*)stmt->as.var_def.init, level + 2);
+          break;
         default: break;
       }
       break;
     case AST_VAR_DECL:
+      ast_decl_t* decl = (ast_decl_t*)n;
       fprintf(stream, "%*s%s\n", level, "", "AST_VAR_DECL");
+      fprintf(stream, "%*sName: %s\n", level + 2, "", decl->name);
+      fprintf(stream, "%*sFlags: ", level + 2, "");
+      if(decl->flags & SPEC_EXTERN) fprintf(stream, "extern ");
+      if(decl->flags & SPEC_EXPORT) fprintf(stream, "export ");
+      if(decl->flags & SPEC_CONST)  fprintf(stream, "const ");
+      fprintf(stream, "\n");
       break;
     case AST_VAR_DEF:
       fprintf(stream, "%*s%s\n", level, "", "AST_VAR_DEF");
+      print_ast(stream, (ast_node_t*)((ast_def_t*)n)->decl, level + 2);
+      if(((ast_def_t*)n)->decl->as.var.initialized)
+        print_ast(stream, (ast_node_t*)((ast_def_t*)n)->init, level + 2);
       break;
     case AST_FUNC_DECL:
-      ast_decl_t* decl = (ast_decl_t*)n;
+      decl = (ast_decl_t*)n;
       fprintf(stream, "%*s%s\n", level, "", "AST_FUNC_DECL");
       fprintf(stream, "%*sName: %s\n", level + 2, "", decl->name);
       fprintf(stream, "%*sFlags: ", level + 2, "");
       if(decl->flags & SPEC_EXTERN) fprintf(stream, "extern ");
       if(decl->flags & SPEC_EXPORT) fprintf(stream, "export ");
+      if(decl->flags & SPEC_CONST)  fprintf(stream, "const ");
       fprintf(stream, "\n");
       print_ast(stream, (ast_node_t*)decl->as.fun.sig, level + 2);
       break;
     case AST_FUNC_DEF:
       ast_def_t* def = (ast_def_t*)n;
+      fprintf(stream, "%*s%s\n", level, "", "AST_FUNC_DEF");
       print_ast(stream, (ast_node_t*)def->decl, level + 2);
       if(def->body)
         print_ast(stream, (ast_node_t*)def->body, level + 2);
@@ -1903,12 +2008,14 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
 }
 
 static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
+  expr->is_const = false;
   switch(expr->kind) {
     case EXPR_SYMBOL:
       TODO("typecheck_expr: EXPR_SYMBOL");
       break;
     case EXPR_STRING:
       expr->type = t->builtins.str;
+      expr->is_const = true;
       return true;
     case EXPR_NUMBER:
       if (expr->as.number.ti & TI_REAL) {
@@ -1927,11 +2034,13 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         else
           expr->type = t->builtins.i32;
       }
+      expr->is_const = true;
       return true;
     case EXPR_BINOP:
       if(!typecheck_expr(t, expr->as.binop.lhs)) return false;
       if(!typecheck_expr(t, expr->as.binop.rhs)) return false;
 
+      // TODO: constant folding to mark as constant
       return resolve_type_binop(t, expr);
     case EXPR_UNOP:
       TODO("typecheck_expr: EXPR_UNOP");
@@ -2001,6 +2110,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
     case EXPR_SUBEXPR:
       if (!typecheck_expr(t, expr->as.subexpr)) return false;
       expr->type = expr->as.subexpr->type;
+      expr->is_const = expr->as.subexpr->is_const;
       return true; 
     case EXPR_ASSIGNMENT:
       expr->type = t->builtins.none;
@@ -2012,8 +2122,18 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
   return true;
 }
 
+static inline bool resolve_type_decl(typechecker_t* t, ast_type_t* type) {
+  type_t* res = resolve_type(t, type->name, type->array_depth);
+  if(!res) {
+    fprintf(stderr, "[ERROR] Typechecker\n  Undefined type `%s`.\n", type->name);
+    return false;
+  }
+  type->resolved_type = res;
+
+  return true;
+}
+
 static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* ret_type) {
-  (void)t;
   switch(stmt->kind) {
     case STMT_EMPTY: break;
     case STMT_RET:
@@ -2030,20 +2150,48 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
     case STMT_EXPR:
       if(!typecheck_expr(t, stmt->as.expression)) return false;
       break;
+    case STMT_VAR_DEF:
+      if(!resolve_type_decl(t, stmt->as.var_def.type)) return false;
+      stmt->as.var_def.symbol->type = stmt->as.var_def.type->resolved_type;
+
+      if( stmt->as.var_def.flags & SPEC_EXTERN ) {
+        fprintf(stderr, "[ERROR] Typechecker\n  Cannot define an extern local variable.\n");
+        return false;
+      }
+      if( stmt->as.var_def.flags & SPEC_EXPORT ) {
+        fprintf(stderr, "[ERROR] Typechecker\n  Cannot export a local variable.\n");
+        return false;
+      }
+
+      // TODO: type inference
+      da_foreach(symbol_t, symb, &t->current_scope->symbols) {
+        if (
+            symb != stmt->as.var_def.symbol && 
+            symb->kind == SYMB_VAR &&
+            strcmp(stmt->as.var_def.name, symb->name) == 0
+        ) {
+          fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope", stmt->as.var_def.name);
+          return false;
+        }
+        // NOTE: allow shadowing -> do not check in parent scope
+        // TODO: maybe issue shadowing warning?
+      }
+
+      if(stmt->as.var_def.initialized) {
+        if(!typecheck_expr(t, stmt->as.var_def.init)) return false;
+        if(stmt->as.var_def.type->resolved_type != stmt->as.var_def.init->type) {
+          fprintf(stderr, "[ERROR] Typechecker\n  Incompatible types when initializing type `");
+          print_type(stderr, stmt->as.var_def.type->resolved_type);
+          fprintf(stderr, "` using type `");
+          print_type(stderr, stmt->as.var_def.init->type);
+          fprintf(stderr, "`.\n");
+          return false;
+        }
+      }
+      break;
     default:
       UNREACHABLE("typecheck_stmt");
   }
-
-  return true;
-}
-
-static inline bool resolve_type_decl(typechecker_t* t, ast_type_t* type) {
-  type_t* res = resolve_type(t, type->name, type->array_depth);
-  if(!res) {
-    fprintf(stderr, "[ERROR] Typechecker\n  Undefined type `%s`.\n", type->name);
-    return false;
-  }
-  type->resolved_type = res;
 
   return true;
 }
@@ -2144,7 +2292,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
               symb->kind == SYMB_VAR &&
               strcmp((*d)->decl->name, symb->name) == 0
           ) {
-            fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope", (*d)->decl->name);
+            fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope.\n", (*d)->decl->name);
             return false;
           }
           // NOTE: allow shadowing -> do not check in parent scope
@@ -2153,14 +2301,26 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
         if((*d)->decl->as.var.initialized) {
           if(!typecheck_expr(t, (*d)->init)) return false;
-          // TODO: initialization should be constant
+          if(!(*d)->init->is_const) {
+            fprintf(stderr, "[ERROR] Typechecker\n  Initializer is not a compile-time constant.\n");
+            return false;
+          }
+
+          if(!type_equals(*(*d)->decl->as.var.type->resolved_type, *(*d)->init->type)) {
+            fprintf(stderr, "[ERROR] Typechecker\n  Incompatible types when initializing type `");
+            print_type(stderr, (*d)->decl->as.var.type->resolved_type);
+            fprintf(stderr, "` using type `");
+            print_type(stderr, (*d)->init->type);
+            fprintf(stderr, "`.\n");
+            return false;
+          }
         }
         break;
       default:
         UNREACHABLE("typeckeck");
     }
   }
-  
+ 
   return true;
 }
 
@@ -2295,6 +2455,7 @@ static inline int compile_stmt(program_t* p, scope_t* scope, ast_stmt_t* s) {
       da_append(&p->code, INST_RET);
       return 0;
     }
+    case STMT_VAR_DEF: TODO("compile_stmt - STMT_VAR_DEF");
     default: return 1;
   }
 }
