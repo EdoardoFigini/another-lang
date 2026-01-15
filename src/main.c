@@ -49,10 +49,6 @@ const char* source =
   "extern puts: (s: char[]) -> i32;\n"
   "extern floor: (f: f32) -> i32;\n"
   "\n"
-  // "struct hello {\n"
-  // " foo: i32,\n"
-  // " baz: f32,\n"
-  // "}\n"
   "pippo : i32 = 0;\n"
   "pluto : f32[];\n"
   "extern topolino : str;\n"
@@ -66,7 +62,8 @@ const char* source =
   "}\n"
   "\n"
   "bar : () -> str {\n"
-  " return \"bar\";\n"
+  " bar : str = \"bar\";\n"
+  " return bar;\n"
   "}\n"
   ;
 
@@ -2011,7 +2008,12 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
   expr->is_const = false;
   switch(expr->kind) {
     case EXPR_SYMBOL:
-      TODO("typecheck_expr: EXPR_SYMBOL");
+      symbol_t* s = resolve_symbol_any(t->current_scope, expr->as.symbol); 
+      if (!s) {
+        fprintf(stderr, "[ERROR] Typechecker\n No symbol `%s` in current scope.\n", expr->as.symbol);
+        return false;
+      }
+      expr->type = s->type;
       break;
     case EXPR_STRING:
       expr->type = t->builtins.str;
@@ -2113,8 +2115,18 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       expr->is_const = expr->as.subexpr->is_const;
       return true; 
     case EXPR_ASSIGNMENT:
+      if(!typecheck_expr(t, expr->as.binop.lhs)) return false;
+      if(!typecheck_expr(t, expr->as.binop.rhs)) return false;
+
+      if(expr->as.binop.lhs->type != expr->as.binop.rhs->type) {
+        fprintf(stderr, "[ERROR] Typechecker\n  Incompatible types when assigning expression of type `");
+        print_type(stderr, expr->as.binop.rhs->type);
+        fprintf(stderr, "` to variable of type `");
+        print_type(stderr, expr->as.binop.lhs->type );
+        fprintf(stderr, "`.\n");
+        return false;
+      }
       expr->type = t->builtins.none;
-      TODO("typecheck_expr: EXPR_ASSIGNMENT");
       return true;
     default:
       UNREACHABLE("typecheck_expr");
@@ -2139,11 +2151,11 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
     case STMT_RET:
       if(!typecheck_expr(t, stmt->as.retval)) return false;
       if(!type_equals(*stmt->as.retval->type, *ret_type)) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Incompatible return type: have ");
+        fprintf(stderr, "[ERROR] Typechecker\n  Incompatible return type: have `");
         print_type(stderr, stmt->as.retval->type);
-        fprintf(stderr, ", expect ");
+        fprintf(stderr, "`, expect `");
         print_type(stderr, ret_type);
-        fprintf(stderr, ".\n");
+        fprintf(stderr, "`.\n");
         return false; 
       }
       break;
