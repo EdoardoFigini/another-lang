@@ -56,13 +56,13 @@ const char* source =
   "export main : (arg: str) -> i32 {\n"
   // " puts(\"Hello World!\\n\".c_str());\n"
   " baz : str = \"Hello World!\\n\";\n"
-  " baz = arg;\n"
+  " baz = bar(0, 0);\n"
   // " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
-  // " return floor(1 / 3.0);\n" 
-  " return 1 / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
+  " return floor(1 / 3.0);\n" 
+  // " return 1 / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   "}\n"
   "\n"
-  "bar : (a: char, b: bool) -> str {\n"
+  "bar : (a: i32, b: i32) -> str {\n"
   " bar : str = \"bar\";\n"
   " return bar;\n"
   "}\n"
@@ -547,9 +547,9 @@ typedef struct {
   const char* name;
   symb_kind_t kind;
   symb_storage_t storage;
-  bool is_glob;
   type_t* type;
   uint32_t addr;
+  bool addr_resolved;
 } symbol_t;
 
 struct _scope {
@@ -563,6 +563,11 @@ struct _scope {
     size_t capacity;
   } symbols;
 };
+
+static inline void set_symbol_address(symbol_t* s, uint32_t addr) {
+  s->addr = addr;
+  s->addr_resolved = true;
+}
 
 static inline void print_symbol_table(FILE* stream, scope_t* root);
 
@@ -2301,7 +2306,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
         da_foreach(ast_stmt_t*, stmt, &(*d)->body->stmts) {
           if(!typecheck_stmt(t, *stmt, (*d)->decl->as.fun.sig->ret->resolved_type)) return false;
         }
-        t->current_scope = t->current_scope->parent; 
+        t->current_scope = t->current_scope->parent;
         break;
       case DECL_KIND_VAR:
         da_foreach(symbol_t, symb, &t->current_scope->symbols) {
@@ -2381,28 +2386,15 @@ typedef struct {
     size_t count;
     size_t capacity;
   } externs;
+  struct _patches {
+    struct _patch {
+      uint32_t addr;
+      symbol_t* symbol; 
+    }* items;
+    size_t count;
+    size_t capacity;
+  } patches;
 } program_t;
-
-static inline bool compile_expr(program_t* p, scope_t* scope, ast_expr_t* e);
-
-#if 0
-// TODO: delay address resolution after compilation
-static inline int compile_funcall(program_t* p, scope_t* scope, ast_funcall_t* f) {
-  symbol_t* symbol = resolve_symbol(scope, f->name, SYMB_FUNC);
-  if (!symbol) {
-    fprintf(stderr, "[ERROR] Unresolved symbol `%s`", f->name);
-    return 1;
-  }
-
-  da_foreach(ast_expr_t*, a, &f->args)
-    compile_expr(p, scope, *a);
-
-  da_append(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
-  da_append(&p->code, symbol->addr);
-
-  return 0;
-}
-#endif
 
 static inline bool compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
   switch(e->kind) {
@@ -2475,7 +2467,30 @@ static inline bool compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
       case EXPR_ACCESS:
         TODO("compile_expr: EXPR_ACCESS");
       case EXPR_FUNCALL:
-        TODO("compile_expr: EXPR_FUNCALL");
+        // SysV-style calling convention
+        for(int i = e->as.funcall.args.count - 1; i >= 0; i--) {
+          compile_expr(p, scope, e->as.funcall.args.items[i]);
+        }
+
+        if(e->as.funcall.callee->kind == EXPR_SYMBOL) {
+          ast_expr_t* callee = e->as.funcall.callee;
+          symbol_t* symbol = resolve_symbol(scope, callee->as.symbol, SYMB_FUNC);
+          if (!symbol) {
+            fprintf(stderr, "[ERROR] Codegen\n No function `%s` in current scope.\n", e->as.symbol);
+            return false;
+          }
+
+          da_append(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
+          if (symbol->addr_resolved)
+            da_append(&p->code, symbol->addr);
+          else {
+            da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count }));
+            da_append(&p->code, 0);
+          }
+        } else {
+          TODO("compile_expr: EXPR_FUNCALL - callee not a symbol");
+        }
+        break;
       case EXPR_SUBEXPR:
         return compile_expr(p, scope, e->as.subexpr);
       case EXPR_ASSIGNMENT:
@@ -2538,7 +2553,7 @@ static inline bool compile_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
         return false;
       }
       symbol_t* symb = s->as.var_def.symbol;
-      symb->addr = f->loc_vars++;
+      set_symbol_address(symb, f->loc_vars++);
       if (s->as.var_def.initialized) {
         if(!compile_expr(p, scope, s->as.var_def.init)) return false;
         da_append(&p->code, INST_STORE);
@@ -2598,7 +2613,7 @@ static inline bool compile_func_decl(program_t* p, ast_decl_t* d) {
       return false;
     }
 
-    d->symbol->addr = p->externs.count; 
+    set_symbol_address(d->symbol, p->externs.count);
     da_append(&p->externs, cif);
   }
 
@@ -2609,7 +2624,7 @@ static inline bool compile_func_def(program_t* p, ast_def_t* d) {
   frame_t f = { 0 };
 
   // patch symbol table
-  d->decl->symbol->addr = p->code.count;
+  set_symbol_address(d->decl->symbol, p->code.count);
 
   // store parameters in local variables
   f.loc_vars = d->decl->as.fun.sig->params.count;
@@ -2669,6 +2684,11 @@ static inline int compile(program_t* p, ast_root_t* root) {
       default:
         UNREACHABLE("compile");
     }
+  }
+
+  // patch addresses
+  da_foreach(struct _patch, patch, &p->patches) {
+    p->code.items[patch->addr] = patch->symbol->addr;
   }
 
   return true;
