@@ -53,15 +53,16 @@ const char* source =
   "pluto : f32[];\n"
   "extern topolino : str;\n"
   "\n"
-  "export main : () -> i32 {\n"
+  "export main : (arg: str) -> i32 {\n"
   // " puts(\"Hello World!\\n\".c_str());\n"
-  " baz : str = bar();\n"
+  " baz : str = \"Hello World!\\n\";\n"
+  " baz = arg;\n"
   // " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
-  " return floor(1 / 3.0);\n" 
-  // " return 1 / 3 - 4.0 * ( 5 + 6 * 7 ) % 9;\n"
+  // " return floor(1 / 3.0);\n" 
+  " return 1 / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   "}\n"
   "\n"
-  "bar : () -> str {\n"
+  "bar : (a: char, b: bool) -> str {\n"
   " bar : str = \"bar\";\n"
   " return bar;\n"
   "}\n"
@@ -536,7 +537,8 @@ typedef enum {
 } symb_kind_t;
 
 typedef enum {
-  STO_SCOPE,
+  STO_GLOBAL,
+  STO_LOCAL,
   STO_EXTERN,
   STO_EXPORT,
 } symb_storage_t;
@@ -545,6 +547,7 @@ typedef struct {
   const char* name;
   symb_kind_t kind;
   symb_storage_t storage;
+  bool is_glob;
   type_t* type;
   uint32_t addr;
 } symbol_t;
@@ -1114,7 +1117,7 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
       if(!t) return NULL;
       n->as.var_def.type = t;
 
-      n->as.var_def.symbol = make_symbol(p->current_scope, SYMB_VAR, STO_SCOPE, n->as.var_def.name, NULL);
+      n->as.var_def.symbol = make_symbol(p->current_scope, SYMB_VAR, STO_LOCAL, n->as.var_def.name, NULL);
 
       if (tok_is(p, '=')) {
         n->as.var_def.initialized = true;
@@ -1182,7 +1185,7 @@ static inline ast_param_t* parse_param(parser_t* p) {
   if(!t) return NULL;
   n->type = t;
 
-  n->symbol = make_symbol(p->current_scope, SYMB_VAR, STO_SCOPE, n->name, NULL);
+  n->symbol = make_symbol(p->current_scope, SYMB_VAR, STO_LOCAL, n->name, NULL);
 
   return n;
 }
@@ -1285,7 +1288,7 @@ static inline ast_decl_t* parse_func_decl(parser_t* p, const char* name, spec_fl
   n->kind = DECL_KIND_FUNC;
   n->tok_idx = p->current;
 
-  symb_storage_t sto = STO_SCOPE;
+  symb_storage_t sto = STO_GLOBAL;
   if(flags & SPEC_EXTERN) sto = STO_EXTERN; 
   if(flags & SPEC_EXPORT) sto = STO_EXPORT; 
 
@@ -1324,7 +1327,7 @@ static inline ast_decl_t* parse_var_decl(parser_t* p, const char* name, spec_fla
   n->kind = DECL_KIND_VAR;
   n->tok_idx = p->current;
 
-  symb_storage_t sto = STO_SCOPE;
+  symb_storage_t sto = STO_GLOBAL;
   if(flags & SPEC_EXTERN) sto = STO_EXTERN; 
   if(flags & SPEC_EXPORT) sto = STO_EXPORT;
 
@@ -1599,8 +1602,10 @@ static inline void print_symbol_table_entries(FILE* stream, scope_t* scope) {
   da_foreach(symbol_t, s, &scope->symbols) {
     fprintf(stream, "%-10s %-10s ", s->name, scope->name);
     switch(s->storage) {
-      case STO_SCOPE:
+      case STO_LOCAL:
         fprintf(stream, "%-10s ", "scope"); break;
+      case STO_GLOBAL:
+        fprintf(stream, "%-10s ", "global"); break;
       case STO_EXTERN:
         fprintf(stream, "%-10s ", "extern"); break;
       case STO_EXPORT:
@@ -2215,6 +2220,7 @@ static inline bool resolve_func_decl(typechecker_t* t, ast_decl_t* decl) {
 
   da_foreach(ast_param_t*, p, &decl->as.fun.sig->params) {
     if(!resolve_type_decl(t, (*p)->type)) return false;
+    (*p)->symbol->type = (*p)->type->resolved_type;
     da_append(&sig_type->as.func.params, (*p)->type->resolved_type);
   }
 
@@ -2365,6 +2371,11 @@ typedef struct {
     size_t count;
     size_t capacity;
   } constants;
+  struct _glob {
+    data_t* items;
+    size_t count;
+    size_t capacity;
+  } globals;
   struct _externs {
     ffi_cif* items;
     size_t count;
@@ -2372,7 +2383,7 @@ typedef struct {
   } externs;
 } program_t;
 
-static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e);
+static inline bool compile_expr(program_t* p, scope_t* scope, ast_expr_t* e);
 
 #if 0
 // TODO: delay address resolution after compilation
@@ -2393,11 +2404,32 @@ static inline int compile_funcall(program_t* p, scope_t* scope, ast_funcall_t* f
 }
 #endif
 
-static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
+static inline bool compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
   switch(e->kind) {
-      case EXPR_SYMBOL:
-        TODO("compile_expr: EXPR_SYMBOL");
-        // switch upon symbol kind, if func do nothing, symbol used by funcall
+      case EXPR_SYMBOL: {
+        // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
+        symbol_t* symbol = resolve_symbol(scope, e->as.symbol, SYMB_VAR);
+        if (!symbol) {
+          fprintf(stderr, "[ERROR] Codegen\n No variable `%s` in current scope.\n", e->as.symbol);
+          return false;
+        }
+        switch (symbol->storage) {
+          case STO_EXTERN:
+            TODO("compile_expr - load extern symbol");
+          case STO_LOCAL:
+            da_append(&p->code, INST_LOAD);
+            da_append(&p->code, symbol->addr);
+            break;
+          case STO_EXPORT:
+          case STO_GLOBAL:
+            da_append(&p->code, INST_LOADG);
+            da_append(&p->code, symbol->addr);
+            break;
+          default: 
+            UNREACHABLE("compile_expr");
+        }
+        break;
+      }
       case EXPR_STRING:
         da_append(&p->code, INST_LOADC);
         da_append(&p->code, p->constants.count);
@@ -2429,9 +2461,7 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           case OP_DIV: da_append(&p->code, INST_DIVI); break;
           case OP_REM: da_append(&p->code, INST_REM); break;
           case OP_MEMB:
-            TODO("compile_expr: member access binop");
           case OP_SCOPE:
-            TODO("compile_expr: scope access binop");
           case OP_ASSIGN:
           case OP_CALL:
           case OP_INVALID:
@@ -2449,26 +2479,73 @@ static inline int compile_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
       case EXPR_SUBEXPR:
         return compile_expr(p, scope, e->as.subexpr);
       case EXPR_ASSIGNMENT:
-        TODO("compile_expr: EXPR_ASSIGNMENT");
+        if(!compile_expr(p, scope, e->as.assign.rhs)) return false;
+
+        if(e->as.assign.lhs->kind == EXPR_SYMBOL) {
+          // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
+          symbol_t* symbol = resolve_symbol(scope, e->as.assign.lhs->as.symbol, SYMB_VAR);
+          if (!symbol) {
+            fprintf(stderr, "[ERROR] Codegen\n No variable `%s` in current scope.\n", e->as.symbol);
+            return false;
+          }
+          switch (symbol->storage) {
+            case STO_EXTERN:
+              TODO("compile_expr - store extern symbol");
+            case STO_LOCAL:
+              da_append(&p->code, INST_STORE);
+              da_append(&p->code, symbol->addr);
+              break;
+            case STO_EXPORT:
+            case STO_GLOBAL:
+              da_append(&p->code, INST_STOREG);
+              da_append(&p->code, symbol->addr);
+              break;
+            default: 
+              UNREACHABLE("compile_expr");
+          }
+        } else {
+          print_ast(stderr, (ast_node_t*)e->as.assign.lhs, 0);
+          TODO("compile_expr - assignment: lhs not a symbol");
+        }
+        break;
       default:
         UNREACHABLE("compile_expr");
   }
 
-  return 0;
+  return true;
 }
 
-static inline int compile_stmt(program_t* p, scope_t* scope, ast_stmt_t* s) {
+#define MAX_LOC_VARS 0xFFFFFFFFu
+
+typedef struct {
+  const char* name;
+  size_t loc_vars;
+} frame_t;
+
+static inline bool compile_stmt(program_t* p, scope_t* scope, frame_t* f, ast_stmt_t* s) {
   switch(s->kind) {
-    case STMT_EMPTY: return 0;
+    case STMT_EMPTY: return true;
     case STMT_EXPR: return compile_expr(p, scope, s->as.expression);
     case STMT_RET: {
       compile_expr(p, scope, s->as.retval);
       // TODO: function epilog -> destroy frame, clean stack
       da_append(&p->code, INST_RET);
-      return 0;
+      return true;
     }
-    case STMT_VAR_DEF: TODO("compile_stmt - STMT_VAR_DEF");
-    default: return 1;
+    case STMT_VAR_DEF:
+      if (f->loc_vars >= MAX_LOC_VARS) {
+        fprintf(stderr, "[ERROR] Codegen\n  Too many local variables in function %s", f->name);
+        return false;
+      }
+      symbol_t* symb = s->as.var_def.symbol;
+      symb->addr = f->loc_vars++;
+      if (s->as.var_def.initialized) {
+        if(!compile_expr(p, scope, s->as.var_def.init)) return false;
+        da_append(&p->code, INST_STORE);
+        da_append(&p->code, symb->addr);
+      }
+      return true;
+    default: return false;
   }
 }
 
@@ -2496,16 +2573,10 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
  }
 }
 
-static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
-  symbol_t* symbol = resolve_symbol(d->as.fun.scope, d->name, SYMB_FUNC);
-  if (!symbol) {
-    fprintf(stderr, "[ERROR] Codegen\n  Unresolved symbol `%s`\n", d->name);
-    return 1;
-  }
-
+static inline bool compile_func_decl(program_t* p, ast_decl_t* d) {
   ast_sig_t* sig = d->as.fun.sig;
 
-  if (d->flags & SPEC_EXTERN) {
+  if (d->symbol->storage == STO_EXTERN) {
     // TODO: add platform layer for malloc
     ffi_type **param_types = malloc(sizeof(*param_types) * sig->params.count);
     for(size_t i=0; i < sig->params.count; i++)
@@ -2524,42 +2595,44 @@ static inline int compile_func_decl(program_t* p, ast_decl_t* d) {
 
     if (status != FFI_OK) {
       fprintf(stderr, "[ERROR] Codegen\n  Could not initialize FFI CIF\n");
-      return 1;
+      return false;
     }
 
-    symbol->addr = p->externs.count; 
+    d->symbol->addr = p->externs.count; 
     da_append(&p->externs, cif);
-  } else {
-    // patch symbol table
-    symbol->addr = p->code.count;
-
-    // store parameters in local variables
-    for (int i = sig->params.count; i > 0; i--) {
-      da_append(&p->code, INST_STORE);
-      da_append(&p->code, i);
-    }
-
   }
 
-  return 0;
+  return true;
 }
 
-static inline int compile_func_def(program_t* p, ast_def_t* d) {
-  da_foreach(ast_stmt_t*, stmt, &d->body->stmts)
-    if(compile_stmt(p, d->decl->as.fun.scope, *stmt)) return 1;
+static inline bool compile_func_def(program_t* p, ast_def_t* d) {
+  frame_t f = { 0 };
 
-  return 0;
+  // patch symbol table
+  d->decl->symbol->addr = p->code.count;
+
+  // store parameters in local variables
+  f.loc_vars = d->decl->as.fun.sig->params.count;
+  // SysV-style calling convention
+  for (size_t i = 0; i < f.loc_vars; i++) {
+    da_append(&p->code, INST_STORE);
+    da_append(&p->code, i);
+  }
+
+  da_foreach(ast_stmt_t*, stmt, &d->body->stmts)
+    if(!compile_stmt(p, d->decl->as.fun.scope, &f, *stmt)) return false;
+
+  return true;
 }
 
 static inline int compile(program_t* p, ast_root_t* root) {
   da_foreach(ast_decl_t*, d, &root->decls) {
     switch((*d)->kind) {
       case DECL_KIND_FUNC:
-        if(compile_func_decl(p, *d)) return 1;
+        if(!compile_func_decl(p, *d)) return false;
         break;
       case DECL_KIND_VAR:
-        TODO("compile_var_decl");
-        abort();
+        break; // do nothing
       default:
         UNREACHABLE("compile");
     }
@@ -2567,17 +2640,38 @@ static inline int compile(program_t* p, ast_root_t* root) {
   da_foreach(ast_def_t*, d, &root->top_level) {
     switch((*d)->decl->kind) {
       case DECL_KIND_FUNC:
-        if(compile_func_def(p, *d)) return 1;
+        if(!compile_func_def(p, *d)) return false;
         break;
       case DECL_KIND_VAR:
-        TODO("compile_var_def");
-        abort();
+        data_t val = { 0 };
+        if ((*d)->decl->as.var.initialized) {
+          switch((*d)->init->kind) {
+            case EXPR_STRING:
+              val.number.u = p->constants.count;
+              da_append(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = (*d)->init->as.s }));
+              break;
+            case EXPR_NUMBER:
+              val.number.u = (*d)->init->as.number.u;
+              break;
+            case EXPR_SYMBOL:
+            case EXPR_BINOP:
+            case EXPR_UNOP:
+            case EXPR_ACCESS:
+            case EXPR_FUNCALL:
+            case EXPR_SUBEXPR:
+            case EXPR_ASSIGNMENT:
+            default:
+              UNREACHABLE("compile - var initialization (messed up typechecker?)");
+          }
+        }
+        da_append(&p->globals, val);
+        break;
       default:
         UNREACHABLE("compile");
     }
   }
 
-  return 0;
+  return true;
 }
 
 static inline void print_data(FILE* stream, constant_t c) {
@@ -2736,7 +2830,7 @@ int main() {
 
   // print_symbol_table(stdout, root->scope);
 
-  compile(&program, root);
+  if(!compile(&program, root)) return 1;
 
   print_disass(stdout, &program, root->scope);
 
