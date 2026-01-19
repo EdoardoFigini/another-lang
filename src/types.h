@@ -1,0 +1,581 @@
+#ifndef PROGRAM_H
+#define PROGRAM_H
+#include <stdint.h>
+
+#include <ffi.h>
+
+#include "arena.h"
+#include "sb.h"
+
+typedef enum {
+  TOK_EOF = 256,
+  TOK_IDENT,
+  TOK_ARROW,
+  TOK_COLCOL,
+  TOK_INTLIT,
+  TOK_REALLIT,
+  TOK_STRLIT,
+  TOK_RETURN,
+  TOK_EXTERN,
+  TOK_EXPORT,
+  TOK_CONST,
+} tok_kind_t;
+
+typedef enum {
+  KW_RETURN = TOK_RETURN,
+  KW_EXTERN = TOK_EXTERN,
+  KW_EXPORT = TOK_EXPORT,
+  KW_CONST  = TOK_CONST,
+} kw_kind_t;
+
+typedef enum {
+  TI_UNSIGNED = 1 << 0,
+  TI_LONG     = 1 << 1,
+  TI_REAL     = 1 << 2,
+} lit_type_info_flags_t;
+
+typedef struct {
+  tok_kind_t kind;
+  const char* start;
+  int len;
+  lit_type_info_flags_t type_info;
+  union {
+    const char* s;
+    double      r;
+    uint64_t    u;
+    int64_t     i;
+  } as;
+  size_t line;
+  size_t col;
+} token_t;
+
+typedef struct {
+  token_t *items;
+  size_t count;
+  size_t capacity;
+} tokenarr_t;
+
+typedef struct {
+  sb_t source;
+  tokenarr_t tokens;
+  arena_t arena;
+} tokenizer_t;
+
+typedef struct _scope scope_t;
+
+typedef enum {
+  PASS_DECL,
+  PASS_STMTS,
+} pass_t;
+
+typedef struct {
+  sb_t source;
+  size_t line;
+  size_t col;
+
+  arena_t arena;
+  tokenarr_t tokens;
+  size_t current;
+  scope_t* current_scope;
+  pass_t pass;
+} parser_t;
+
+static inline void parser_destroy(parser_t* p) {
+  // tokens and source destroyed in tok_destroy
+  arena_free(&p->arena);
+}
+
+typedef enum {
+  AST_ROOT = 1,
+  AST_EXPR,
+  AST_STMT,
+  AST_VAR_DECL,
+  AST_FUNC_DECL,
+  AST_FUNC_DEF,
+  AST_VAR_DEF,
+  AST_TYPE,
+  AST_BODY,
+  AST_PARAM,
+  AST_SIG,
+} ast_node_kind_t;
+
+#define AST_DEFAULT_FIELDS\
+  ast_node_kind_t ast_kind; \
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+} ast_node_t;
+
+typedef enum {
+  SPEC_NONE = 0,
+  SPEC_EXTERN = 1 << 0,
+  SPEC_EXPORT = 1 << 1,
+  SPEC_CONST  = 1 << 2,
+} spec_flags_t;
+
+typedef struct _type type_t;
+
+typedef enum {
+  SYMB_VAR,
+  SYMB_FUNC,
+} symb_kind_t;
+
+typedef enum {
+  STO_GLOBAL,
+  STO_LOCAL,
+  STO_EXTERN,
+  STO_EXPORT,
+} symb_storage_t;
+
+typedef struct {
+  const char* name;
+  symb_kind_t kind;
+  symb_storage_t storage;
+  type_t* type;
+  uint32_t addr;
+  bool addr_resolved;
+} symbol_t;
+
+struct _scope {
+  const char* name;
+  struct _scope* parent;
+  // TODO: OPTIMIZE
+  // transform into hashmap
+  struct {
+    symbol_t* items;
+    size_t count;
+    size_t capacity;
+  } symbols;
+};
+
+typedef enum {
+  DECL_KIND_VAR,
+  DECL_KIND_FUNC,
+} ast_decl_kind;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  const char* name;
+  int array_depth;
+  type_t* resolved_type;
+} ast_type_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  const char* name;
+  ast_type_t* type;
+  symbol_t* symbol;
+} ast_param_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  struct {
+    ast_param_t** items;
+    size_t count;
+    size_t capacity;
+  } params;
+  ast_type_t* ret;
+  type_t* resolved_type;
+} ast_sig_t;
+
+typedef struct _ast_body_t ast_body_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  const char* name;
+  spec_flags_t flags;
+  ast_decl_kind kind; 
+  union {
+    struct {
+      ast_sig_t* sig;
+      bool has_body;
+      scope_t* scope;
+    } fun;
+    struct {
+      ast_type_t* type;
+      bool initialized;
+    } var;
+  } as;
+  symbol_t* symbol;
+  size_t tok_idx;
+} ast_decl_t;
+
+typedef struct _ast_expr_t ast_expr_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  ast_decl_t* decl;
+  union {
+    ast_body_t* body;
+    ast_expr_t* init;
+  };
+} ast_def_t;
+
+typedef enum {
+  OP_INVALID = TOK_EOF,
+  OP_PLUS    = '+',
+  OP_MINUS   = '-',
+  OP_MULT    = '*',
+  OP_DIV     = '/',
+  OP_REM     = '%',
+  OP_CALL    = '(',
+  OP_ASSIGN  = '=',
+  OP_MEMB    = '.',
+  OP_SCOPE   = TOK_COLCOL,
+} op_kind_t;
+
+enum _bp {
+  BP_NONE = 0,
+  BP_ASSIGN,
+  BP_ADD,
+  BP_MULT,
+  BP_CALL,
+  BP_ACCESS,
+};
+
+typedef enum {
+  EXPR_SYMBOL = 0,
+  EXPR_STRING,
+  EXPR_NUMBER,
+  EXPR_BINOP,
+  EXPR_UNOP,
+  EXPR_ACCESS,
+  EXPR_FUNCALL,
+  EXPR_SUBEXPR,
+  EXPR_ASSIGNMENT,
+} ast_expr_kind_t;
+
+struct _ast_expr_t {
+  AST_DEFAULT_FIELDS;
+  ast_expr_kind_t kind;
+  type_t const* type;
+  bool is_const;
+  union {
+    const char* symbol;
+    const char* s;
+    struct {
+      lit_type_info_flags_t ti;
+      union {
+        uint64_t u;
+        int64_t i;
+        double r;
+      };
+    } number;
+    struct {
+      ast_expr_t* lhs;
+      ast_expr_t* rhs;
+      op_kind_t op;
+    } binop;
+    struct {
+      ast_expr_t* operand;
+      op_kind_t op;
+    } unop;
+    struct {
+      ast_expr_t* owner;
+      const char* field;
+      op_kind_t op;
+    } access;
+    struct { 
+      ast_expr_t* callee;
+      struct _args {
+        ast_expr_t** items;
+        size_t count;
+        size_t capacity;
+      } args;
+    } funcall;
+    struct {
+      ast_expr_t* lhs;
+      ast_expr_t* rhs;
+    } assign;
+    ast_expr_t* subexpr;
+  } as;
+};
+
+typedef enum {
+  STMT_EMPTY = 0,
+  STMT_RET,
+  STMT_EXPR,
+  STMT_VAR_DEF,
+} ast_stmt_kind_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  ast_stmt_kind_t kind;
+  union {
+    ast_expr_t* expression;
+    ast_expr_t* retval;
+    struct {
+      const char* name;
+      ast_type_t* type;
+      spec_flags_t flags;
+      symbol_t* symbol;
+      bool initialized;
+      ast_expr_t* init;
+    } var_def;
+  } as;
+} ast_stmt_t;
+
+struct _ast_body_t {
+  AST_DEFAULT_FIELDS;
+  struct {
+    ast_stmt_t** items;
+    size_t count;
+    size_t capacity;
+  } stmts;
+};
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  struct {
+    ast_decl_t** items;
+    size_t count;
+    size_t capacity;
+  } decls;
+  struct {
+    ast_def_t** items;
+    size_t count;
+    size_t capacity;
+  } top_level;
+  scope_t* scope;
+} ast_root_t;
+
+typedef enum {
+  TYPE_NONE,
+
+  // only 32 (normal - word) and 64 (long - double word)
+  TYPE_I32,
+  TYPE_I64,
+  
+  TYPE_U32,
+  TYPE_U64,
+  
+  TYPE_F32,
+  TYPE_F64,
+
+  TYPE_BOOL,
+  
+  TYPE_CHAR,
+  TYPE_STR,
+
+  TYPE_ARRAY,
+  
+  TYPE_ADDR, // akin to void* in C
+  
+  TYPE_STRUCT,
+  TYPE_MODULE,
+  
+  TYPE_ALIAS,
+
+  TYPE_FUNC,
+
+  TYPES_COUNT,
+} type_kind_t;
+
+struct _type {
+  const char* name;
+  size_t size;
+  type_kind_t kind;
+  union {
+    struct {
+      void* __todo;
+      // TODO: fields
+    } structure;
+    struct {
+      struct _type* inner;
+      size_t size;
+    } array;
+    struct {
+      struct _type* ret;
+      struct {
+        struct _type** items;
+        size_t count;
+        size_t capacity;
+      } params;
+    } func;
+    struct {
+      struct _type* target;
+    } alias; 
+  } as;
+};
+
+typedef struct {
+  arena_t arena;
+  struct {
+    type_t** items;
+    size_t count;
+    size_t capacity;
+  } custom_types; // use for interning
+  struct {
+    type_t const* none;
+    type_t const* i32;
+    type_t const* i64;
+    type_t const* u32;
+    type_t const* u64;
+    type_t const* f32;
+    type_t const* f64;
+    type_t const* boolean;
+    type_t const* character;
+    type_t const* str;
+    type_t const* array;
+    type_t const* addr;
+  } builtins;
+  scope_t* current_scope;
+} typechecker_t;
+
+typedef enum {
+  RK_BOOL = 0,
+  RK_U32,
+  RK_I32,
+  RK_U64,
+  RK_I64,
+  RK_F32,
+  RK_F64,
+} num_rank_t;
+
+typedef enum {
+  IMPL_BINOP,
+  IMPL_FUNC
+} impl_kind_t;
+
+typedef struct {
+  type_t* owner;
+  impl_kind_t kind;
+  union {
+    struct {
+      op_kind_t op;
+      type_t* other;
+    } binop;
+    struct {
+      void* __todo;
+    } func;
+  } as;
+} i_method_t;
+
+typedef struct {
+  const char* name;
+  size_t loc_vars;
+} frame_t;
+
+
+typedef enum {
+  DK_STR = 0,
+  DK_NUMBER
+} data_kind_t;
+
+typedef union {
+  const char* s;
+  struct {
+    lit_type_info_flags_t ti;
+    union {
+      uint64_t u;
+      int64_t i;
+      double r;
+    };
+  } number;
+} data_t;
+
+typedef struct {
+  data_kind_t kind;
+  data_t as;
+} constant_t;
+
+typedef uint32_t instruction_t; enum {
+  INST_NOP = 0,
+
+  INST_PUSH,
+  // INST_PUSHL, // long
+  INST_POP,
+  // INST_POPL,
+
+  INST_LOAD,
+  INST_LOADG,
+  INST_LOADC,
+  INST_STORE,
+  INST_STOREG,
+
+  INST_CALL,
+  INST_HOSTCALL,
+  INST_ICALL, // interface call
+  INST_RET,
+
+  INST_ADD,
+  INST_SUB,
+  INST_MULT,
+  INST_DIVI,
+  INST_DIVU,
+  INST_REM,
+  INST_ADDF,
+  INST_SUBF,
+  INST_MULTF,
+  INST_DIVF,
+
+  INST_COUNT,
+};
+
+typedef struct {
+  instruction_t* items;
+  size_t count;
+  size_t capacity;
+} instrarr_t;
+
+typedef struct {
+  instrarr_t code;
+  struct _consts {
+    constant_t* items;
+    size_t count;
+    size_t capacity;
+  } constants;
+  struct _glob {
+    data_t* items;
+    size_t count;
+    size_t capacity;
+  } globals;
+  struct _externs {
+    ffi_cif* items;
+    size_t count;
+    size_t capacity;
+  } externs;
+  struct _patches {
+    struct _patch {
+      uint32_t addr;
+      symbol_t* symbol; 
+    }* items;
+    size_t count;
+    size_t capacity;
+  } patches;
+} program_t;
+
+typedef struct _task {
+  instruction_t* code;
+  instruction_t* last_inst;
+
+  uint32_t* stack;
+  
+  // TODO: remove reference onc I add each needed field in task struct 
+  program_t* program;
+
+  bool alive;
+
+  struct _task* next;
+  struct _task* prev;
+} task_t;
+
+typedef struct {
+  uint32_t* sp;
+  instruction_t* ip;
+
+  bool halt;
+
+  arena_t tasks_arena;
+  task_t* tasks_head;
+  task_t* active_task;
+} vm_t;
+
+// runtime
+typedef enum {
+  VM_OK,
+  VM_NO_MORE_INSTRUCTIONS,
+} vm_exitcode_t;
+
+
+#endif

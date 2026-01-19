@@ -61,6 +61,8 @@ void arena_free(arena_t*);
 char* arena_strdup(arena_t*, const char*);
 char* arena_sprintf(arena_t* a, const char* fmt, ...) ARENA_FMT_PRINTF(2, 3); 
 
+#endif // !ARENA_H
+
 #ifdef ARENA_IMPLEMENTATION
 
 #define PAGE_SIZE 0x1000
@@ -176,4 +178,3 @@ char* arena_sprintf(arena_t* a, const char* fmt, ...) {
 #undef PAGE_SIZE
 
 #endif // !ARENA_IMPLEMENTATION
-#endif // !ARENA_H
