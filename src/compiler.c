@@ -16,8 +16,6 @@
 
 #include "vm.h"
 
-#define MAX_LOC_VARS 0xFFFFFFFFu
-
 const char* tok_keywords[] = {
   [KW_RETURN] = "return",
   [KW_EXTERN] = "extern",

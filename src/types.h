@@ -7,6 +7,12 @@
 #include "arena.h"
 #include "sb.h"
 
+#ifndef MAX_CALL_STACK
+#define MAX_CALL_STACK 1024
+#endif
+
+#define MAX_LOC_VARS 4096
+
 typedef enum {
   TOK_EOF = 256,
   TOK_IDENT,
@@ -545,11 +551,54 @@ typedef struct {
   } patches;
 } program_t;
 
+// runtime
+typedef enum {
+  OBJ_STR,
+  OBJ_STRUCT,
+} obj_kind_t;
+
+typedef struct _obj {
+  obj_kind_t kind;
+  size_t refs;
+  union {
+    struct _obj_str {
+      const char* data;
+      size_t size;
+    } str;
+  } as;
+} obj_t;
+
+typedef struct {
+  obj_t** items;
+  size_t count;
+  size_t capacity;
+} obj_pool_t;
+
+typedef struct {
+  uint32_t vars[MAX_LOC_VARS];
+} virtual_frame_t;
+
 typedef struct _task {
   instruction_t* code;
-  instruction_t* last_inst;
+  const instruction_t* last_inst;
+
+  // probably useless: first objects in the OBJ pool are the constants
+  // this is due to the way we load a new task
+  struct _vm_consts {
+    uint32_t* data;
+    size_t count;
+    arena_t arena;
+  } consts;
 
   uint32_t* stack;
+  struct {
+    // NOTE: could use an arena and instead of malloc'ing a new
+    // frame each time I just rewind the allocator.
+    virtual_frame_t* frames[MAX_CALL_STACK];
+    size_t depth;
+  } call_stack;
+
+  obj_pool_t obj_pool;
   
   // TODO: remove reference onc I add each needed field in task struct 
   program_t* program;
@@ -571,11 +620,11 @@ typedef struct {
   task_t* active_task;
 } vm_t;
 
-// runtime
 typedef enum {
   VM_OK,
   VM_NO_MORE_INSTRUCTIONS,
+  VM_STACK_OVERFLOW,
+  VM_STACK_UNDERFLOW,
 } vm_exitcode_t;
-
 
 #endif

@@ -15,8 +15,6 @@
 #include "macros.h"
 
 #include "vm.h"
-
-#define MAX_LOC_VARS 0xFFFFFFFFu
  
 const char* source = 
   "extern puts: (s: char[]) -> i32;\n"
@@ -26,10 +24,10 @@ const char* source =
   "pluto : f32[];\n"
   "extern topolino : str;\n"
   "\n"
-  "export main : (arg: str) -> i32 {\n"
+  "export main : (arg: i32) -> i32 {\n"
   // " puts(\"Hello World!\\n\".c_str());\n"
   " baz : str = \"Hello World!\\n\";\n"
-  " baz = bar(0, 0);\n"
+  " baz = bar(0, arg);\n"
   // " return 1 + mod::obj.foo(2, 8) / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
   " return floor(1 / 3.0);\n" 
   // " return 1 / 3 - 4 * ( 5 + 6 * 7 ) % 9;\n"
@@ -48,7 +46,7 @@ int main() {
   vm_t vm = { 0 };
   task_t* t = load_task(&vm, &prog);
   set_active_task(&vm, t);
-  return run(&vm);
+  return run(&vm, 1, 9);
 }
 
 #define SB_IMPLEMENTATION

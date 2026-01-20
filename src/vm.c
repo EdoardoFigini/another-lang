@@ -1,11 +1,14 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <stdarg.h>
 
 #include <ffi.h>
 
 #include "arena.h"
 #include "sb.h"
+#include "da.h"
 
 #include "macros.h"
 #include "types.h"
@@ -15,9 +18,10 @@
 #define MAX_STACK 0x1000 
 
 task_t* load_task(vm_t* vm, program_t* p) {
-  // cannot deallocate single taks in arena, might incur in high memory usage
-  task_t* t = arena_alloc(&vm->tasks_arena, sizeof(*t));
+  task_t* t = malloc(sizeof(*t));
+  memset(t, 0, sizeof(*t));
   t->program = p;
+
 #if defined(_WIN32)
   TODO("load_task - WIN32");
 #elif defined(__linux__)
@@ -35,43 +39,90 @@ task_t* load_task(vm_t* vm, program_t* p) {
   TODO("load_task - other platform");
 #endif
 
-  t->next = vm->tasks_head;
-  vm->tasks_head = t;
+  // constants
+  {
+    t->consts.data  = arena_alloc(&t->consts.arena, sizeof(uint32_t) * p->constants.count);
+    t->consts.count = p->constants.count;
 
-  if (t->next)
-    t->next->prev = t;
-  t->prev = NULL;
+    for (size_t i=0; i < p->constants.count; i++) {
+      constant_t* c = &p->constants.items[i];
+      switch(c->kind) {
+        case DK_STR:
+          obj_t* o = malloc(sizeof(*o));
+          o->kind = OBJ_STR;
+          o->as.str.data = arena_strdup(&t->consts.arena, c->as.s);
+          o->as.str.size = strlen(c->as.s);
+          o->refs = 1;
+
+          t->consts.data[i] = t->obj_pool.count;
+
+          da_append(&t->obj_pool, o);
+          break;
+        case DK_NUMBER:
+          TODO("load_task - numeric constants");
+          break;
+        default:
+          UNREACHABLE("load-taks");
+      }
+    }
+  }
+  DLLIST_ADD(t, vm->tasks_head);
 
   return t;
 }
 
+#define CURR_FRAME(vm) \
+  (vm)->active_task->call_stack.frames[(vm)->active_task->call_stack.depth - 1]
+
+static inline void __dbg_print_stack(FILE* stream, vm_t* vm) {
+  fprintf(stream, "+------------+\n");
+  for(size_t i = 0; i < MAX_STACK && i < (size_t)(vm->sp - vm->active_task->stack); i++) {
+    fprintf(stream, "| 0x%08X |\n", vm->active_task->stack[i]);
+  }
+  fprintf(stream, "+------------+\n\n");
+}
+
 vm_exitcode_t exec(vm_t* vm) {
-  if (vm->ip < vm->active_task->code || vm->ip > vm->active_task->last_inst)
+  task_t* task = vm->active_task;
+  if (vm->ip < task->code || vm->ip > task->last_inst)
     return VM_NO_MORE_INSTRUCTIONS;
 
+  uint32_t operand = 0;
   switch(*vm->ip) {
     case INST_NOP:
       vm->ip++;
       break;
     case INST_PUSH:
-      uint32_t operand = *(++vm->ip);
+      if (vm->sp >= task->stack + MAX_STACK) return VM_STACK_OVERFLOW;
+      operand = *(++vm->ip);
       *vm->sp++ = operand;
       vm->ip++;
       break;
     case INST_POP:
       TODO("INST_POP");
+      if (vm->sp <= task->stack) return VM_STACK_UNDERFLOW;
       break;
     case INST_LOAD:
-      TODO("INST_LOAD");
+      if (vm->sp >= task->stack + MAX_STACK) return VM_STACK_OVERFLOW;
+      operand = *(++vm->ip);
+      *(vm->sp++) = CURR_FRAME(vm)->vars[operand];
+      vm->ip++;
       break;
     case INST_LOADG:
       TODO("INST_LOADG");
       break;
     case INST_LOADC:
-      TODO("INST_LOADC");
+      if (vm->sp >= task->stack + MAX_STACK) return VM_STACK_OVERFLOW;
+      operand = *(++vm->ip);
+      *(vm->sp++) = task->consts.data[operand]; 
+      vm->ip++;
       break;
     case INST_STORE:
-      TODO("INST_STORE");
+      if (vm->sp <= task->stack) return VM_STACK_UNDERFLOW;
+      operand = *(++vm->ip);
+      uint32_t val = *vm->sp--;
+      CURR_FRAME(vm)->vars[operand] = val;
+      vm->ip++;
       break;
     case INST_STOREG:
       TODO("INST_STOREG");
@@ -130,13 +181,29 @@ void set_active_task(vm_t* vm, task_t* t) {
   vm->active_task = t;
 }
 
-vm_exitcode_t run(vm_t* vm) {
-  vm->ip = vm->active_task->code;
-  vm->sp = vm->active_task->stack;
+// TODO: handle non-uint32_t args
+vm_exitcode_t run(vm_t* vm, size_t n_args, ...) {
+  va_list args;
+
+  task_t* active = vm->active_task;
+  vm->ip = active->code;
+  vm->sp = active->stack;
   vm->halt = false;
 
+  active->call_stack.frames[0] = malloc(sizeof(virtual_frame_t));
+  active->call_stack.depth++;
+
+  va_start(args, n_args);
+  for(size_t i=0; i < n_args; i++) {
+    if (vm->sp >= active->stack + MAX_STACK) return VM_STACK_OVERFLOW;
+    *(vm->sp++) = va_arg(args, uint32_t); 
+  }
+  va_end(args);
+
+  __dbg_print_stack(stdout, vm);
   while(!vm->halt) {
     vm_exitcode_t ec = exec(vm);
+    __dbg_print_stack(stdout, vm);
     if (ec != VM_OK) return ec;
   }
 

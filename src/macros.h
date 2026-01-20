@@ -30,5 +30,13 @@
     );\
   } while(0);
 
+#define DLLIST_ADD(obj, head)    \
+  do {                           \
+    (obj)->next = (head);        \
+    (head) = (obj);              \
+    if((obj)->next)              \
+      (obj)->next->prev = (obj); \
+    (obj)->prev = NULL;          \
+  } while (0);
 
 #endif
