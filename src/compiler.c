@@ -32,6 +32,9 @@ void tok_print(token_t tok) {
       case TOK_IDENT: printf("%-20s", "TOK_IDENT"); break;
       case TOK_ARROW: printf("%-20s", "TOK_ARROW"); break;
       case TOK_COLCOL: printf("%-20s", "TOK_COLCOL"); break;
+      case TOK_EQEQ: printf("%-20s", "TOK_EQEQ"); break;
+      case TOK_GEQ: printf("%-20s", "TOK_GEQ"); break;
+      case TOK_LEQ: printf("%-20s", "TOK_LEQ"); break;
       case TOK_INTLIT: printf("%-20s", "TOK_INTLIT"); break;
       case TOK_REALLIT: printf("%-20s", "TOK_REALLIT"); break;
       case TOK_STRLIT: printf("%-20s", "TOK_STRLIT"); break;
@@ -53,6 +56,9 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_IDENT: return "identifier";
       case TOK_ARROW: return "->";
       case TOK_COLCOL: return "::";
+      case TOK_EQEQ: return "==";
+      case TOK_GEQ: return ">=";
+      case TOK_LEQ: return "<=";
       case TOK_INTLIT: return "integer literal";
       case TOK_REALLIT: return "real literal";
       case TOK_STRLIT: return "string literal";
@@ -240,9 +246,32 @@ static inline int tok_tokenize(tokenizer_t* t) {
       case '+':
       case '*':
       case '/':
-      case '=':
       case '%':
         tok = (token_t){ .kind = *p, .start = p, .len = 1 }; 
+        break;
+      case '>':
+        switch(*(p + 1)) {
+          case '=': tok = (token_t){ .kind = TOK_GEQ, .start = p, .len = 2 }; break;
+          default: 
+            tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+            break;
+        }
+        break;
+      case '<':
+        switch(*(p + 1)) {
+          case '=': tok = (token_t){ .kind = TOK_LEQ, .start = p, .len = 2 }; break;
+          default: 
+            tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+            break;
+        }
+        break;
+      case '=':
+        switch(*(p + 1)) {
+          case '=': tok = (token_t){ .kind = TOK_EQEQ, .start = p, .len = 2 }; break;
+          default: 
+            tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+            break;
+        }
         break;
       case ':':
         switch(*(p + 1)) {
@@ -490,6 +519,11 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
 
 const enum _bp expr_bp_table[] = {
   [OP_INVALID] = BP_NONE,
+  [OP_EQ]      = BP_CMP, 
+  [OP_LEQ]     = BP_CMP,
+  [OP_GEQ]     = BP_CMP,
+  [OP_LT]      = BP_CMP, 
+  [OP_GT]      = BP_CMP, 
   [OP_PLUS]    = BP_ADD,
   [OP_MINUS]   = BP_ADD, 
   [OP_MULT]    = BP_MULT,
@@ -577,6 +611,11 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
       case OP_MULT: 
       case OP_DIV:
       case OP_REM:
+      case OP_EQ:
+      case OP_LEQ:
+      case OP_GEQ:
+      case OP_LT:
+      case OP_GT:
         kind = EXPR_BINOP;
         break;
       case OP_CALL: 
@@ -1408,10 +1447,11 @@ static inline type_t* resolve_type(typechecker_t* t, const char* name, int depth
 }
 
 static inline bool is_op_cmp(op_kind_t op) {
-  (void)op;
-  // no comparison operator for now
-  // TODO: add cmp operators here
-  return 0;
+  return  op == OP_EQ  || 
+          op == OP_LEQ ||
+          op == OP_GEQ ||
+          op == OP_LT  ||
+          op == OP_GT;
 }
 
 static inline bool is_op_arithmetic(op_kind_t op) {
@@ -1918,6 +1958,11 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           case OP_MULT: da_append(&p->code, INST_MULT); break;
           case OP_DIV: da_append(&p->code, INST_DIVI); break;
           case OP_REM: da_append(&p->code, INST_REM); break;
+          case OP_EQ: da_append(&p->code, INST_EQ); break;
+          case OP_LEQ: da_append(&p->code, INST_LEQ); break;
+          case OP_GEQ: da_append(&p->code, INST_GEQ); break;
+          case OP_LT: da_append(&p->code, INST_LT); break;
+          case OP_GT: da_append(&p->code, INST_GT); break;
           case OP_MEMB:
           case OP_SCOPE:
           case OP_ASSIGN:
@@ -2256,30 +2301,40 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
       case INST_RET:
         fprintf(stream, "  %-10s\n", "RET"); break;
       case INST_ADD:
-        fprintf(stream, "  %-10s\n", "INST_ADD"); break;
+        fprintf(stream, "  %-10s\n", "ADD"); break;
       case INST_SUB:
-        fprintf(stream, "  %-10s\n", "INST_SUB"); break;
+        fprintf(stream, "  %-10s\n", "SUB"); break;
       case INST_MULT:
-        fprintf(stream, "  %-10s\n", "INST_MULT"); break;
+        fprintf(stream, "  %-10s\n", "MULT"); break;
       case INST_DIVI:
-        fprintf(stream, "  %-10s\n", "INST_DIVI"); break;
+        fprintf(stream, "  %-10s\n", "DIVI"); break;
       case INST_DIVU:
-        fprintf(stream, "  %-10s\n", "INST_DIVU"); break;
+        fprintf(stream, "  %-10s\n", "DIVU"); break;
       case INST_REM:
-        fprintf(stream, "  %-10s\n", "INST_REM"); break;
+        fprintf(stream, "  %-10s\n", "REM"); break;
       case INST_ADDF:
-        fprintf(stream, "  %-10s\n", "INST_ADDF"); break;
+        fprintf(stream, "  %-10s\n", "ADDF"); break;
       case INST_SUBF:
-        fprintf(stream, "  %-10s\n", "INST_SUBF"); break;
+        fprintf(stream, "  %-10s\n", "SUBF"); break;
       case INST_MULTF:
-        fprintf(stream, "  %-10s\n", "INST_MULTF"); break;
+        fprintf(stream, "  %-10s\n", "MULTF"); break;
       case INST_DIVF:
-        fprintf(stream, "  %-10s\n", "INST_DIVF"); break;
+        fprintf(stream, "  %-10s\n", "DIVF"); break;
+       case INST_EQ:
+        fprintf(stream, "  %-10s\n", "EQ"); break;
+       case INST_LEQ:
+        fprintf(stream, "  %-10s\n", "LEQ"); break;
+       case INST_GEQ:
+        fprintf(stream, "  %-10s\n", "GEQ"); break;
+       case INST_LT:
+        fprintf(stream, "  %-10s\n", "LT"); break;
+       case INST_GT:
+        fprintf(stream, "  %-10s\n", "GT"); break;
 
 
       case INST_COUNT:
       default:
-        UNREACHABLE("print_disass");
+        fprintf(stream, "  %-10s\n", "<INVALID>"); break;
     }
   }
 }

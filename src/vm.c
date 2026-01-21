@@ -76,11 +76,23 @@ task_t* load_task(vm_t* vm, program_t* p) {
 
 static inline void __dbg_print_stack(FILE* stream, vm_t* vm) {
   fprintf(stream, "+------------+\n");
-  for(size_t i = 0; i < MAX_STACK && i < (size_t)(vm->sp - vm->active_task->stack); i++) {
+  for(int i = MIN(MAX_STACK, (int)(vm->sp - vm->active_task->stack)) - 1; i >= 0; i--) {
     fprintf(stream, "| 0x%08X |\n", vm->active_task->stack[i]);
   }
   fprintf(stream, "+------------+\n\n");
 }
+
+#define POP(vm, v) \
+  do { \
+    if ((vm)->sp <= (vm)->active_task->stack) return VM_STACK_UNDERFLOW; \
+    (v) = *(--(vm)->sp);\
+  } while(0);
+
+#define PUSH(vm, v) \
+  do {\
+    if ((vm)->sp >= (vm)->active_task->stack + MAX_STACK) return VM_STACK_OVERFLOW; \
+    *((vm)->sp++) = (v); \
+  } while(0);
 
 vm_exitcode_t exec(vm_t* vm) {
   task_t* task = vm->active_task;
@@ -88,14 +100,16 @@ vm_exitcode_t exec(vm_t* vm) {
     return VM_NO_MORE_INSTRUCTIONS;
 
   uint32_t operand = 0;
+  uint32_t a = 0;
+  uint32_t b = 0;
+
   switch(*vm->ip) {
     case INST_NOP:
       vm->ip++;
       break;
     case INST_PUSH:
-      if (vm->sp >= task->stack + MAX_STACK) return VM_STACK_OVERFLOW;
       operand = *(++vm->ip);
-      *vm->sp++ = operand;
+      PUSH(vm, operand);
       vm->ip++;
       break;
     case INST_POP:
@@ -103,25 +117,21 @@ vm_exitcode_t exec(vm_t* vm) {
       if (vm->sp <= task->stack) return VM_STACK_UNDERFLOW;
       break;
     case INST_LOAD:
-      if (vm->sp >= task->stack + MAX_STACK) return VM_STACK_OVERFLOW;
       operand = *(++vm->ip);
-      *(vm->sp++) = CURR_FRAME(vm)->vars[operand];
+      PUSH(vm, CURR_FRAME(vm)->vars[operand]);
       vm->ip++;
       break;
     case INST_LOADG:
       TODO("INST_LOADG");
       break;
     case INST_LOADC:
-      if (vm->sp >= task->stack + MAX_STACK) return VM_STACK_OVERFLOW;
       operand = *(++vm->ip);
-      *(vm->sp++) = task->consts.data[operand]; 
+      PUSH(vm, task->consts.data[operand]); 
       vm->ip++;
       break;
     case INST_STORE:
-      if (vm->sp <= task->stack) return VM_STACK_UNDERFLOW;
       operand = *(++vm->ip);
-      uint32_t val = *vm->sp--;
-      CURR_FRAME(vm)->vars[operand] = val;
+      POP(vm, CURR_FRAME(vm)->vars[operand]);
       vm->ip++;
       break;
     case INST_STOREG:
@@ -169,9 +179,40 @@ vm_exitcode_t exec(vm_t* vm) {
     case INST_DIVF:
       TODO("INST_DIVF");
       break;
-    case INST_COUNT:
-      TODO("INST_COUNT");
+    case INST_EQ:
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, a == b);
+      vm->ip++;
       break;
+    case INST_LEQ:
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, a <= b);
+      vm->ip++;
+      break;
+    case INST_GEQ:
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, a >= b);
+      vm->ip++;
+      break;
+    case INST_LT:
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, a < b);
+      vm->ip++;
+      break;
+    case INST_GT:
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, a > b);
+      vm->ip++;
+      break;
+
+    case INST_COUNT:
+    default:
+      return VM_INVALID_OPCODE;
   }
   return VM_OK;
 }
@@ -182,6 +223,7 @@ void set_active_task(vm_t* vm, task_t* t) {
 }
 
 // TODO: handle non-uint32_t args
+// -> have bind() macro/function that populates the stack before run()
 vm_exitcode_t run(vm_t* vm, size_t n_args, ...) {
   va_list args;
 

@@ -18,6 +18,9 @@ typedef enum {
   TOK_IDENT,
   TOK_ARROW,
   TOK_COLCOL,
+  TOK_EQEQ,
+  TOK_GEQ,
+  TOK_LEQ,
   TOK_INTLIT,
   TOK_REALLIT,
   TOK_STRLIT,
@@ -226,6 +229,11 @@ typedef enum {
   OP_REM     = '%',
   OP_CALL    = '(',
   OP_ASSIGN  = '=',
+  OP_EQ      = TOK_EQEQ,
+  OP_LEQ     = TOK_LEQ,
+  OP_GEQ     = TOK_GEQ,
+  OP_LT      = '<',
+  OP_GT      = '>',
   OP_MEMB    = '.',
   OP_SCOPE   = TOK_COLCOL,
 } op_kind_t;
@@ -233,6 +241,7 @@ typedef enum {
 enum _bp {
   BP_NONE = 0,
   BP_ASSIGN,
+  BP_CMP,
   BP_ADD,
   BP_MULT,
   BP_CALL,
@@ -515,6 +524,12 @@ typedef uint32_t instruction_t; enum {
   INST_MULTF,
   INST_DIVF,
 
+  INST_EQ,
+  INST_LEQ,
+  INST_GEQ,
+  INST_LT,
+  INST_GT,
+
   INST_COUNT,
 };
 
@@ -622,6 +637,7 @@ typedef struct {
 
 typedef enum {
   VM_OK,
+  VM_INVALID_OPCODE,
   VM_NO_MORE_INSTRUCTIONS,
   VM_STACK_OVERFLOW,
   VM_STACK_UNDERFLOW,
