@@ -241,7 +241,8 @@ typedef enum {
 enum _bp {
   BP_NONE = 0,
   BP_ASSIGN,
-  BP_CMP,
+  BP_EQ,
+  BP_REL,
   BP_ADD,
   BP_MULT,
   BP_CALL,

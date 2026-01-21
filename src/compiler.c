@@ -519,11 +519,11 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
 
 const enum _bp expr_bp_table[] = {
   [OP_INVALID] = BP_NONE,
-  [OP_EQ]      = BP_CMP, 
-  [OP_LEQ]     = BP_CMP,
-  [OP_GEQ]     = BP_CMP,
-  [OP_LT]      = BP_CMP, 
-  [OP_GT]      = BP_CMP, 
+  [OP_EQ]      = BP_EQ, 
+  [OP_LEQ]     = BP_REL,
+  [OP_GEQ]     = BP_REL,
+  [OP_LT]      = BP_REL, 
+  [OP_GT]      = BP_REL, 
   [OP_PLUS]    = BP_ADD,
   [OP_MINUS]   = BP_ADD, 
   [OP_MULT]    = BP_MULT,
