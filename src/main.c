@@ -61,7 +61,7 @@ int main() {
   vm_t vm = { 0 };
   task_t* t = load_task(&vm, &prog);
   set_active_task(&vm, t);
-  return run(&vm, 1, 9);
+  return run(&vm, 1, 14);
 }
 
 #define SB_IMPLEMENTATION

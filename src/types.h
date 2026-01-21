@@ -606,6 +606,7 @@ typedef struct {
 
 typedef struct {
   uint32_t vars[MAX_LOC_VARS];
+  instruction_t* ret_addr;
 } virtual_frame_t;
 
 typedef struct _task {
@@ -656,6 +657,7 @@ typedef enum {
   VM_NO_MORE_INSTRUCTIONS,
   VM_STACK_OVERFLOW,
   VM_STACK_UNDERFLOW,
+  VM_CALL_STACK_OVERFLOW,
 } vm_exitcode_t;
 
 #endif

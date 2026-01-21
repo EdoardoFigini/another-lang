@@ -147,7 +147,7 @@ vm_exitcode_t exec(vm_t* vm) {
       if (a != 0)
         vm->ip += operand;
       else
-        vm->ip++;
+        vm->ip += 2;
       break;
     case INST_JZ:
       operand = *(vm->ip + 1);
@@ -155,10 +155,14 @@ vm_exitcode_t exec(vm_t* vm) {
       if (a == 0)
         vm->ip += operand;
       else
-        vm->ip++;
+        vm->ip += 2;
       break;
     case INST_CALL:
-      TODO("INST_CALL");
+      operand = *(++vm->ip);
+      if (vm->active_task->call_stack.depth >= MAX_CALL_STACK) return VM_CALL_STACK_OVERFLOW;
+      vm->active_task->call_stack.frames[vm->active_task->call_stack.depth++] = malloc(sizeof(virtual_frame_t));
+      CURR_FRAME(vm)->ret_addr = vm->ip;
+      vm->ip = vm->active_task->code + operand;
       break;
     case INST_HOSTCALL:
       TODO("INST_HOSTCALL");
@@ -167,7 +171,8 @@ vm_exitcode_t exec(vm_t* vm) {
       TODO("INST_ICALL");
       break;
     case INST_RET:
-      TODO("INST_RET");
+      vm->ip = CURR_FRAME(vm)->ret_addr;
+      free(vm->active_task->call_stack.frames[--vm->active_task->call_stack.depth]);
       break;
     case INST_ADD:
       POP(vm, b);
@@ -270,7 +275,7 @@ vm_exitcode_t run(vm_t* vm, size_t n_args, ...) {
 
   __dbg_print_stack(stdout, vm);
   while(!vm->halt) {
-    fprintf(stdout, "%p (0x%08lX) %d\n", vm->ip, (vm->ip - active->code), *vm->ip);
+    // fprintf(stdout, "%p (0x%08lX) %d\n", vm->ip, (vm->ip - active->code), *vm->ip);
     vm_exitcode_t ec = exec(vm);
     __dbg_print_stack(stdout, vm);
     if (ec != VM_OK) return ec;
