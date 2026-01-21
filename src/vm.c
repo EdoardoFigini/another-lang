@@ -137,6 +137,26 @@ vm_exitcode_t exec(vm_t* vm) {
     case INST_STOREG:
       TODO("INST_STOREG");
       break;
+    case INST_JMP:
+      operand = *(vm->ip + 1);
+      vm->ip += operand;
+      break;
+    case INST_JNZ:
+      operand = *(vm->ip + 1);
+      POP(vm, a);
+      if (a != 0)
+        vm->ip += operand;
+      else
+        vm->ip++;
+      break;
+    case INST_JZ:
+      operand = *(vm->ip + 1);
+      POP(vm, a);
+      if (a == 0)
+        vm->ip += operand;
+      else
+        vm->ip++;
+      break;
     case INST_CALL:
       TODO("INST_CALL");
       break;
@@ -150,10 +170,16 @@ vm_exitcode_t exec(vm_t* vm) {
       TODO("INST_RET");
       break;
     case INST_ADD:
-      TODO("INST_ADD");
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, a + b);
+      vm->ip++;
       break;
     case INST_SUB:
-      TODO("INST_SUB");
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, a - b);
+      vm->ip++;
       break;
     case INST_MULT:
       TODO("INST_MULT");
@@ -244,6 +270,7 @@ vm_exitcode_t run(vm_t* vm, size_t n_args, ...) {
 
   __dbg_print_stack(stdout, vm);
   while(!vm->halt) {
+    fprintf(stdout, "%p (0x%08lX) %d\n", vm->ip, (vm->ip - active->code), *vm->ip);
     vm_exitcode_t ec = exec(vm);
     __dbg_print_stack(stdout, vm);
     if (ec != VM_OK) return ec;

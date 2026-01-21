@@ -16,6 +16,7 @@
 
 #include "vm.h"
  
+#if 0
 const char* source = 
   "extern puts: (s: char[]) -> i32;\n"
   "extern floor: (f: f32) -> i32;\n"
@@ -38,10 +39,24 @@ const char* source =
   " return bar;\n"
   "}\n"
   ;
+#endif
+
+const char* source =
+  "export fib: (n : u32) -> u32 {\n"
+  "  if (n < 2U) {\n"
+  "    return n;\n"
+  "  } else {\n"
+  "    return fib(n - 1U) + fib(n - 2U);\n"
+  "  }\n"
+  "}\n"
+  ;
 
 int main() {
   program_t prog = { 0 };
-  if(!compile(&prog, source)) return 1;
+  if(!compile(&prog, source)) {
+    fprintf(stderr, "compilation failed!\n");
+    return 1;
+  }
 
   vm_t vm = { 0 };
   task_t* t = load_task(&vm, &prog);

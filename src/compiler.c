@@ -21,6 +21,8 @@ const char* tok_keywords[] = {
   [KW_EXTERN] = "extern",
   [KW_EXPORT] = "export",
   [KW_CONST]  = "const",
+  [KW_IF]     = "if",
+  [KW_ELSE]   = "else",
 };
 
 void tok_print(token_t tok) {
@@ -42,6 +44,8 @@ void tok_print(token_t tok) {
       case TOK_EXTERN: printf("%-20s", "TOK_EXTERN"); break;
       case TOK_EXPORT: printf("%-20s", "TOK_EXPORT"); break;
       case TOK_CONST: printf("%-20s", "TOK_CONST"); break;
+      case TOK_IF: printf("%-20s", "TOK_IF"); break;
+      case TOK_ELSE: printf("%-20s", "TOK_ELSE"); break;
       default: printf("%-20s", "<INVALID TOKEN>"); break;
     }
   }
@@ -66,6 +70,8 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_EXTERN:
       case TOK_EXPORT:
       case TOK_CONST:
+      case TOK_IF:
+      case TOK_ELSE:
         return tok_keywords[k];
       default: return "<INVALID TOKEN>";
     }
@@ -126,6 +132,8 @@ static inline int tok_num_literal(tokenizer_t* t, char** end, size_t line, size_
 
   lit_type_info_flags_t type_info = 0;
 
+  // TODO: N-2 now gets tokenized as TOK_ID '-2', instead of
+  // TOK_ID '-' '2', unless '-' and '2' are separated by a space
   if (**end == '-') { sign = -1; (*end)++; }
 
   if (**end == '0') {
@@ -484,6 +492,8 @@ static inline bool tok_is_specifier(parser_t* p) {
     case KW_CONST:
       return true;
     case KW_RETURN:
+    case KW_IF:
+    case KW_ELSE:
     default: 
       return false;
   }
@@ -503,6 +513,8 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
       case KW_EXPORT: cur_flag = SPEC_EXPORT; break;
       case KW_CONST: cur_flag = SPEC_CONST; break;
       case KW_RETURN:
+      case KW_IF:
+      case KW_ELSE:
       default: return flags;
     }
 
@@ -747,8 +759,10 @@ static inline ast_type_t* parse_type(parser_t* p) {
 
 static inline ast_decl_t* parse_var_decl(parser_t* p, const char* name, spec_flags_t flags);
 static inline ast_def_t* parse_var_def(parser_t* p, ast_decl_t* decl);
+static inline ast_body_t* parse_body(parser_t* p);
 
 // stmt = return [ expr ] ';' 
+//      | if '(' expr ')' body [ else body ]
 //      | ( 'specifier' )* ident ':' type [ '=' expr ] ';'
 //      | expr ';'
 //      | ';'
@@ -775,6 +789,39 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     }
     if(!expect(p,';')) return NULL;
     next(p);
+    return n;
+
+  } else if (tok_is(p, TOK_IF)) {
+    if(!expect(p, TOK_IF)) return NULL;
+    next(p);
+    n->kind = STMT_IF;
+
+    if(!expect(p, '(')) return NULL;
+    next(p);
+    ast_expr_t* expr = parse_expr(p, 0);
+    if(!expr) return NULL;
+    n->as.if_else.cond = expr;
+    if(!expect(p, ')')) return NULL;
+    next(p);
+
+    enter_scope_new(p, arena_sprintf(&p->arena, "%s_if", p->current_scope->name));
+    n->as.if_else.scope = p->current_scope;
+    ast_body_t* if_body = parse_body(p);
+    n->as.if_else.if_body = if_body;
+    exit_scope(p);
+
+    if(tok_is(p, TOK_ELSE)) {
+      if(!expect(p, TOK_ELSE)) return NULL;
+      next(p);
+
+      enter_scope_new(p, arena_sprintf(&p->arena, "%s_else", p->current_scope->name));
+      n->as.if_else.scope = p->current_scope;
+      ast_body_t* else_body = parse_body(p);
+      n->as.if_else.else_body = else_body;
+      exit_scope(p);
+    }
+    // TODO: handle else if (elif)
+
     return n;
 
   } else if (tok_is(p, TOK_IDENT) || tok_is_specifier(p)) {
@@ -1194,6 +1241,8 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
           if (stmt->as.var_def.initialized)
             print_ast(stream, (ast_node_t*)stmt->as.var_def.init, level + 2);
           break;
+        case STMT_IF:
+          TODO("print_ast: STMT_IF");
         default: break;
       }
       break;
@@ -1521,8 +1570,13 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
       e->type = t->builtins.boolean; 
       return true;
     }
-
     // TODO: look for compare interface implementation in left and right
+    fprintf(stderr, "[ERROR] Typechecker\n  Cannot compare expression of type `");
+    print_type(stderr, left);
+    fprintf(stderr, "` with expression of type `");
+    print_type(stderr, right);
+    fprintf(stderr, "`.\n");
+    return false;
 
   } else if (is_op_arithmetic(op)) {
     if (is_numeric(left) && is_numeric(right)) {
@@ -1764,6 +1818,32 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
           fprintf(stderr, "`.\n");
           return false;
         }
+      }
+      break;
+    case STMT_IF:
+      struct _if_else* if_else = &stmt->as.if_else;
+      if(!typecheck_expr(t, if_else->cond)) return false;
+      if(!type_equals(*if_else->cond->type, *t->builtins.boolean)) {
+        fprintf(stderr, "[ERROR] Typechecker\n  Incompatible type in condition: expected `");
+        print_type(stderr, t->builtins.boolean);
+        fprintf(stderr, "`, got `");
+        print_type(stderr, if_else->cond->type);
+        fprintf(stderr, "`.\n");
+        return false;
+      }
+
+      t->current_scope = if_else->scope;
+      da_foreach(ast_stmt_t*, stmt, &if_else->if_body->stmts) {
+        if(!typecheck_stmt(t, *stmt, ret_type)) return false;
+      }
+      t->current_scope = t->current_scope->parent;
+
+      if(if_else->else_body) {
+        t->current_scope = if_else->scope;
+        da_foreach(ast_stmt_t*, stmt, &if_else->else_body->stmts) {
+          if(!typecheck_stmt(t, *stmt, ret_type)) return false;
+        }
+        t->current_scope = t->current_scope->parent;
       }
       break;
     default:
@@ -2064,7 +2144,35 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
         da_append(&p->code, symb->addr);
       }
       return true;
-    default: return false;
+    case STMT_IF:
+      size_t j_to_end_offset = 0; 
+      size_t j_to_else_offset = 0;
+
+      if(!codegen_expr(p, scope, s->as.if_else.cond)) return false;
+      da_append(&p->code, INST_JZ);
+      da_append(&p->code, 0);
+      if (s->as.if_else.else_body)
+        j_to_else_offset = p->code.count - 1;
+      else
+        j_to_end_offset = p->code.count - 1;
+
+      da_foreach(ast_stmt_t*, stmt, &s->as.if_else.if_body->stmts)
+        if(!codegen_stmt(p, s->as.if_else.scope, f, *stmt)) return false;
+
+      if(s->as.if_else.else_body) {
+        da_append(&p->code, INST_JMP);
+        da_append(&p->code, 0);
+        j_to_end_offset = p->code.count - 1;
+        p->code.items[j_to_else_offset] = p->code.count - j_to_else_offset + 1;
+
+        da_foreach(ast_stmt_t*, stmt, &s->as.if_else.else_body->stmts)
+          if(!codegen_stmt(p, s->as.if_else.scope, f, *stmt)) return false;
+      }
+
+      p->code.items[j_to_end_offset] = p->code.count - j_to_end_offset + 1;
+      return true;
+    default: 
+      UNREACHABLE("codegen_stmt");
   }
 }
 
@@ -2276,6 +2384,21 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
         fprintf(stream, "  %-10s 0x%08X\n", "STORE", p->code.items[++i]); break;
       case INST_STOREG:
         fprintf(stream, "  %-10s 0x%08X\n", "STOREG", p->code.items[++i]); break;
+      case INST_JMP: {
+        uint32_t op = p->code.items[++i];
+        fprintf(stream, "  %-10s 0x%08X        \n", "JMP", op);
+        break;
+      }
+      case INST_JNZ: {
+        uint32_t op = p->code.items[++i];
+        fprintf(stream, "  %-10s 0x%08X        \n", "JNZ", op);
+        break;
+      }
+      case INST_JZ: {
+        uint32_t op = p->code.items[++i];
+        fprintf(stream, "  %-10s 0x%08X        \n", "JZ", op);
+        break;
+      }
       case INST_CALL: {
         uint32_t op = p->code.items[++i];
         fprintf(stream, "  %-10s 0x%08X        ", "CALL", op);

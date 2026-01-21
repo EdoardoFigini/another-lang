@@ -28,6 +28,8 @@ typedef enum {
   TOK_EXTERN,
   TOK_EXPORT,
   TOK_CONST,
+  TOK_IF,
+  TOK_ELSE
 } tok_kind_t;
 
 typedef enum {
@@ -35,6 +37,8 @@ typedef enum {
   KW_EXTERN = TOK_EXTERN,
   KW_EXPORT = TOK_EXPORT,
   KW_CONST  = TOK_CONST,
+  KW_IF     = TOK_IF,
+  KW_ELSE   = TOK_ELSE,
 } kw_kind_t;
 
 typedef enum {
@@ -312,6 +316,7 @@ typedef enum {
   STMT_RET,
   STMT_EXPR,
   STMT_VAR_DEF,
+  STMT_IF,
 } ast_stmt_kind_t;
 
 typedef struct {
@@ -328,6 +333,12 @@ typedef struct {
       bool initialized;
       ast_expr_t* init;
     } var_def;
+    struct _if_else {
+      scope_t* scope;
+      ast_expr_t* cond;
+      ast_body_t* if_body;
+      ast_body_t* else_body;
+    } if_else;
   } as;
 } ast_stmt_t;
 
@@ -509,6 +520,9 @@ typedef uint32_t instruction_t; enum {
   INST_STORE,
   INST_STOREG,
 
+  INST_JMP,
+  INST_JNZ,
+  INST_JZ,
   INST_CALL,
   INST_HOSTCALL,
   INST_ICALL, // interface call
