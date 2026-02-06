@@ -41,6 +41,7 @@ const char* source =
   ;
 #endif
 
+#if 0
 const char* source =
   "export fib: (n : u32) -> u32 {\n"
   "  if (n < 2U) {\n"
@@ -50,6 +51,19 @@ const char* source =
   "  }\n"
   "}\n"
   ;
+#endif
+
+const char* source = 
+ "extern test: () -> none;\n"
+ "\n"
+ "main: () -> none {\n"
+ "  test();\n"
+ "}\n"
+ ;
+
+void test() {
+  printf("Hello from host!\n");
+}
 
 int main() {
   program_t prog = { 0 };
@@ -61,7 +75,7 @@ int main() {
   vm_t vm = { 0 };
   task_t* t = load_task(&vm, &prog);
   set_active_task(&vm, t);
-  return run(&vm, 1, 14);
+  return run(&vm, 0);
 }
 
 #define SB_IMPLEMENTATION

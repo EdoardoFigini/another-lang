@@ -545,6 +545,8 @@ typedef uint32_t instruction_t; enum {
   INST_LT,
   INST_GT,
 
+  INST_HALT,
+
   INST_COUNT,
 };
 
@@ -567,7 +569,10 @@ typedef struct {
     size_t capacity;
   } globals;
   struct _externs {
-    ffi_cif* items;
+    struct _extern{ 
+      ffi_cif cif;
+      const char* name;
+    }* items;
     size_t count;
     size_t capacity;
   } externs;
@@ -612,13 +617,13 @@ typedef struct {
 typedef struct _task {
   instruction_t* code;
   const instruction_t* last_inst;
+  arena_t arena;
 
   // probably useless: first objects in the OBJ pool are the constants
   // this is due to the way we load a new task
   struct _vm_consts {
     uint32_t* data;
     size_t count;
-    arena_t arena;
   } consts;
 
   uint32_t* stack;
@@ -628,6 +633,11 @@ typedef struct _task {
     virtual_frame_t* frames[MAX_CALL_STACK];
     size_t depth;
   } call_stack;
+
+  struct {
+    struct _extern* data;
+    size_t count;
+  } externs;
 
   obj_pool_t obj_pool;
   
@@ -649,15 +659,20 @@ typedef struct {
   arena_t tasks_arena;
   task_t* tasks_head;
   task_t* active_task;
+
+  void* host;
 } vm_t;
 
+// TODO: allow users to define handlers for exit codes 
 typedef enum {
   VM_OK,
+  VM_NEXT,
   VM_INVALID_OPCODE,
   VM_NO_MORE_INSTRUCTIONS,
   VM_STACK_OVERFLOW,
   VM_STACK_UNDERFLOW,
   VM_CALL_STACK_OVERFLOW,
+  VM_UNDEFINED_EXTERN,
 } vm_exitcode_t;
 
 #endif

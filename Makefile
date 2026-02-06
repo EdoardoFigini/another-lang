@@ -1,7 +1,7 @@
 SRCS = $(wildcard src/*.c)
 OBJS = $(patsubst src/%.c, build/%.o, $(SRCS))
 
-CFLAGS = -Wall -Wextra -Wswitch-enum -ggdb
+CFLAGS = -Wall -Wextra -Wswitch-enum -ggdb -rdynamic
 
 bin/main: $(OBJS) bin
 	gcc $(CFLAGS) -o $@ $(OBJS) -lffi

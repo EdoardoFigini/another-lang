@@ -2187,7 +2187,7 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
     case TYPE_F64:    return &ffi_type_double;
     case TYPE_CHAR:   return &ffi_type_uchar;
     case TYPE_BOOL:   return &ffi_type_uint8;
-    case TYPE_STR:    return NULL;
+    case TYPE_STR:    return &ffi_type_pointer;
     case TYPE_ADDR:   return &ffi_type_pointer;
     case TYPE_ARRAY:  return &ffi_type_pointer;
     case TYPE_STRUCT: return NULL;
@@ -2226,7 +2226,8 @@ static inline bool codegen_func_decl(program_t* p, ast_decl_t* d) {
     }
 
     set_symbol_address(d->symbol, p->externs.count);
-    da_append(&p->externs, cif);
+    // TODO: name is leaked
+    da_append(&p->externs, ((struct _extern){ cif, strdup(d->name) }));
   }
 
   return true;
@@ -2249,10 +2250,15 @@ static inline bool codegen_func_def(program_t* p, ast_def_t* d) {
   da_foreach(ast_stmt_t*, stmt, &d->body->stmts)
     if(!codegen_stmt(p, d->decl->as.fun.scope, &f, *stmt)) return false;
 
+  if(da_last(&p->code) != INST_RET)
+    da_append(&p->code, INST_RET);
+
   return true;
 }
 
 static inline int codegen(program_t* p, ast_root_t* root) {
+  da_append(&p->code, INST_HALT);
+  
   da_foreach(ast_decl_t*, d, &root->decls) {
     switch((*d)->kind) {
       case DECL_KIND_FUNC:
@@ -2453,6 +2459,8 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
         fprintf(stream, "  %-10s\n", "LT"); break;
        case INST_GT:
         fprintf(stream, "  %-10s\n", "GT"); break;
+       case INST_HALT:
+        fprintf(stream, "  %-10s\n", "HALT"); break;
 
 
       case INST_COUNT:

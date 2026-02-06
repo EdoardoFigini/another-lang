@@ -17,6 +17,14 @@
 
 #define MAX_STACK 0x1000 
 
+static inline bool is_ffi_arg_32(ffi_type* t) {
+  return t == &ffi_type_sint32 ||
+         t == &ffi_type_uint32 ||
+         t == &ffi_type_float ||
+         t == &ffi_type_uchar ||
+         t == &ffi_type_uint8;
+}
+
 task_t* load_task(vm_t* vm, program_t* p) {
   task_t* t = malloc(sizeof(*t));
   memset(t, 0, sizeof(*t));
@@ -41,7 +49,7 @@ task_t* load_task(vm_t* vm, program_t* p) {
 
   // constants
   {
-    t->consts.data  = arena_alloc(&t->consts.arena, sizeof(uint32_t) * p->constants.count);
+    t->consts.data  = arena_alloc(&t->arena, sizeof(uint32_t) * p->constants.count);
     t->consts.count = p->constants.count;
 
     for (size_t i=0; i < p->constants.count; i++) {
@@ -50,7 +58,7 @@ task_t* load_task(vm_t* vm, program_t* p) {
         case DK_STR:
           obj_t* o = malloc(sizeof(*o));
           o->kind = OBJ_STR;
-          o->as.str.data = arena_strdup(&t->consts.arena, c->as.s);
+          o->as.str.data = arena_strdup(&t->arena, c->as.s);
           o->as.str.size = strlen(c->as.s);
           o->refs = 1;
 
@@ -67,6 +75,17 @@ task_t* load_task(vm_t* vm, program_t* p) {
     }
   }
   DLLIST_ADD(t, vm->tasks_head);
+
+  // externs
+  {
+    t->externs.data = arena_alloc(&t->arena, sizeof(*t->externs.data) * p->externs.count);
+    t->externs.count = p->externs.count;
+
+    for (size_t i=0; i < p->externs.count; i++) {
+      t->externs.data[i].cif = p->externs.items[i].cif;
+      t->externs.data[i].name = arena_strdup(&t->arena, p->externs.items[i].name);
+    }
+  }
 
   return t;
 }
@@ -85,14 +104,14 @@ static inline void __dbg_print_stack(FILE* stream, vm_t* vm) {
 #define POP(vm, v) \
   do { \
     if ((vm)->sp <= (vm)->active_task->stack) return VM_STACK_UNDERFLOW; \
-    (v) = *(--(vm)->sp);\
-  } while(0);
+    (v) = *(typeof((v))*)(--(vm)->sp);\
+  } while(0)
 
 #define PUSH(vm, v) \
   do {\
     if ((vm)->sp >= (vm)->active_task->stack + MAX_STACK) return VM_STACK_OVERFLOW; \
-    *((vm)->sp++) = (v); \
-  } while(0);
+    *((vm)->sp++) = (typeof(*(vm)->sp))(v); \
+  } while(0)
 
 vm_exitcode_t exec(vm_t* vm) {
   task_t* task = vm->active_task;
@@ -158,15 +177,47 @@ vm_exitcode_t exec(vm_t* vm) {
         vm->ip += 2;
       break;
     case INST_CALL:
+      // TODO: how do I handle refernces and output arguments?
       operand = *(++vm->ip);
       if (vm->active_task->call_stack.depth >= MAX_CALL_STACK) return VM_CALL_STACK_OVERFLOW;
       vm->active_task->call_stack.frames[vm->active_task->call_stack.depth++] = malloc(sizeof(virtual_frame_t));
       CURR_FRAME(vm)->ret_addr = vm->ip;
       vm->ip = vm->active_task->code + operand;
       break;
-    case INST_HOSTCALL:
-      TODO("INST_HOSTCALL");
+    case INST_HOSTCALL: {
+      operand = *(++vm->ip);
+      uint64_t retval = 0; 
+      if (operand >= vm->active_task->externs.count) return VM_UNDEFINED_EXTERN;
+      struct _extern* ext = &vm->active_task->externs.data[operand]; 
+#ifdef _WIN32
+      void* func = NULL;
+#else
+      void* func = dlsym(vm->host, ext->name);
+#endif
+      if (!func) return VM_UNDEFINED_EXTERN; 
+
+      uint64_t** args = malloc(sizeof(*args) * ext->cif.nargs);
+      for(size_t i=0; i < ext->cif.nargs; i++) {
+        if(is_ffi_arg_32(ext->cif.arg_types[i])) {
+            POP(vm, args[i]);
+        } else {
+            TODO("INST_HOSTCALL: unsupported 64-bit arguments");
+        }
+      }
+
+      ffi_call(&ext->cif, FFI_FN(func), &retval, (void**)args);
+
+      if (ext->cif.rtype != &ffi_type_void) {
+        if(is_ffi_arg_32(ext->cif.rtype))
+          PUSH(vm, retval & (uint32_t)-1);
+        else
+          TODO("INST_HOSTCALL: unsupported 64-bit return");
+      }
+
+      free(args);
+      vm->ip++;
       break;
+    }
     case INST_ICALL:
       TODO("INST_ICALL");
       break;
@@ -240,12 +291,14 @@ vm_exitcode_t exec(vm_t* vm) {
       PUSH(vm, a > b);
       vm->ip++;
       break;
+    case INST_HALT:
+      return VM_OK;
 
     case INST_COUNT:
     default:
       return VM_INVALID_OPCODE;
   }
-  return VM_OK;
+  return VM_NEXT;
 }
 
 void set_active_task(vm_t* vm, task_t* t) {
@@ -259,12 +312,18 @@ vm_exitcode_t run(vm_t* vm, size_t n_args, ...) {
   va_list args;
 
   task_t* active = vm->active_task;
-  vm->ip = active->code;
+  vm->ip = active->code + 1; // skip halt
   vm->sp = active->stack;
   vm->halt = false;
 
+  // TODO: move to something like vm_init or make_vm
+#ifdef __linux__
+  vm->host = dlopen(NULL, RTLD_LAZY);
+#endif
+
   active->call_stack.frames[0] = malloc(sizeof(virtual_frame_t));
   active->call_stack.depth++;
+  active->call_stack.frames[0]->ret_addr = active->code;
 
   va_start(args, n_args);
   for(size_t i=0; i < n_args; i++) {
@@ -273,15 +332,16 @@ vm_exitcode_t run(vm_t* vm, size_t n_args, ...) {
   }
   va_end(args);
 
+  vm_exitcode_t ec = VM_NEXT;
   __dbg_print_stack(stdout, vm);
   while(!vm->halt) {
     // fprintf(stdout, "%p (0x%08lX) %d\n", vm->ip, (vm->ip - active->code), *vm->ip);
-    vm_exitcode_t ec = exec(vm);
+    ec = exec(vm);
+    if (ec != VM_NEXT) break; 
     __dbg_print_stack(stdout, vm);
-    if (ec != VM_OK) return ec;
   }
 
   // TODO: release resources
 
-  return VM_OK;
+  return ec;
 }
