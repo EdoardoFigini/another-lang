@@ -56,6 +56,14 @@ const char* tc_cc[] = {
   [T_GNU]  = "gcc",
 };
 
+// Default toolchain
+// Edit this based on platform
+#ifdef _WIN32
+#define DEFAULT_TOOLCHAIN T_MSVC
+#else
+#define DEFAULT_TOOLCHAIN T_GNU
+#endif
+
 // Flags per toolchain
 // Edit these to change compilation settings and parameters
 const_str_list_t tc_cflags[] = {
@@ -134,7 +142,7 @@ typedef struct {
   } compile_commands;
 } walk_data_t;
 
-static tc_t tc = T_MSVC;
+static tc_t tc = DEFAULT_TOOLCHAIN;
 
 const char* supported_tcs() {
   Nob_String_Builder sb = { 0 };
@@ -240,9 +248,9 @@ int main(int argc, char **argv)
 
     bool *f_help       = flag_bool("help", false, "Print this message to stdout and exit with 0.");
     char **f_toolchain = flag_str(
-        "toolchain", 
-        tc_names[0], 
-        nob_temp_sprintf("Select the toolchain. Available toolchains: [%s]", supported_tcs())
+      "toolchain", 
+      tc_names[DEFAULT_TOOLCHAIN], 
+      nob_temp_sprintf("Select the toolchain. Available toolchains: [%s]", supported_tcs())
     );
     bool *f_run = flag_bool(
       "run",
