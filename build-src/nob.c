@@ -122,21 +122,8 @@ const char* tc_lib_path_flag[] = {
 #endif
 
 typedef struct {
-  const char* name;
-  struct {
-    const char** items;
-    size_t count;
-    size_t capacity;
-  } dependencies;
-} target_t;
-
-typedef struct {
   Procs procs;
-  struct {
-    target_t* items;
-    size_t count;
-    size_t capacity;
-  } targets;
+  Nob_File_Paths objs;
 } walk_data_t;
 
 static tc_t tc = T_MSVC;
@@ -181,8 +168,6 @@ bool compile_tu(Nob_Walk_Entry entry) {
   if (nob_sv_end_with(path, ".c")) {
     const char* obj_path = nob_temp_sprintf(BUILD_FOLDER"%.*s-%s.obj", SV_Arg(filename_from_path(path)), tc_names[tc]);
 
-    target_t target = { .name = obj_path };
-
     nob_cmd_append(&cmd, tc_cc[tc]);
     for (size_t i=0; i < tc_lflags[tc].count; i++) {
       nob_cmd_append(&cmd, tc_cflags[tc].items[i]);
@@ -193,7 +178,7 @@ bool compile_tu(Nob_Walk_Entry entry) {
     nob_cmd_append(&cmd, tc_compile_flag[tc], entry.path);
     nob_cmd_append(&cmd, tc_out_obj[tc], obj_path);
 
-    nob_da_append(&wd->targets, target);
+    nob_da_append(&wd->objs, obj_path);
 
     if (!cmd_run(&cmd, .async = &wd->procs)) return false;
   }
@@ -241,6 +226,11 @@ int main(int argc, char **argv)
         "toolchain", 
         tc_names[0], 
         nob_temp_sprintf("Select the toolchain. Available toolchains: [%s]", supported_tcs())
+    );
+    bool *f_run = flag_bool(
+      "run",
+      false,
+      "Launch executable after compilation."
     );
 
     const char* exe = argv[0];
@@ -292,8 +282,8 @@ int main(int argc, char **argv)
     for (size_t i=0; i < tc_lflags[tc].count; i++) {
       nob_cmd_append(&cmd, tc_lflags[tc].items[i]);
     }
-    da_foreach(target_t, tgt, &wd.targets) {
-      nob_da_append(&cmd, tgt->name); 
+    da_foreach(const char*, obj, &wd.objs) {
+      nob_da_append(&cmd, *obj); 
     }
     nob_cmd_append(&cmd, tc_out_exe[tc]);
     nob_cmd_append(&cmd, EXE_PATH(PROJ_NAME));
@@ -310,6 +300,12 @@ int main(int argc, char **argv)
     uint64_t delta = end - start;
 
     nob_log(NOB_INFO, "Compilation completed in %.03lf seconds.", ((double)delta) / NOB_NANOS_PER_SEC);
+
+    if (*f_run) {
+      nob_cmd_append(&cmd, EXE_PATH(PROJ_NAME));
+      nob_da_append_many(&cmd, argv, argc);
+      if (!cmd_run(&cmd)) return 1;
+    }
 
     return 0;
 }
