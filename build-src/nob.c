@@ -34,6 +34,8 @@ typedef struct {
 #define BIN_FOLDER         LOCAL_FOLDER(bin)
 #define THIRD_PARTY_FOLDER LOCAL_FOLDER(third_party)
 
+#define COMPILE_COMMANDS BUILD_FOLDER "compile_commands.json"
+
 #define PROJ_NAME "main" 
 
 // Supported Toolchains
@@ -124,6 +126,12 @@ const char* tc_lib_path_flag[] = {
 typedef struct {
   Procs procs;
   Nob_File_Paths objs;
+  bool gen_compile_commands;
+  struct {
+    const char** items;
+    size_t count;
+    size_t capacity;
+  } compile_commands;
 } walk_data_t;
 
 static tc_t tc = T_MSVC;
@@ -141,7 +149,7 @@ const char* supported_tcs() {
 
 void usage(FILE *stream, const char* exe)
 {
-  fprintf(stream, "Usage: ./%s [OPTIONS]\n", exe);
+  fprintf(stream, "Usage: %s [OPTIONS]\n", exe);
   fprintf(stream, "OPTIONS:\n");
   flag_print_options(stream);
 }
@@ -173,12 +181,21 @@ bool compile_tu(Nob_Walk_Entry entry) {
       nob_cmd_append(&cmd, tc_cflags[tc].items[i]);
     }
     for (size_t i=0; i < tc_includes[tc].count; i++) {
-      nob_cmd_append(&cmd, tc_include_flag[tc], tc_includes[tc].items[i]);
+      nob_cmd_append(&cmd, nob_temp_sprintf("%s%s", tc_include_flag[tc], tc_includes[tc].items[i]));
     }
     nob_cmd_append(&cmd, tc_compile_flag[tc], entry.path);
     nob_cmd_append(&cmd, tc_out_obj[tc], obj_path);
 
     nob_da_append(&wd->objs, obj_path);
+
+    if (wd->gen_compile_commands) {
+      Nob_String_Builder sb = { 0 };
+      nob_sb_appendf(&sb, "{ \"directory\": \"%s\", \"command\": \"", nob_get_current_dir_temp());
+      nob_cmd_render(cmd, &sb);
+      nob_sb_appendf(&sb, "\", \"file\": \"%s\"}", entry.path);
+
+      nob_da_append(&wd->compile_commands, nob_temp_sprintf(SV_Fmt, SV_Arg(nob_sb_to_sv(sb))));
+    }
 
     if (!cmd_run(&cmd, .async = &wd->procs)) return false;
   }
@@ -232,6 +249,11 @@ int main(int argc, char **argv)
       false,
       "Launch executable after compilation."
     );
+    bool *f_compile_commands = flag_bool(
+      "gen_compile_commands",
+      false,
+      "Generates JSON Compilation Database used by clangd LSP. File will be generated in `" COMPILE_COMMANDS "`."
+    );
 
     const char* exe = argv[0];
 
@@ -273,9 +295,20 @@ int main(int argc, char **argv)
 
     uint64_t start = nob_nanos_since_unspecified_epoch();
 
-    walk_data_t wd = { 0 };
+    walk_data_t wd = { .gen_compile_commands = *f_compile_commands };
     if(!nob_walk_dir(SRC_FOLDER, compile_tu, .data = &wd)) return 1;
+    if(wd.gen_compile_commands) {
+      Nob_String_Builder compile_commands_sb = { 0 };
+      nob_sb_appendf(&compile_commands_sb, "[\n");
+      for (size_t i=0; i<wd.compile_commands.count; i++) {
+        nob_sb_appendf(&compile_commands_sb, "  %s%s\n", wd.compile_commands.items[i], i == wd.compile_commands.count - 1 ? "" : ",");
+      }
+      nob_sb_appendf(&compile_commands_sb, "]");
+      nob_write_entire_file(COMPILE_COMMANDS, compile_commands_sb.items, compile_commands_sb.count);
+      nob_log(NOB_INFO, "Generated JSON Compilation Database `" COMPILE_COMMANDS "`.");
+    }
     if (!procs_flush(&wd.procs)) return 1;
+
 
     Cmd cmd = { 0 };
     nob_cmd_append(&cmd, tc_cc[tc]);
