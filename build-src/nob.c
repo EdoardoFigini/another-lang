@@ -20,8 +20,9 @@ typedef struct {
 
 #define CSTR_LIST(...) { \
   .items = (const char*[]){ __VA_ARGS__ }, \
-  .count = sizeof(#__VA_ARGS__) > 1 ? (sizeof((const char*[]){ __VA_ARGS__ }) / sizeof(const char*)) : 0 \
+  .count = (sizeof((const char*[]){ __VA_ARGS__ }) / sizeof(const char*)) \
 }
+#define CSTR_LIST_EMPTY { .items = NULL, .count = 0 }
 
 //////////////////////////////////////////////////
 
@@ -54,8 +55,9 @@ const char* tc_cc[] = {
 };
 
 // Flags per toolchain
+// Edit these to change compilation settings and parameters
 const_str_list_t tc_cflags[] = {
-  [T_MSVC] = CSTR_LIST("/nologo", "/W4", "/D_CRT_SECURE_NO_WARNINGS"),
+  [T_MSVC] = CSTR_LIST("/nologo", "/W4", "/diagnostics:caret", "/D_CRT_SECURE_NO_WARNINGS"),
   [T_GNU]  = CSTR_LIST("-Wall", "-Wextra", "-Wswitch-enum", "-ggdb"),
 };
 
@@ -64,7 +66,23 @@ const_str_list_t tc_lflags[] = {
   [T_GNU]  = CSTR_LIST("-ggdb", "-rdynamic"),
 };
 
+const_str_list_t tc_includes[] = {
+  [T_MSVC] = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP, SRC_FOLDER),
+  [T_GNU]  = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP, SRC_FOLDER),
+};
 
+const_str_list_t tc_lib_path[] = {
+  [T_MSVC] = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP),
+  [T_GNU]  = CSTR_LIST_EMPTY, 
+};
+
+const_str_list_t tc_libs[] = {
+  [T_MSVC] = CSTR_LIST("libffi-8.lib"),
+  [T_GNU]  = CSTR_LIST("ffi"),
+};
+
+// Toolchain specific flags/parameters
+// Edit these if adding a new toolchain, otherwise these SHOULD NOT BE CUSTOMIZED
 const char* tc_out_obj[] = {
   [T_MSVC] = "/Fo:",
   [T_GNU]  = "-o",
@@ -95,21 +113,6 @@ const char* tc_lib_path_flag[] = {
   [T_GNU]  = "-L",
 };
 
-const_str_list_t tc_includes[] = {
-  [T_MSVC] = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP, SRC_FOLDER),
-  [T_GNU]  = CSTR_LIST(SRC_FOLDER),
-};
-
-const_str_list_t tc_lib_path[] = {
-  [T_MSVC] = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP),
-  [T_GNU] = CSTR_LIST(),
-};
-
-const_str_list_t tc_libs[] = {
-  [T_MSVC] = CSTR_LIST("libffi-8.lib"),
-  [T_GNU]  = CSTR_LIST("ffi"),
-};
-
 //////////////////////////////////////////////////
 
 #ifdef _WIN32
@@ -117,8 +120,6 @@ const_str_list_t tc_libs[] = {
 #else
 #define EXE_PATH(x) BIN_FOLDER x 
 #endif
-
-#define Nob_SV_ends_with(sv, suffix) (memcmp(&(sv).data[(sv).count - strlen((suffix))], (suffix), strlen((suffix))) == 0)
 
 typedef struct {
   const char* name;
@@ -177,7 +178,7 @@ bool compile_tu(Nob_Walk_Entry entry) {
 
   Nob_String_View path = nob_sv_from_cstr(entry.path);
 
-  if (Nob_SV_ends_with(path, ".c")) {
+  if (nob_sv_end_with(path, ".c")) {
     const char* obj_path = nob_temp_sprintf(BUILD_FOLDER"%.*s-%s.obj", SV_Arg(filename_from_path(path)), tc_names[tc]);
 
     target_t target = { .name = obj_path };
@@ -200,11 +201,40 @@ bool compile_tu(Nob_Walk_Entry entry) {
   return true;
 }
 
+#ifdef _WIN32
+bool run_in_msvc_env(int argc, char** argv) {
+  if(!GetEnvironmentVariable("VSCMD_VER", NULL, 0) && GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
+    nob_log(NOB_INFO, "Loading MSVC environment");
+    Cmd cmd = { 0 };
+
+    nob_cmd_append(
+      &cmd, 
+      "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat", 
+      "-arch=x64", 
+      "-host_arch=x64", 
+      ">", "NUL"
+    );
+    nob_cmd_append(&cmd, "&&");
+    nob_da_append_many(&cmd, argv, argc);
+    return cmd_run(&cmd);
+  }
+  return true;
+}
+#endif
+
 int main(int argc, char **argv)
 {
-    NOB_GO_REBUILD_URSELF(argc, argv);
+#if defined(_MSC_VER) && defined(_WIN32)
+    const char *binary_path = *argv;
 
-    const char* exe = argv[0];
+    if (!nob_sv_end_with(nob_sv_from_cstr(binary_path), ".exe")) {
+      binary_path = nob_temp_sprintf("%s.exe", binary_path);
+    }
+
+    if(nob_needs_rebuild1(binary_path, __FILE__))
+      if(!run_in_msvc_env(argc, argv)) return 1;
+#endif
+    NOB_GO_REBUILD_URSELF(argc, argv);
 
     bool *f_help       = flag_bool("help", false, "Print this message to stdout and exit with 0.");
     char **f_toolchain = flag_str(
@@ -212,6 +242,8 @@ int main(int argc, char **argv)
         tc_names[0], 
         nob_temp_sprintf("Select the toolchain. Available toolchains: [%s]", supported_tcs())
     );
+
+    const char* exe = argv[0];
 
     if (!flag_parse(argc, argv)) {
         usage(stderr, exe);
@@ -223,9 +255,6 @@ int main(int argc, char **argv)
         usage(stdout, exe);
         return 0;
     }
-
-    argc = flag_rest_argc();
-    argv = flag_rest_argv();
 
     for (; tc <= COUNT_TOOLCHAINS; tc++) {
       if (tc == COUNT_TOOLCHAINS) {
@@ -241,19 +270,16 @@ int main(int argc, char **argv)
 
     if(tc == T_MSVC) {
 #ifdef _WIN32
-      if(!GetEnvironmentVariable("VSCMD_VER", NULL, 0) && GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
-        // nob_log(NOB_INFO, "Loading MSVC environment");
-        // Cmd cmd = { 0 };
-        //
-        // nob_cmd_append(&cmd, "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat", ">", "NUL");
-        // if(!cmd_run(&cmd)) return 1;
-        nob_log(NOB_ERROR, "MSVC toolchain not available outside of Microsoft Defeloper Command Prompt.");
-      }
+      if(!run_in_msvc_env(argc, argv)) return 1;
 #else
+      // TODO: wine?
       nob_log(NOB_ERROR, "MSVC toolchain not available outside of Windows.");
+      return 1;
 #endif
     }
 
+    argc = flag_rest_argc();
+    argv = flag_rest_argv();
 
     uint64_t start = nob_nanos_since_unspecified_epoch();
 
