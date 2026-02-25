@@ -17,6 +17,21 @@
 
 #define MAX_STACK 0x1000 
 
+// BUILTIN METHODS
+
+const char* str__c_str(vm_t* vm, obj_handle_t self) {
+  obj_t* str = vm->active_task->obj_pool.items[self];
+  // TODO: duplicate data
+  return str->as.str.data; 
+}
+
+int str__length(vm_t* vm, obj_handle_t self) {
+  obj_t* str = vm->active_task->obj_pool.items[self];
+  return (int)str->as.str.size; 
+}
+
+//////////////////////////////
+
 static inline bool is_ffi_arg_32(ffi_type* t) {
   return t == &ffi_type_sint32 ||
          t == &ffi_type_uint32 ||
@@ -62,6 +77,8 @@ task_t* load_task(vm_t* vm, program_t* p) {
           o->as.str.size = strlen(c->as.s);
           o->refs = 1;
 
+          free((void*)c->as.s);
+
           t->consts.data[i] = t->obj_pool.count;
 
           da_append(&t->obj_pool, o);
@@ -77,6 +94,7 @@ task_t* load_task(vm_t* vm, program_t* p) {
   DLLIST_ADD(t, vm->tasks_head);
 
   // externs
+  // TODO: configurable lazy/eager externs loading
   {
     t->externs.data = arena_alloc(&t->arena, sizeof(*t->externs.data) * p->externs.count);
     t->externs.count = p->externs.count;
@@ -84,6 +102,7 @@ task_t* load_task(vm_t* vm, program_t* p) {
     for (size_t i=0; i < p->externs.count; i++) {
       t->externs.data[i].cif = p->externs.items[i].cif;
       t->externs.data[i].name = arena_strdup(&t->arena, p->externs.items[i].name);
+      t->externs.data[i].is_builtin_method = p->externs.items[i].is_builtin_method;
     }
   }
 
@@ -194,26 +213,44 @@ vm_exitcode_t exec(vm_t* vm) {
 #else
       void* func = dlsym(vm->host, ext->name);
 #endif
-      if (!func) return VM_UNDEFINED_EXTERN; 
+      if (!func) {
+        fprintf(stderr, "Cannot resolve function `%s`\n", ext->name);
+        return VM_UNDEFINED_EXTERN; 
+      }
 
-      uint64_t** args = malloc(sizeof(*args) * ext->cif.nargs);
-      for(size_t i=0; i < ext->cif.nargs; i++) {
+      uint64_t** args   = malloc(sizeof(*args) * ext->cif.nargs);
+      uint64_t*  values = malloc(sizeof(*args) * ext->cif.nargs);
+      size_t i = 0;
+      if (ext->is_builtin_method)
+        values[i++] = (uint64_t)vm;
+      for(; i < ext->cif.nargs; i++) {
         if(is_ffi_arg_32(ext->cif.arg_types[i])) {
-            POP(vm, args[i]);
+          POP(vm, values[i]);
         } else {
-            TODO("INST_HOSTCALL: unsupported 64-bit arguments");
+          uint32_t hi = 0;
+          uint32_t lo = 0;
+          POP(vm, hi);
+          POP(vm, lo);
+          values[i] = (((uint64_t)hi << 32) | lo);
         }
       }
+
+      for(size_t j=0; j < ext->cif.nargs; j++) args[j] = &values[j];
 
       ffi_call(&ext->cif, FFI_FN(func), &retval, (void**)args);
 
       if (ext->cif.rtype != &ffi_type_void) {
         if(is_ffi_arg_32(ext->cif.rtype))
           PUSH(vm, retval & (uint32_t)-1);
-        else
-          TODO("INST_HOSTCALL: unsupported 64-bit return");
+        else {
+          uint32_t hi = retval >> 32;
+          uint32_t lo = retval & (uint32_t)-1;
+          PUSH(vm, lo);
+          PUSH(vm, hi);
+        }
       }
 
+      free(values);
       free(args);
       vm->ip++;
       break;
@@ -292,6 +329,8 @@ vm_exitcode_t exec(vm_t* vm) {
       vm->ip++;
       break;
     case INST_HALT:
+      free(vm->active_task);
+      vm->active_task = NULL;
       return VM_OK;
 
     case INST_COUNT:

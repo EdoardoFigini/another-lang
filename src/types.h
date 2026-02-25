@@ -113,7 +113,7 @@ typedef enum {
 } ast_node_kind_t;
 
 #define AST_DEFAULT_FIELDS\
-  ast_node_kind_t ast_kind; \
+  ast_node_kind_t ast_kind \
 
 typedef struct {
   AST_DEFAULT_FIELDS;
@@ -426,6 +426,13 @@ struct _type {
 };
 
 typedef struct {
+  const type_t* owner;
+  const char* name;
+  const type_t* type;
+  uint32_t addr;
+} builtin_method_t;
+
+typedef struct {
   arena_t arena;
   struct {
     type_t** items;
@@ -447,6 +454,11 @@ typedef struct {
     type_t const* addr;
   } builtins;
   scope_t* current_scope;
+  struct _builtin_methods {
+    builtin_method_t* items;
+    size_t count;
+    size_t capacity;
+  } builtin_methods;
 } typechecker_t;
 
 typedef enum {
@@ -572,6 +584,7 @@ typedef struct {
     struct _extern{ 
       ffi_cif cif;
       const char* name;
+      bool is_builtin_method;
     }* items;
     size_t count;
     size_t capacity;
@@ -584,6 +597,7 @@ typedef struct {
     size_t count;
     size_t capacity;
   } patches;
+  struct _builtin_methods bms;
 } program_t;
 
 // runtime
@@ -608,6 +622,8 @@ typedef struct {
   size_t count;
   size_t capacity;
 } obj_pool_t;
+
+typedef uint32_t obj_handle_t;
 
 typedef struct {
   uint32_t vars[MAX_LOC_VARS];
