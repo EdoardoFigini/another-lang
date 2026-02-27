@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <inttypes.h>
 
 #include <ffi.h>
 
@@ -1166,9 +1167,9 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
           if (expr->as.number.ti & TI_REAL) {
             fprintf(stream, "%*s%lf\n", level + 2, "", expr->as.number.r);
           } else if (expr->as.number.ti & TI_UNSIGNED) {
-            fprintf(stream, "%*s%lu (unsigned)\n", level + 2, "", expr->as.number.u);
+            fprintf(stream, "%*s%" PRIu64 " (unsigned)\n", level + 2, "", expr->as.number.u);
           } else {
-            fprintf(stream, "%*s%ld\n", level + 2, "", expr->as.number.i);
+            fprintf(stream, "%*s%" PRId64 "\n", level + 2, "", expr->as.number.i);
           }
           break;
         case EXPR_BINOP:
@@ -2319,9 +2320,9 @@ static inline void print_data(FILE* stream, constant_t c) {
         if (c.as.number.ti & TI_REAL) {
           fprintf(stream, "%lf", c.as.number.r);
         } else if (c.as.number.ti & TI_UNSIGNED) {
-          fprintf(stream, "%lu", c.as.number.u);
+          fprintf(stream, "%" PRIu64, c.as.number.u);
         } else {
-          fprintf(stream, "%ld", c.as.number.i);
+          fprintf(stream, "%" PRId64, c.as.number.i);
         }
       } else {
         if (c.as.number.ti & TI_REAL) {
@@ -2364,7 +2365,7 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
       if(i == s->addr && s->kind == SYMB_FUNC && s->storage != STO_EXTERN)
         fprintf(stream, "function <%s>:\n", s->name);
     }
-    fprintf(stream, "  0x%08lX", i);
+    fprintf(stream, "  0x%08" PRIx64, i);
     switch(p->code.items[i]) {
       case INST_NOP:
         fprintf(stream, "  %-10s\n", "NOP"); break;

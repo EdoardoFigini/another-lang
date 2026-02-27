@@ -25,8 +25,6 @@ typedef BYTE   arena_byte_t;
 typedef uint32_t arena_u32_t;
 typedef uint8_t  arena_byte_t;
 
-#define __FILENAME__ __FILE_NAME__
-
 #else 
 #error Unsupported platform
 
@@ -96,7 +94,7 @@ void* arena_alloc(arena_t* a, size_t bytes) {
       stderr,
       "%s:%d: Trying to allocate too many bytes (%zu, max is %zu)"
       "You can `#define ARENA_PAGES_PER_BLOCK x` to adjust capacity.",
-      __FILENAME__, __LINE__, bytes, BLOCK_CAPACITY
+      __FILE__, __LINE__, bytes, BLOCK_CAPACITY
     );
     abort();
   }

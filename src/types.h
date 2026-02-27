@@ -113,7 +113,7 @@ typedef enum {
 } ast_node_kind_t;
 
 #define AST_DEFAULT_FIELDS\
-  ast_node_kind_t ast_kind; \
+  ast_node_kind_t ast_kind \
 
 typedef struct {
   AST_DEFAULT_FIELDS;

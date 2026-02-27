@@ -5,6 +5,9 @@
 
 #ifdef __linux__
 #include <dlfcn.h>
+#elif defined(_WIN32)
+#define WIN32_MEAN_AND_LEAN
+#include <windows.h>
 #else
 #error Unsupported platform
 #endif

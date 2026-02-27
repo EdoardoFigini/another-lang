@@ -67,28 +67,49 @@ const char* tc_cc[] = {
 // Flags per toolchain
 // Edit these to change compilation settings and parameters
 const_str_list_t tc_cflags[] = {
-  [T_MSVC] = CSTR_LIST("/nologo", "/W4", "/diagnostics:caret", "/D_CRT_SECURE_NO_WARNINGS"),
+  [T_MSVC] = CSTR_LIST("/nologo", /*"/W4",*/ "/diagnostics:caret", "/D_CRT_SECURE_NO_WARNINGS"),
   [T_GNU]  = CSTR_LIST("-Wall", "-Wextra", "-Wswitch-enum", "-ggdb"),
 };
 
 const_str_list_t tc_lflags[] = {
+#ifdef _WIN32
   [T_MSVC] = CSTR_LIST("/nologo"),
-  [T_GNU]  = CSTR_LIST("-ggdb", "-rdynamic"),
+  [T_GNU]  = CSTR_LIST(
+    "-ggdb", 
+  ),
+#else
+  [T_GNU]  = CSTR_LIST(
+    "-ggdb", 
+    "-rdynamic",
+  ),
+#endif
 };
 
 const_str_list_t tc_includes[] = {
+#if defined(_WIN32)
   [T_MSVC] = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP, SRC_FOLDER),
   [T_GNU]  = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP, SRC_FOLDER),
+#elif defined(__linux__)
+  [T_GNU]  = CSTR_LIST(SRC_FOLDER),
+#endif
 };
 
 const_str_list_t tc_lib_path[] = {
+#if defined(_WIN32)
   [T_MSVC] = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP),
-  [T_GNU]  = CSTR_LIST_EMPTY, 
+  [T_GNU]  = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP), 
+#elif defined(__linux__)
+  [T_GNU]  = CSTR_LIST_EMPTY,
+#endif
 };
 
 const_str_list_t tc_libs[] = {
+#if defined(_WIN32)
   [T_MSVC] = CSTR_LIST("libffi-8.lib"),
+  [T_GNU]  = CSTR_LIST(":libffi-8.lib"),
+#elif defined(__linux__)
   [T_GNU]  = CSTR_LIST("ffi"),
+#endif
 };
 
 // Toolchain specific flags/parameters
@@ -121,6 +142,11 @@ const char* tc_lib_flag[] = {
 const char* tc_lib_path_flag[] = {
   [T_MSVC] = "/LIBPATH:",
   [T_GNU]  = "-L",
+};
+
+const char* tc_link_options_flag[] = {
+  [T_MSVC] = "/link",
+  [T_GNU]  = "",
 };
 
 //////////////////////////////////////////////////
@@ -185,7 +211,7 @@ bool compile_tu(Nob_Walk_Entry entry) {
     const char* obj_path = nob_temp_sprintf(BUILD_FOLDER"%.*s-%s.obj", SV_Arg(filename_from_path(path)), tc_names[tc]);
 
     nob_cmd_append(&cmd, tc_cc[tc]);
-    for (size_t i=0; i < tc_lflags[tc].count; i++) {
+    for (size_t i=0; i < tc_cflags[tc].count; i++) {
       nob_cmd_append(&cmd, tc_cflags[tc].items[i]);
     }
     for (size_t i=0; i < tc_includes[tc].count; i++) {
@@ -217,6 +243,7 @@ bool run_in_msvc_env(int argc, char** argv) {
     nob_log(NOB_INFO, "Loading MSVC environment");
     Cmd cmd = { 0 };
 
+    nob_minimal_log_level = NOB_NO_LOGS;
     nob_cmd_append(
       &cmd, 
       "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat", 
@@ -226,7 +253,7 @@ bool run_in_msvc_env(int argc, char** argv) {
     );
     nob_cmd_append(&cmd, "&&");
     nob_da_append_many(&cmd, argv, argc);
-    return cmd_run(&cmd);
+    exit(cmd_run(&cmd));
   }
   return true;
 }
@@ -326,8 +353,11 @@ int main(int argc, char **argv)
     da_foreach(const char*, obj, &wd.objs) {
       nob_da_append(&cmd, *obj); 
     }
-    nob_cmd_append(&cmd, tc_out_exe[tc]);
-    nob_cmd_append(&cmd, EXE_PATH(PROJ_NAME));
+    nob_cmd_append(&cmd, tc_out_exe[tc], EXE_PATH(PROJ_NAME));
+
+    if(*tc_link_options_flag[tc])
+      nob_cmd_append(&cmd, tc_link_options_flag[tc]);
+
     for (size_t i=0; i < tc_lib_path[tc].count; i++) {
       nob_cmd_append(&cmd, nob_temp_sprintf("%s%s", tc_lib_path_flag[tc], tc_lib_path[tc].items[i]));
     }
