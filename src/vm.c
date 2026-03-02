@@ -15,17 +15,29 @@
 
 #include "vm.h"
 
+#ifdef _MSC_VER
+#define EXPORT __declspec(dllexport)
+#else
+#define EXPORT
+#endif
+
 #define MAX_STACK 0x1000 
+
+// BUILTIN FUNCTION
+
+EXPORT int print(const char* s) {
+  return puts(s);
+}
 
 // BUILTIN METHODS
 
-const char* str__c_str(vm_t* vm, obj_handle_t self) {
+EXPORT const char* str__c_str(vm_t* vm, obj_handle_t self) {
   obj_t* str = vm->active_task->obj_pool.items[self];
   // TODO: duplicate data
   return str->as.str.data; 
 }
 
-int str__length(vm_t* vm, obj_handle_t self) {
+EXPORT int str__length(vm_t* vm, obj_handle_t self) {
   obj_t* str = vm->active_task->obj_pool.items[self];
   return (int)str->as.str.size; 
 }
@@ -46,13 +58,24 @@ task_t* load_task(vm_t* vm, program_t* p) {
   t->program = p;
 
 #if defined(_WIN32)
-  TODO("load_task - WIN32");
+  void* pages = VirtualAlloc(NULL, p->code.count * sizeof(*p->code.items), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  if(!pages) return NULL;
+  CopyMemory(pages, p->code.items, p->code.count * sizeof(*p->code.items));
+  t->code = pages;
+  t->last_inst = t->code + (p->code.count - 1) * sizeof(*p->code.items);
+  DWORD old_prot = 0;
+  VirtualProtect(t->code, (p->code.count - 1) * sizeof(*p->code.items), PAGE_READONLY, &old_prot);
+
+  pages = VirtualAlloc(NULL, MAX_STACK, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  if(!pages) return NULL;
+  t->stack = pages;
 #elif defined(__linux__)
   void* pages = mmap(NULL, p->code.count * sizeof(*p->code.items), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if(!pages) return NULL;
   memcpy(pages, p->code.items, p->code.count * sizeof(*p->code.items));
   t->code = pages;
   t->last_inst = t->code + (p->code.count - 1) * sizeof(*p->code.items);
+  // TODO: make code read-only
 
   pages = mmap(NULL, MAX_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if(!pages) return NULL;
@@ -209,7 +232,7 @@ vm_exitcode_t exec(vm_t* vm) {
       if (operand >= vm->active_task->externs.count) return VM_UNDEFINED_EXTERN;
       struct _extern* ext = &vm->active_task->externs.data[operand]; 
 #ifdef _WIN32
-      void* func = NULL;
+      void* func = GetProcAddress(vm->host, ext->name);
 #else
       void* func = dlsym(vm->host, ext->name);
 #endif
@@ -356,7 +379,9 @@ vm_exitcode_t run(vm_t* vm, size_t n_args, ...) {
   vm->halt = false;
 
   // TODO: move to something like vm_init or make_vm
-#ifdef __linux__
+#if defined(_WIN32)
+  vm->host = GetModuleHandleA(NULL);
+#elif defined(__linux__)
   vm->host = dlopen(NULL, RTLD_LAZY);
 #endif
 

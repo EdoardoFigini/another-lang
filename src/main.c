@@ -54,10 +54,10 @@ const char* source =
 #endif
 
 const char* source = 
- "extern puts: (s: addr) -> i32;\n"
+ "extern print: (s: addr) -> i32;\n"
  "\n"
  "main: () -> none {\n"
- "  puts(\"Hello from host!\".c_str());\n"
+ "  print(\"Hello from host!\".c_str());\n"
  "}\n"
  ;
 
