@@ -123,13 +123,13 @@ static inline void __dbg_print_stack(FILE* stream, vm_t* vm) {
 #define POP(vm, v) \
   do { \
     if ((vm)->sp <= (vm)->active_task->stack) return VM_STACK_UNDERFLOW; \
-    (v) = *(typeof((v))*)(--(vm)->sp);\
+    (v) = *(__typeof__((v))*)(--(vm)->sp);\
   } while(0)
 
 #define PUSH(vm, v) \
   do {\
     if ((vm)->sp >= (vm)->active_task->stack + MAX_STACK) return VM_STACK_OVERFLOW; \
-    *((vm)->sp++) = (typeof(*(vm)->sp))(v); \
+    *((vm)->sp++) = (__typeof__(*(vm)->sp))(v); \
   } while(0)
 
 vm_exitcode_t exec(vm_t* vm) {
