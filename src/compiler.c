@@ -459,7 +459,7 @@ static inline symbol_t* resolve_symbol_any(scope_t* scope, const char* name) {
 
   // OPTIMIZE
   da_foreach(symbol_t, s, &scope->symbols) {
-    if(strcmp(s->name, name) == 0) return s;
+    if(s->name && strcmp(s->name, name) == 0) return s;
   }
   return resolve_symbol_any(scope->parent, name);
 }
@@ -1441,6 +1441,9 @@ static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* nam
   else
     // TODO: platform dependent
     type->scope->name = arena_sprintf(&t->arena, "type_%d", rand());
+  type->scope->parent = t->current_scope;
+
+  make_symbol(t->current_scope, SYMB_TYPE, STO_LOCAL, name, type);
 
   return type;
 }
@@ -1504,36 +1507,10 @@ static inline type_t* get_or_create_func_type_of(typechecker_t* t, const type_t*
 static inline type_t* resolve_type(typechecker_t* t, const char* name, int depth) {
   type_t* res = NULL;
 
-  if (strcmp(name, t->builtins.none->name) == 0) 
-    res = (type_t*)t->builtins.none;
-  else if (strcmp(name, t->builtins.i32->name) == 0) 
-    res = (type_t*)t->builtins.i32;
-  else if (strcmp(name, t->builtins.i64->name) == 0) 
-    res = (type_t*)t->builtins.i64;
-  else if (strcmp(name, t->builtins.u32->name) == 0) 
-    res = (type_t*)t->builtins.u32;
-  else if (strcmp(name, t->builtins.u64->name) == 0) 
-    res = (type_t*)t->builtins.u64;
-  else if (strcmp(name, t->builtins.f32->name) == 0) 
-    res = (type_t*)t->builtins.f32;
-  else if (strcmp(name, t->builtins.f64->name) == 0) 
-    res = (type_t*)t->builtins.f64;
-  else if (strcmp(name, t->builtins.boolean->name) == 0) 
-    res = (type_t*)t->builtins.boolean;
-  else if (strcmp(name, t->builtins.character->name) == 0) 
-    res = (type_t*)t->builtins.character;
-  else if (strcmp(name, t->builtins.str->name) == 0) 
-    res = (type_t*)t->builtins.str;
-  else if (strcmp(name, t->builtins.addr->name) == 0) 
-    res = (type_t*)t->builtins.addr;
+  symbol_t* symbol = resolve_symbol(t->current_scope, name, SYMB_TYPE);
+  if (!symbol) return NULL;
 
-  if (!res) {
-    da_foreach(type_t*, type, &t->custom_types) {
-      // OPTIMIZE
-      if((*type)->name && strcmp((*type)->name, name) == 0) { res = *type; break; }
-    }
-  }
-
+  res = symbol->type;
   if (!res) return NULL;
 
   while(depth-- > 0) {
@@ -1942,7 +1919,9 @@ static inline bool resolve_func_decl(typechecker_t* t, ast_decl_t* decl) {
   return true;
 }
 
-static inline void typechecker_init(typechecker_t* t) {
+static inline void typechecker_init(typechecker_t* t, ast_root_t* root) {
+  t->current_scope = root->scope;
+
   // init builtin types
   t->builtins.none      = make_type(t, TYPE_NONE, "none", 0);
   t->builtins.i32       = make_type(t, TYPE_I32,  "i32",  1);
@@ -1958,8 +1937,6 @@ static inline void typechecker_init(typechecker_t* t) {
 }
 
 static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
-
-  t->current_scope = root->scope;
 
   da_foreach(ast_decl_t*, d, &root->decls) {
     switch((*d)->kind) {
@@ -2683,7 +2660,7 @@ bool compile(program_t* program, const char* source) {
 
   // print_ast(stdout, (ast_node_t*)root, 0);
 
-  typechecker_init(&tc);
+  typechecker_init(&tc, root);
   if(!builtin_methods_init(program, &tc)) return false;
   if(!builtin_interfaces_init(&tc)) return false;
   if(!typecheck(&tc, root)) return false;

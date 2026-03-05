@@ -131,6 +131,7 @@ typedef struct _type type_t;
 typedef enum {
   SYMB_VAR,
   SYMB_FUNC,
+  SYMB_TYPE,
 } symb_kind_t;
 
 typedef enum {
