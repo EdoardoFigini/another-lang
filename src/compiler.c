@@ -428,6 +428,10 @@ static inline symbol_t* make_symbol(scope_t* scope, symb_kind_t kind, symb_stora
   return &da_last(&scope->symbols);
 }
 
+static inline symbol_t* make_method(const type_t* owner, const char* name, const type_t* type, symb_storage_t storage) {
+  return make_symbol(owner->scope, SYMB_FUNC, storage, name, (type_t*)type);
+}
+
 static inline symbol_t* resolve_symbol_local_any(scope_t* scope, const char* name) { 
   if (!scope) return NULL;
 
@@ -1136,14 +1140,6 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   return n;
 }
 
-static inline method_t* resolve_method(const type_t* owner, const char* name) {
-  // OPTIMIZE
-  da_foreach(method_t*, m, &owner->methods) {
-    if(strcmp(name, (*m)->name) == 0) return *m;
-  }
-  return NULL;
-}
-
 static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
   switch(n->ast_kind) {
     case AST_ROOT:
@@ -1439,6 +1435,13 @@ static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* nam
   type->name = name;
   type->size = size;
 
+  type->scope = arena_alloc(&t->arena, sizeof(*type->scope));
+  if (name)
+    type->scope->name = arena_sprintf(&t->arena, "type_%s", name);
+  else
+    // TODO: platform dependent
+    type->scope->name = arena_sprintf(&t->arena, "type_%d", rand());
+
   return type;
 }
 
@@ -1721,19 +1724,14 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         }
         TODO("typecheck_expr: EXPR_ACCESS - module fields");
       } else if (expr->as.access.op == OP_MEMB) {
-        if (expr->as.access.owner->type->kind == TYPE_STRUCT) {
-          TODO("typecheck_expr: EXPR_ACCESS - struct fields");
-        } else if (expr->as.access.owner->type->kind == TYPE_STR) {
-          method_t* m = resolve_method(t->builtins.str, expr->as.access.field);
-          if (!m) {
-            fprintf(stderr, "[ERROR] Typechecker\n  `str` has no field named `%s`\n", expr->as.access.field);
-            return false;
-          }
-          expr->type = m->type;
-        } else {
-          fprintf(stderr, "[ERROR] Typechecker\n Owner is not a built-in object or structure.\n");
+        symbol_t* s = resolve_symbol_any(expr->as.access.owner->type->scope, expr->as.access.field);
+        if (!s) {
+          fprintf(stderr, "[ERROR] Typechecker\n  `");
+          print_type(stderr, expr->as.access.owner->type);
+          fprintf(stderr, "` has no field named `%s`\n", expr->as.access.field);
           return false;
         }
+        expr->type = s->type;
         return true;
       } else {
         UNREACHABLE("typecheck_expr: EXPR_ACCESS");
@@ -1750,7 +1748,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         return false;
       }
 
-      if (expr->as.funcall.args.count != callee->type->as.func.params.count) {
+      if (expr->as.funcall.args.count + (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB) != callee->type->as.func.params.count) {
           fprintf(
             stderr, 
             "[ERROR] Typechecker\n  "
@@ -1761,11 +1759,23 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
           return false;
       }
 
+      // NOTE: should never happen
+      if (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB) {
+        if(!type_equals(*callee->as.access.owner->type, **callee->type->as.func.params.items)) {
+          fprintf(stderr, "[ERROR] Typechecker\n  Mismatched type for method: expected ");
+          print_type(stderr, *callee->type->as.func.params.items);
+          fprintf(stderr, ", got ");
+          print_type(stderr, callee->as.access.owner->type);
+          fprintf(stderr, ".\n");
+          return false;
+        }
+      }
+
       for(size_t i = 0; i < expr->as.funcall.args.count; i++) {
         ast_expr_t* arg = da_at(expr->as.funcall.args, i);
         if(!typecheck_expr(t, arg)) return false;
         type_t const* a = arg->type;
-        type_t const* b = da_at(callee->type->as.func.params, i);
+        type_t const* b = da_at(callee->type->as.func.params, i + (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB));
         if (!type_equals(*a, *b)) {
           // TODO: find way to retrieve argument name for better diagnostics
           fprintf(stderr, "[ERROR] Typechecker\n  Mismatched type for argument %zu in function call: expected ", i);
@@ -2139,47 +2149,34 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         }
         ast_expr_t* callee = e->as.funcall.callee;
 
+        symbol_t* symbol = NULL;
         if(callee->kind == EXPR_SYMBOL) {
           // TODO: resolve symbol once in typechecker
-          symbol_t* symbol = resolve_symbol(scope, callee->as.symbol, SYMB_FUNC);
+          symbol = resolve_symbol(scope, callee->as.symbol, SYMB_FUNC);
           if (!symbol) {
             fprintf(stderr, "[ERROR] Codegen\n No function `%s` in current scope.\n", e->as.symbol);
             return false;
           }
-
-          da_append(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
-          if (symbol->addr_resolved)
-            da_append(&p->code, symbol->addr);
-          else {
-            da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count }));
-            da_append(&p->code, 0);
-          }
         } else if (callee->kind == EXPR_ACCESS) {
-          if (callee->as.access.op == OP_SCOPE) {
-            TODO("codegen_expr: EXPR_FUNCALL - callee EXPR_ACCESS scope access");
-          } else if (callee->as.access.op == OP_MEMB) {
-            ast_expr_t* owner = callee->as.access.owner;
-            if(!codegen_expr(p, scope, owner)) return false;
-            if (owner->type->kind == TYPE_STR) {
-              method_t *bm = resolve_method(owner->type, callee->as.access.field);
-              if (!bm) {
-                fprintf(stderr, "[ERROR] Codegen\n No method `%s` in built-in type ", callee->as.access.field);
-                print_type(stderr, owner->type);
-                fprintf(stderr, ".\n");
-                return false;
-              }
-              da_append(&p->code, INST_HOSTCALL);
-              da_append(&p->code, bm->addr);
-            } else if (owner->type->kind == TYPE_STRUCT) {
-              da_append(&p->code, INST_ICALL);
-              TODO("codegen_expr: EXPR_FUNCALL - callee EXPR_ACCESS struct");
-            } else {
-              fprintf(stderr, "[ERROR] Codegen\n Owner is not a built-in or a structure.\n");
-              return false;
-            }
+          ast_expr_t* owner = callee->as.access.owner;
+          if(!codegen_expr(p, scope, owner)) return false;
+          symbol = resolve_symbol(owner->type->scope, callee->as.access.field, SYMB_FUNC);
+          if (!symbol) {
+            fprintf(stderr, "[ERROR] Codegen\n No method `%s` in type ", callee->as.access.field);
+            print_type(stderr, owner->type);
+            fprintf(stderr, ".\n");
+            return false;
           }
         } else {
           TODO("codegen_expr: EXPR_FUNCALL - callee not a symbol");
+        }
+
+        da_append(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
+        if (symbol->addr_resolved)
+          da_append(&p->code, symbol->addr);
+        else {
+          da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count }));
+          da_append(&p->code, 0);
         }
         break;
       case EXPR_SUBEXPR:
@@ -2580,16 +2577,6 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
   }
 }
 
-static inline method_t* make_method(typechecker_t* t, const type_t* owner, const char* name, const type_t* type, uint32_t addr) {
-  method_t* m = arena_alloc(&t->arena, sizeof(*m));
-  m->owner = owner;
-  m->name = arena_strdup(&t->arena, name);
-  m->type = type;
-  m->addr = addr;
-
-  return m;
-}
-
 static inline interface_t* make_interface(typechecker_t* t, const char* name) {
   interface_t* interface = arena_alloc(&t->arena, sizeof(*interface));
   interface->name = arena_strdup(&t->arena, name);
@@ -2597,25 +2584,45 @@ static inline interface_t* make_interface(typechecker_t* t, const char* name) {
   return interface;
 }
 
-static inline void add_method_to_interface(interface_t* interface, interface_method* method) {
+static inline void add_method_to_interface(interface_t* interface, interface_method_t method) {
   da_append(&interface->methods, method);
 }
 
+static inline interface_t* make_interface_with_methods(typechecker_t* t, const char* name, size_t n_methods, ...) {
+  va_list args;
+
+  interface_t* interface = make_interface(t, name);
+
+  va_start(args, n_methods);
+
+  for(size_t i=0; i<n_methods; i++) {
+    da_append(&interface->methods, va_arg(args, interface_method_t));
+  }
+
+  va_end(args);
+
+  return interface;
+}
+
+static inline type_t* method_owner(symbol_t* s) {
+  return (*s->type->as.func.params.items);
+}
+
 static inline bool builtin_methods_init(program_t* p, typechecker_t* t) {
-  method_t* bms[] = {
-    make_method(t, t->builtins.str, "c_str", get_or_create_func_type_of(t, t->builtins.addr, 0), 0),
-    make_method(t, t->builtins.str, "length", get_or_create_func_type_of(t, t->builtins.i32, 0), 0),
-    make_method(t, t->builtins.str, "concat", get_or_create_func_type_of(t, t->builtins.str, 1, t->builtins.str), 0),
+  symbol_t* bms[] = {
+    make_method(t->builtins.str, "c_str", get_or_create_func_type_of(t, t->builtins.addr, 1, t->builtins.str), STO_EXTERN),
+    make_method(t->builtins.str, "length", get_or_create_func_type_of(t, t->builtins.i32, 1, t->builtins.str), STO_EXTERN),
+    make_method(t->builtins.str, "concat", get_or_create_func_type_of(t, t->builtins.str, 2, t->builtins.str, t->builtins.str), STO_EXTERN),
   };
   for (size_t j=0; j < sizeof(bms)/sizeof(*bms); j++) {
-    size_t n_params = bms[j]->type->as.func.params.count + 2;
+    if(!bms[j]) continue;
+    size_t n_params = bms[j]->type->as.func.params.count + 1;
     // TODO: add platform layer for malloc
     ffi_type **param_types = malloc(sizeof(*param_types) * n_params);
     size_t i = 0;
     param_types[i++] = &ffi_type_pointer;                 // vm_t* vm 
-    param_types[i++] = type_to_ffi_type(*bms[j]->owner);  // typeof(self) self
     for(; i < n_params; i++)
-      param_types[i] = type_to_ffi_type(*bms[j]->type->as.func.params.items[i - 2]);
+      param_types[i] = type_to_ffi_type(*bms[j]->type->as.func.params.items[i - 1]);
 
     ffi_type* ret = type_to_ffi_type(*bms[j]->type->as.func.ret);
 
@@ -2634,14 +2641,23 @@ static inline bool builtin_methods_init(program_t* p, typechecker_t* t) {
     }
 
     // TODO: name is leaked
-    assert(bms[j]->owner->name);
-    size_t len = snprintf(NULL, 0, "%s__%s", bms[j]->owner->name, bms[j]->name);
+    size_t len = snprintf(NULL, 0, "%s__%s", method_owner(bms[j])->name, bms[j]->name);
     char* name = malloc(len + 1);
-    snprintf(name, len + 1, "%s__%s", bms[j]->owner->name, bms[j]->name);
+    snprintf(name, len + 1, "%s__%s", method_owner(bms[j])->name, bms[j]->name);
     bms[j]->addr = p->externs.count;
     da_append(&p->externs, ((struct _extern){ cif, name, true }));
+  }
 
-    da_append(&((type_t*)bms[j]->owner)->methods, bms[j]);
+  return true;
+}
+
+static inline bool builtin_interfaces_init(typechecker_t* t) {
+  interface_t* ifs[] = {
+    make_interface_with_methods(t, "add_i", 1, (interface_method_t){ "add", get_or_create_func_type_of(t, t->builtins.str, 1, t->builtins.str) }),
+  };
+
+  for(size_t i=0; i<sizeof(ifs)/sizeof(*ifs); i++) {
+    da_append(&t->interfaces, ifs[i]);
   }
 
   return true;
@@ -2669,9 +2685,10 @@ bool compile(program_t* program, const char* source) {
 
   typechecker_init(&tc);
   if(!builtin_methods_init(program, &tc)) return false;
+  if(!builtin_interfaces_init(&tc)) return false;
   if(!typecheck(&tc, root)) return false;
 
-  // print_symbol_table(stdout, root->scope);
+  print_symbol_table(stdout, root->scope);
 
   if(!codegen(program, root)) return false;
 

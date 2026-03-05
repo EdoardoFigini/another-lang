@@ -426,11 +426,7 @@ struct _type {
       struct _type* target;
     } alias; 
   } as;
-  struct {
-    method_t** items;
-    size_t count;
-    size_t capacity;
-  } methods;
+  scope_t* scope;
   struct {
     interface_t** items;
     size_t count;
@@ -448,12 +444,12 @@ struct _method {
 typedef struct {
   const char* name;
   const type_t* type;
-} interface_method;
+} interface_method_t;
 
 struct _interface {
   const char* name;
   struct _i_methods {
-    interface_method** items;
+    interface_method_t* items;
     size_t count;
     size_t capacity;
   } methods;
@@ -481,6 +477,11 @@ typedef struct {
     type_t const* addr;
   } builtins;
   scope_t* current_scope;
+  struct {
+    interface_t** items;
+    size_t count;
+    size_t capacity;
+  } interfaces;
 } typechecker_t;
 
 typedef enum {
