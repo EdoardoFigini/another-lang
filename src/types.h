@@ -162,10 +162,7 @@ struct _scope {
   } symbols;
 };
 
-typedef enum {
-  DECL_KIND_VAR,
-  DECL_KIND_FUNC,
-} ast_decl_kind;
+typedef struct _ast_expr_t ast_expr_t;
 
 typedef struct {
   AST_DEFAULT_FIELDS;
@@ -198,32 +195,34 @@ typedef struct {
   AST_DEFAULT_FIELDS;
   const char* name;
   spec_flags_t flags;
-  ast_decl_kind kind; 
-  union {
-    struct {
-      ast_sig_t* sig;
-      bool has_body;
-      scope_t* scope;
-    } fun;
-    struct {
-      ast_type_t* type;
-      bool initialized;
-    } var;
-  } as;
   symbol_t* symbol;
   size_t tok_idx;
-} ast_decl_t;
-
-typedef struct _ast_expr_t ast_expr_t;
+  ast_sig_t* sig;
+  bool has_body;
+  scope_t* scope;
+} ast_func_decl_t;
 
 typedef struct {
   AST_DEFAULT_FIELDS;
-  ast_decl_t* decl;
-  union {
-    ast_body_t* body;
-    ast_expr_t* init;
-  };
-} ast_def_t;
+  const char* name;
+  spec_flags_t flags;
+  symbol_t* symbol;
+  size_t tok_idx;
+  ast_type_t* type;
+  bool initialized;
+} ast_var_decl_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  ast_func_decl_t* decl;
+  ast_body_t*      body;
+} ast_func_def_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  ast_var_decl_t* decl;
+  ast_expr_t*     init;
+} ast_var_def_t;
 
 typedef enum {
   OP_INVALID = TOK_EOF,
@@ -326,14 +325,7 @@ typedef struct {
   union {
     ast_expr_t* expression;
     ast_expr_t* retval;
-    struct {
-      const char* name;
-      ast_type_t* type;
-      spec_flags_t flags;
-      symbol_t* symbol;
-      bool initialized;
-      ast_expr_t* init;
-    } var_def;
+    ast_var_def_t* var_def;
     struct _if_else {
       scope_t* scope;
       ast_expr_t* cond;
@@ -355,15 +347,25 @@ struct _ast_body_t {
 typedef struct {
   AST_DEFAULT_FIELDS;
   struct {
-    ast_decl_t** items;
+    ast_func_decl_t** items;
     size_t count;
     size_t capacity;
-  } decls;
+  } func_decls;
   struct {
-    ast_def_t** items;
+    ast_var_decl_t** items;
     size_t count;
     size_t capacity;
-  } top_level;
+  } var_decls;
+  struct {
+    ast_func_def_t** items;
+    size_t count;
+    size_t capacity;
+  } func_defs;
+  struct {
+    ast_var_def_t** items;
+    size_t count;
+    size_t capacity;
+  } var_defs;
   scope_t* scope;
 } ast_root_t;
 
