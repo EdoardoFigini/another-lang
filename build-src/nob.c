@@ -74,15 +74,9 @@ const_str_list_t tc_cflags[] = {
 const_str_list_t tc_lflags[] = {
 #ifdef _WIN32
   [T_MSVC] = CSTR_LIST("/nologo"),
-  [T_GNU]  = CSTR_LIST(
-    "-ggdb", 
-    "-Wl,--export-all-symbols",
-  ),
+  [T_GNU]  = CSTR_LIST("-ggdb", "-Wl,--export-all-symbols"),
 #else
-  [T_GNU]  = CSTR_LIST(
-    "-ggdb", 
-    "-rdynamic",
-  ),
+  [T_GNU]  = CSTR_LIST("-ggdb", "-rdynamic"),
 #endif
 };
 

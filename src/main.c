@@ -57,7 +57,7 @@ const char* source =
  "extern print: (s: addr) -> i32;\n"
  "\n"
  "main: () -> none {\n"
- "  print(\"Hello from host!\".c_str());\n"
+ "  print(\"Hello\".concat(\" \").concat(\"World!\").c_str());\n"
  "}\n"
  ;
 

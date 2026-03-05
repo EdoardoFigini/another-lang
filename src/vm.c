@@ -42,6 +42,21 @@ EXPORT int str__length(vm_t* vm, obj_handle_t self) {
   return (int)str->as.str.size; 
 }
 
+EXPORT obj_handle_t str__concat(vm_t* vm, obj_handle_t self, obj_handle_t other) {
+  obj_t* str = vm->active_task->obj_pool.items[self];
+  obj_t* str_other = vm->active_task->obj_pool.items[other];
+
+  obj_t* o = malloc(sizeof(*o));
+  o->kind = OBJ_STR;
+  o->as.str.data = arena_sprintf(&vm->active_task->arena, "%s%s", str->as.str.data, str_other->as.str.data);
+  o->as.str.size = strlen(o->as.str.data);
+  o->refs = 1;
+
+  da_append(&vm->active_task->obj_pool, o);
+
+  return vm->active_task->obj_pool.count - 1;
+}
+
 //////////////////////////////
 
 static inline bool is_ffi_arg_32(ffi_type* t) {
@@ -263,9 +278,9 @@ vm_exitcode_t exec(vm_t* vm) {
       ffi_call(&ext->cif, FFI_FN(func), &retval, (void**)args);
 
       if (ext->cif.rtype != &ffi_type_void) {
-        if(is_ffi_arg_32(ext->cif.rtype))
-          PUSH(vm, retval & (uint32_t)-1);
-        else {
+        if(is_ffi_arg_32(ext->cif.rtype)) {
+          PUSH(vm, (uint32_t)(retval & (uint32_t)-1));
+        } else {
           uint32_t hi = retval >> 32;
           uint32_t lo = retval & (uint32_t)-1;
           PUSH(vm, lo);

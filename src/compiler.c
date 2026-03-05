@@ -1136,10 +1136,10 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   return n;
 }
 
-static inline builtin_method_t* resolve_builtin_method(const struct _builtin_methods* methods, const type_t* owner, const char* name) {
+static inline method_t* resolve_method(const type_t* owner, const char* name) {
   // OPTIMIZE
-  da_foreach(builtin_method_t, m, methods) {
-    if(owner == m->owner && strcmp(name, m->name) == 0) return m;
+  da_foreach(method_t*, m, &owner->methods) {
+    if(strcmp(name, (*m)->name) == 0) return *m;
   }
   return NULL;
 }
@@ -1456,7 +1456,7 @@ static inline type_t* get_or_create_array_of(typechecker_t* t, const type_t* typ
   return typ; 
 }
 
-static inline type_t* get_or_create_func_type_of(typechecker_t* t, const type_t* const* params, size_t n_params, const type_t* ret_type) {
+static inline type_t* get_or_create_func_type_from_arr(typechecker_t* t, const type_t* ret_type, size_t n_params, type_t** params) {
   // OPTIMIZE
   da_foreach(type_t*, typ, &t->custom_types) {
     if ((*typ)->kind == TYPE_FUNC) {
@@ -1472,12 +1472,30 @@ static inline type_t* get_or_create_func_type_of(typechecker_t* t, const type_t*
   }
 
   type_t* type = make_type(t, TYPE_FUNC, NULL, 1); // which is the correct size?
-  for(size_t i=0; i < n_params; i++) {
-    da_append(&type->as.func.params, (type_t*)params[i]);
-  }
+  for(size_t i=0; i < n_params; i++)
+    da_append(&type->as.func.params, params[i]);
   type->as.func.ret = (type_t*)ret_type;
 
   return type;
+}
+
+
+static inline type_t* get_or_create_func_type_of(typechecker_t* t, const type_t* ret_type, size_t n_params, ...) {
+  va_list args; 
+
+  struct {
+    type_t** items;
+    size_t count;
+    size_t capacity;
+  } params = { 0 };
+
+  va_start(args, n_params);
+  for(size_t i=0; i < n_params; i++) {
+    da_append(&params, va_arg(args, type_t*));
+  }
+  va_end(args);
+
+  return get_or_create_func_type_from_arr(t, ret_type, n_params, params.items);
 }
 
 static inline type_t* resolve_type(typechecker_t* t, const char* name, int depth) {
@@ -1706,11 +1724,12 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         if (expr->as.access.owner->type->kind == TYPE_STRUCT) {
           TODO("typecheck_expr: EXPR_ACCESS - struct fields");
         } else if (expr->as.access.owner->type->kind == TYPE_STR) {
-          if (strcmp(expr->as.access.field, "c_str") == 0) {  // c_str: () -> addr
-                                                              // should probably have (self: str) -> addr
-            // TODO: use typed ptrs instead of generic addr
-            expr->type = get_or_create_func_type_of(t, NULL, 0, t->builtins.addr);
+          method_t* m = resolve_method(t->builtins.str, expr->as.access.field);
+          if (!m) {
+            fprintf(stderr, "[ERROR] Typechecker\n  `str` has no field named `%s`\n", expr->as.access.field);
+            return false;
           }
+          expr->type = m->type;
         } else {
           fprintf(stderr, "[ERROR] Typechecker\n Owner is not a built-in object or structure.\n");
           return false;
@@ -1886,18 +1905,25 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
 }
 
 static inline bool resolve_func_decl(typechecker_t* t, ast_decl_t* decl) {
-  // TODO: use get_or_create_func_type_of to avoid having duplicate types,
-  // especially for very common signatures (() -> none, () -> bool, etc.)
-  type_t* sig_type = make_type(t, TYPE_FUNC, "", 1);
+  struct {
+    type_t** items;
+    size_t count;
+    size_t capacity;
+  } params = { 0 };
 
+  if(!resolve_type_decl(t, decl->as.fun.sig->ret)) return false;
   da_foreach(ast_param_t*, p, &decl->as.fun.sig->params) {
     if(!resolve_type_decl(t, (*p)->type)) return false;
     (*p)->symbol->type = (*p)->type->resolved_type;
-    da_append(&sig_type->as.func.params, (*p)->type->resolved_type);
+    da_append(&params, (*p)->type->resolved_type);
   }
 
-  if(!resolve_type_decl(t, decl->as.fun.sig->ret)) return false;
-  sig_type->as.func.ret = decl->as.fun.sig->ret->resolved_type;
+  type_t* sig_type = get_or_create_func_type_from_arr(
+    t, 
+    decl->as.fun.sig->ret->resolved_type, 
+    params.count,
+    params.items
+  );
 
   da_append(&t->custom_types, sig_type);
   decl->as.fun.sig->resolved_type = sig_type;
@@ -1906,7 +1932,7 @@ static inline bool resolve_func_decl(typechecker_t* t, ast_decl_t* decl) {
   return true;
 }
 
-static inline void init_typechecker(typechecker_t* t) {
+static inline void typechecker_init(typechecker_t* t) {
   // init builtin types
   t->builtins.none      = make_type(t, TYPE_NONE, "none", 0);
   t->builtins.i32       = make_type(t, TYPE_I32,  "i32",  1);
@@ -2135,7 +2161,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
             ast_expr_t* owner = callee->as.access.owner;
             if(!codegen_expr(p, scope, owner)) return false;
             if (owner->type->kind == TYPE_STR) {
-              builtin_method_t *bm = resolve_builtin_method(&p->bms, owner->type, callee->as.access.field);
+              method_t *bm = resolve_method(owner->type, callee->as.access.field);
               if (!bm) {
                 fprintf(stderr, "[ERROR] Codegen\n No method `%s` in built-in type ", callee->as.access.field);
                 print_type(stderr, owner->type);
@@ -2554,32 +2580,44 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
   }
 }
 
-static inline bool init_builtin_methods(program_t* p, typechecker_t* t) {
-  builtin_method_t bms[] = 
-  {
-    {
-      .owner = t->builtins.str,
-      .name = "c_str",
-      // TODO: use typed ptrs instead of generic addr
-      .type = get_or_create_func_type_of(t, NULL, 0, t->builtins.addr),
-    },
-    {
-      .owner = t->builtins.str,
-      .name = "length",
-      .type = get_or_create_func_type_of(t, NULL, 0, t->builtins.i32),
-    },
+static inline method_t* make_method(typechecker_t* t, const type_t* owner, const char* name, const type_t* type, uint32_t addr) {
+  method_t* m = arena_alloc(&t->arena, sizeof(*m));
+  m->owner = owner;
+  m->name = arena_strdup(&t->arena, name);
+  m->type = type;
+  m->addr = addr;
+
+  return m;
+}
+
+static inline interface_t* make_interface(typechecker_t* t, const char* name) {
+  interface_t* interface = arena_alloc(&t->arena, sizeof(*interface));
+  interface->name = arena_strdup(&t->arena, name);
+
+  return interface;
+}
+
+static inline void add_method_to_interface(interface_t* interface, interface_method* method) {
+  da_append(&interface->methods, method);
+}
+
+static inline bool builtin_methods_init(program_t* p, typechecker_t* t) {
+  method_t* bms[] = {
+    make_method(t, t->builtins.str, "c_str", get_or_create_func_type_of(t, t->builtins.addr, 0), 0),
+    make_method(t, t->builtins.str, "length", get_or_create_func_type_of(t, t->builtins.i32, 0), 0),
+    make_method(t, t->builtins.str, "concat", get_or_create_func_type_of(t, t->builtins.str, 1, t->builtins.str), 0),
   };
   for (size_t j=0; j < sizeof(bms)/sizeof(*bms); j++) {
-    size_t n_params = bms[j].type->as.func.params.count + 2;
+    size_t n_params = bms[j]->type->as.func.params.count + 2;
     // TODO: add platform layer for malloc
     ffi_type **param_types = malloc(sizeof(*param_types) * n_params);
     size_t i = 0;
-    param_types[i++] = &ffi_type_pointer; // vm_t* vm 
-    param_types[i++] = &ffi_type_uint32;  // obj_handle_t (uint32_t) self
+    param_types[i++] = &ffi_type_pointer;                 // vm_t* vm 
+    param_types[i++] = type_to_ffi_type(*bms[j]->owner);  // typeof(self) self
     for(; i < n_params; i++)
-      param_types[i] = type_to_ffi_type(*bms[j].type->as.func.params.items[i]);
+      param_types[i] = type_to_ffi_type(*bms[j]->type->as.func.params.items[i - 2]);
 
-    ffi_type* ret = type_to_ffi_type(*bms[j].type);
+    ffi_type* ret = type_to_ffi_type(*bms[j]->type->as.func.ret);
 
     ffi_cif cif = { 0 };
     ffi_status status = ffi_prep_cif(
@@ -2596,14 +2634,14 @@ static inline bool init_builtin_methods(program_t* p, typechecker_t* t) {
     }
 
     // TODO: name is leaked
-    assert(bms[j].owner->name);
-    size_t len = snprintf(NULL, 0, "%s__%s", bms[j].owner->name, bms[j].name);
+    assert(bms[j]->owner->name);
+    size_t len = snprintf(NULL, 0, "%s__%s", bms[j]->owner->name, bms[j]->name);
     char* name = malloc(len + 1);
-    snprintf(name, len + 1, "%s__%s", bms[j].owner->name, bms[j].name);
-    bms[j].addr = p->externs.count;
+    snprintf(name, len + 1, "%s__%s", bms[j]->owner->name, bms[j]->name);
+    bms[j]->addr = p->externs.count;
     da_append(&p->externs, ((struct _extern){ cif, name, true }));
 
-    da_append(&t->builtin_methods, bms[j]);
+    da_append(&((type_t*)bms[j]->owner)->methods, bms[j]);
   }
 
   return true;
@@ -2629,13 +2667,12 @@ bool compile(program_t* program, const char* source) {
 
   // print_ast(stdout, (ast_node_t*)root, 0);
 
-  init_typechecker(&tc);
-  if(!init_builtin_methods(program, &tc)) return false;
+  typechecker_init(&tc);
+  if(!builtin_methods_init(program, &tc)) return false;
   if(!typecheck(&tc, root)) return false;
 
   // print_symbol_table(stdout, root->scope);
 
-  program->bms = tc.builtin_methods;
   if(!codegen(program, root)) return false;
 
   print_disass(stdout, program, root->scope);

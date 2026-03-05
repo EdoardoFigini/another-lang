@@ -398,6 +398,9 @@ typedef enum {
   TYPES_COUNT,
 } type_kind_t;
 
+typedef struct _method method_t;
+typedef struct _interface interface_t;
+
 struct _type {
   const char* name;
   size_t size;
@@ -423,14 +426,38 @@ struct _type {
       struct _type* target;
     } alias; 
   } as;
+  struct {
+    method_t** items;
+    size_t count;
+    size_t capacity;
+  } methods;
+  struct {
+    interface_t** items;
+    size_t count;
+    size_t capacity;
+  } impls;
 };
 
-typedef struct {
+struct _method {
   const type_t* owner;
   const char* name;
   const type_t* type;
   uint32_t addr;
-} builtin_method_t;
+};
+
+typedef struct {
+  const char* name;
+  const type_t* type;
+} interface_method;
+
+struct _interface {
+  const char* name;
+  struct _i_methods {
+    interface_method** items;
+    size_t count;
+    size_t capacity;
+  } methods;
+};
 
 typedef struct {
   arena_t arena;
@@ -454,11 +481,6 @@ typedef struct {
     type_t const* addr;
   } builtins;
   scope_t* current_scope;
-  struct _builtin_methods {
-    builtin_method_t* items;
-    size_t count;
-    size_t capacity;
-  } builtin_methods;
 } typechecker_t;
 
 typedef enum {
@@ -597,7 +619,6 @@ typedef struct {
     size_t count;
     size_t capacity;
   } patches;
-  struct _builtin_methods bms;
 } program_t;
 
 // runtime
