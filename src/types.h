@@ -76,11 +76,6 @@ typedef struct {
 
 typedef struct _scope scope_t;
 
-typedef enum {
-  PASS_DECL,
-  PASS_STMTS,
-} pass_t;
-
 typedef struct {
   sb_t source;
   size_t line;
@@ -90,7 +85,6 @@ typedef struct {
   tokenarr_t tokens;
   size_t current;
   scope_t* current_scope;
-  pass_t pass;
 } parser_t;
 
 static inline void parser_destroy(parser_t* p) {
@@ -102,8 +96,6 @@ typedef enum {
   AST_ROOT = 1,
   AST_EXPR,
   AST_STMT,
-  AST_VAR_DECL,
-  AST_FUNC_DECL,
   AST_FUNC_DEF,
   AST_VAR_DEF,
   AST_TYPE,
@@ -196,32 +188,18 @@ typedef struct {
   const char* name;
   spec_flags_t flags;
   symbol_t* symbol;
-  size_t tok_idx;
   ast_sig_t* sig;
-  bool has_body;
   scope_t* scope;
-} ast_func_decl_t;
+  ast_body_t* body;
+} ast_func_def_t;
 
 typedef struct {
   AST_DEFAULT_FIELDS;
   const char* name;
   spec_flags_t flags;
   symbol_t* symbol;
-  size_t tok_idx;
   ast_type_t* type;
-  bool initialized;
-} ast_var_decl_t;
-
-typedef struct {
-  AST_DEFAULT_FIELDS;
-  ast_func_decl_t* decl;
-  ast_body_t*      body;
-} ast_func_def_t;
-
-typedef struct {
-  AST_DEFAULT_FIELDS;
-  ast_var_decl_t* decl;
-  ast_expr_t*     init;
+  ast_expr_t* init;
 } ast_var_def_t;
 
 typedef enum {
@@ -346,16 +324,6 @@ struct _ast_body_t {
 
 typedef struct {
   AST_DEFAULT_FIELDS;
-  struct {
-    ast_func_decl_t** items;
-    size_t count;
-    size_t capacity;
-  } func_decls;
-  struct {
-    ast_var_decl_t** items;
-    size_t count;
-    size_t capacity;
-  } var_decls;
   struct {
     ast_func_def_t** items;
     size_t count;

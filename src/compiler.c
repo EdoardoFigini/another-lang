@@ -762,13 +762,13 @@ static inline ast_type_t* parse_type(parser_t* p) {
   return n;
 }
 
-static inline ast_var_decl_t* parse_var_decl(parser_t* p, const char* name, spec_flags_t flags, bool global);
-static inline ast_var_def_t* parse_var_def(parser_t* p, ast_var_decl_t* decl);
+static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec_flags_t flags);
+static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_flags_t flags, bool global);
 static inline ast_body_t* parse_body(parser_t* p);
 
 // stmt = return [ expr ] ';' 
 //      | if '(' expr ')' body [ else body ]
-//      | ( 'specifier' )* ident ':' type [ '=' expr ] ';'
+//      | specifiers var_def
 //      | expr ';'
 //      | ';'
 static inline ast_stmt_t* parse_stmt(parser_t* p) {
@@ -844,10 +844,7 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
 
       n->kind = STMT_VAR_DEF;
 
-      ast_var_decl_t* var_decl = parse_var_decl(p, name, flags, false);
-      if(!var_decl) return NULL;
-      p->current = var_decl->tok_idx;
-      ast_var_def_t* var_def = parse_var_def(p, var_decl);
+      ast_var_def_t* var_def = parse_var_def(p, name, flags, false);
       if(!var_def) return NULL;
 
       n->as.var_def = var_def;
@@ -955,57 +952,12 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
   return n;
 }
 
-// func_def = func_decl body
-static inline ast_func_def_t* parse_func_def(parser_t* p, ast_func_decl_t* decl) {
-  // NOTE: skip until '{', assume declaration has been correctly parsed by
-  // parse_func_decl in previous pass
-  while(!tok_is(p, '{')) next(p);
-
+// func_def = type [ body ]
+static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec_flags_t flags) {
   ast_func_def_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_FUNC_DEF;
-  n->decl = decl;
-
-  enter_scope(p, n->decl->scope);
-
-  ast_body_t* body = parse_body(p);
-  if(!body) return NULL;
-
-  n->body = body;
-
-  exit_scope(p);
-
-  return n;
-}
-
-// var_def = var_decl [ '=' expr ] ';'
-static inline ast_var_def_t* parse_var_def(parser_t* p, ast_var_decl_t* decl) {
-  while(!tok_is(p, '=') && !tok_is(p, ';')) next(p);
-
-  ast_var_def_t *n = arena_alloc(&p->arena, sizeof(*n));
-  n->ast_kind = AST_VAR_DEF;
-  n->decl = decl;
-
-  if(tok_is(p, '=')) {
-    if(!expect(p, '=')) return NULL;
-    next(p);
-    ast_expr_t* init = parse_expr(p, 0);
-    if(!init) return NULL;
-    n->init = init;
-  }
-
-  if(!expect(p, ';')) return NULL;
-  next(p);
-
-  return n;
-}
-
-// func_decl = sig ( ';' | '{' )
-static inline ast_func_decl_t* parse_func_decl(parser_t* p, const char* name, spec_flags_t flags) {
-  ast_func_decl_t *n = arena_alloc(&p->arena, sizeof(*n));
-  n->ast_kind = AST_FUNC_DECL;
   n->flags = flags;
   n->name = arena_strdup(&p->arena, name);
-  n->tok_idx = p->current;
 
   symb_storage_t sto = STO_GLOBAL;
   if(flags & SPEC_EXTERN) sto = STO_EXTERN; 
@@ -1023,14 +975,10 @@ static inline ast_func_decl_t* parse_func_decl(parser_t* p, const char* name, sp
     if(!expect(p, ';')) return NULL;
     next(p);
   } else {
-    if(!expect(p, '{')) return NULL;
-    next(p);
-    n->has_body = true;
-    // NOTE: delay body parsing to parse_func_decl
-    for (int pars = 1; pars && !tok_is(p, TOK_EOF); next(p)) {
-      if      (tok_is(p,'{')) pars++;
-      else if (tok_is(p,'}')) pars--;
-    }
+    ast_body_t* body = parse_body(p);
+    if(!body) return NULL;
+
+    n->body = body;
   }
 
   exit_scope(p);
@@ -1038,12 +986,12 @@ static inline ast_func_decl_t* parse_func_decl(parser_t* p, const char* name, sp
   return n;
 }
 
-static inline ast_var_decl_t* parse_var_decl(parser_t* p, const char* name, spec_flags_t flags, bool global) {
-  ast_var_decl_t* n = arena_alloc(&p->arena, sizeof(*n));
-  n->ast_kind = AST_VAR_DECL;
+// var_def = type [ '=' expr ] ';'
+static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_flags_t flags, bool global) {
+  ast_var_def_t *n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_VAR_DEF;
   n->flags = flags;
   n->name = arena_strdup(&p->arena, name);
-  n->tok_idx = p->current;
 
   symb_storage_t sto = global ? STO_GLOBAL : STO_LOCAL;
   if(flags & SPEC_EXTERN) sto = STO_EXTERN; 
@@ -1056,23 +1004,26 @@ static inline ast_var_decl_t* parse_var_decl(parser_t* p, const char* name, spec
   if(!type) return NULL;
   n->type = type;
 
-  if(tok_is(p, '=')) n->initialized = true;
-  while(!tok_is(p, ';')) next(p); // skip initialization if present
-
+  if(tok_is(p, '=')) {
+    if(!expect(p, '=')) return NULL;
+    next(p);
+    ast_expr_t* init = parse_expr(p, 0);
+    if(!init) return NULL;
+    n->init = init;
+  }
   if(!expect(p, ';')) return NULL;
   next(p);
 
   return n;
 }
 
-// root: ( ( spec_flag )* ident ':' func_decl [ func_def ] )* 
-//     | ( ( spec_flag )* ident ':' var_decl [ var_def ] )*
+// root: ( ( spec_flag )* ident ':' func_def )* 
+//     | ( ( spec_flag )* ident ':' var_def )*
 //     | ( ident ':' 'impl' ident '{' ( ident ':' func_decl func_def '}' )+ )*
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->source = t->source;
   p->tokens = t->tokens;
   p->current = 0;
-  p->pass = PASS_DECL;
 
   enter_scope_new(p, "root");
 
@@ -1090,43 +1041,16 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
     next(p);
 
     if(tok_is(p, '(')) {
-      ast_func_decl_t* decl = parse_func_decl(p, name, flags);
-      if (!decl) return NULL;
+      ast_func_def_t* def = parse_func_def(p, name, flags);
+      if (!def) return NULL;
 
-      da_append(&n->func_decls, decl);
+      da_append(&n->func_defs, def);
     } else {
-      ast_var_decl_t* decl = parse_var_decl(p, name, flags, true);
-      if (!decl) return NULL;
+      ast_var_def_t* def = parse_var_def(p, name, flags, true);
+      if (!def) return NULL;
 
-      da_append(&n->var_decls, decl);
+      da_append(&n->var_defs, def);
     }
-  }
-
-  p->current = 0;
-  p->pass++;
-
-  da_foreach(ast_func_decl_t*, decl, &n->func_decls) {
-    if((*decl)->flags & SPEC_EXTERN) continue;
-
-    ast_func_def_t* def = NULL;
-    p->current = (*decl)->tok_idx;
-    def = parse_func_def(p, *decl);
-
-    if(!def) return NULL;
-
-    da_append(&n->func_defs, def);
-  }
-
-  da_foreach(ast_var_decl_t*, decl, &n->var_decls) {
-    if((*decl)->flags & SPEC_EXTERN) continue;
-
-    ast_var_def_t* def = NULL;
-    p->current = (*decl)->tok_idx;
-    def = parse_var_def(p, *decl);
-
-    if(!def) return NULL;
-
-    da_append(&n->var_defs, def);
   }
 
   return n;
@@ -1137,13 +1061,6 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
     case AST_ROOT:
       ast_root_t* root = (ast_root_t*)n;
       fprintf(stream, "%*s%s\n", level, "","AST_ROOT");
-      fprintf(stream, "%*s%s\n", level + 2, "","DECLARATIONS:");
-      da_foreach(ast_func_decl_t*, d, &root->func_decls) {
-        print_ast(stream, (ast_node_t*)*d, level + 4);
-      }
-      da_foreach(ast_var_decl_t*, d, &root->var_decls) {
-        print_ast(stream, (ast_node_t*)*d, level + 4);
-      }
       fprintf(stream, "%*s%s\n", level + 2, "","DEFINITIONS:");
       da_foreach(ast_func_def_t*, d, &root->func_defs) {
         print_ast(stream, (ast_node_t*)*d, level + 4);
@@ -1242,42 +1159,33 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
         default: break;
       }
       break;
-    case AST_VAR_DECL: {
-      ast_var_decl_t* decl = (ast_var_decl_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_VAR_DECL");
-      fprintf(stream, "%*sName: %s\n", level + 2, "", decl->name);
-      fprintf(stream, "%*sFlags: ", level + 2, "");
-      if(decl->flags & SPEC_EXTERN) fprintf(stream, "extern ");
-      if(decl->flags & SPEC_EXPORT) fprintf(stream, "export ");
-      if(decl->flags & SPEC_CONST)  fprintf(stream, "const ");
-      fprintf(stream, "\n");
-      break;
-    }
-    case AST_VAR_DEF:
+    case AST_VAR_DEF: {
+      ast_var_def_t* def = (ast_var_def_t*)n;
       fprintf(stream, "%*s%s\n", level, "", "AST_VAR_DEF");
-      print_ast(stream, (ast_node_t*)((ast_var_def_t*)n)->decl, level + 2);
-      if(((ast_var_def_t*)n)->decl->initialized)
-        print_ast(stream, (ast_node_t*)((ast_var_def_t*)n)->init, level + 2);
-      break;
-    case AST_FUNC_DECL: {
-      ast_func_decl_t* decl = (ast_func_decl_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_FUNC_DECL");
-      fprintf(stream, "%*sName: %s\n", level + 2, "", decl->name);
+      fprintf(stream, "%*sName: %s\n", level + 2, "", def->name);
       fprintf(stream, "%*sFlags: ", level + 2, "");
-      if(decl->flags & SPEC_EXTERN) fprintf(stream, "extern ");
-      if(decl->flags & SPEC_EXPORT) fprintf(stream, "export ");
-      if(decl->flags & SPEC_CONST)  fprintf(stream, "const ");
+      if(def->flags & SPEC_EXTERN) fprintf(stream, "extern ");
+      if(def->flags & SPEC_EXPORT) fprintf(stream, "export ");
+      if(def->flags & SPEC_CONST)  fprintf(stream, "const ");
       fprintf(stream, "\n");
-      print_ast(stream, (ast_node_t*)decl->sig, level + 2);
+      if(def->init)
+        print_ast(stream, (ast_node_t*)def->init, level + 2);
       break;
     }
-    case AST_FUNC_DEF:
+    case AST_FUNC_DEF: {
       ast_func_def_t* def = (ast_func_def_t*)n;
       fprintf(stream, "%*s%s\n", level, "", "AST_FUNC_DEF");
-      print_ast(stream, (ast_node_t*)def->decl, level + 2);
+      fprintf(stream, "%*sName: %s\n", level + 2, "", def->name);
+      fprintf(stream, "%*sFlags: ", level + 2, "");
+      if(def->flags & SPEC_EXTERN) fprintf(stream, "extern ");
+      if(def->flags & SPEC_EXPORT) fprintf(stream, "export ");
+      if(def->flags & SPEC_CONST)  fprintf(stream, "const ");
+      fprintf(stream, "\n");
+      print_ast(stream, (ast_node_t*)def->sig, level + 2);
       if(def->body)
         print_ast(stream, (ast_node_t*)def->body, level + 2);
       break;
+    }
     case AST_TYPE:
       fprintf(stream, "%*s%s\n", level, "", "AST_TYPE");
       fprintf(stream, "%*sName: %s\n", level + 2, "", ((ast_type_t*)n)->name);
@@ -1436,7 +1344,8 @@ static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* nam
     type->scope->name = arena_sprintf(&t->arena, "type_%d", rand());
   type->scope->parent = t->current_scope;
 
-  make_symbol(t->current_scope, SYMB_TYPE, STO_LOCAL, name, type);
+  if (name)
+    make_symbol(t->current_scope, SYMB_TYPE, STO_LOCAL, name, type);
 
   return type;
 }
@@ -1646,8 +1555,10 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
   switch(expr->kind) {
     case EXPR_SYMBOL:
       symbol_t* s = resolve_symbol_any(t->current_scope, expr->as.symbol); 
-      if (!s) {
-        fprintf(stderr, "[ERROR] Typechecker\n No symbol `%s` in current scope.\n", expr->as.symbol);
+      // symbol may be already in the symbol table from parsing. to avoid using symbols
+      // declared after this point I need to check that the type is not been resolved yet.
+      if (!s || !s->type) {
+        fprintf(stderr, "[ERROR] Typechecker\n Undeclared symbol `%s`.\n", expr->as.symbol);
         return false;
       }
       expr->type = s->type;
@@ -1813,14 +1724,14 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
       if(!typecheck_expr(t, stmt->as.expression)) return false;
       break;
     case STMT_VAR_DEF:
-      if(!resolve_type_decl(t, stmt->as.var_def->decl->type)) return false;
-      stmt->as.var_def->decl->symbol->type = stmt->as.var_def->decl->type->resolved_type;
+      if(!resolve_type_decl(t, stmt->as.var_def->type)) return false;
+      stmt->as.var_def->symbol->type = stmt->as.var_def->type->resolved_type;
 
-      if( stmt->as.var_def->decl->flags & SPEC_EXTERN ) {
+      if( stmt->as.var_def->flags & SPEC_EXTERN ) {
         fprintf(stderr, "[ERROR] Typechecker\n  Cannot define an extern local variable.\n");
         return false;
       }
-      if( stmt->as.var_def->decl->flags & SPEC_EXPORT ) {
+      if( stmt->as.var_def->flags & SPEC_EXPORT ) {
         fprintf(stderr, "[ERROR] Typechecker\n  Cannot export a local variable.\n");
         return false;
       }
@@ -1828,22 +1739,22 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
       // TODO: type inference
       da_foreach(symbol_t, symb, &t->current_scope->symbols) {
         if (
-            symb != stmt->as.var_def->decl->symbol && 
+            symb != stmt->as.var_def->symbol && 
             symb->kind == SYMB_VAR &&
-            strcmp(stmt->as.var_def->decl->name, symb->name) == 0
+            strcmp(stmt->as.var_def->name, symb->name) == 0
         ) {
-          fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope", stmt->as.var_def->decl->name);
+          fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope", stmt->as.var_def->name);
           return false;
         }
         // NOTE: allow shadowing -> do not check in parent scope
         // TODO: maybe issue shadowing warning?
       }
 
-      if(stmt->as.var_def->decl->initialized) {
+      if(stmt->as.var_def->init) {
         if(!typecheck_expr(t, stmt->as.var_def->init)) return false;
-        if(stmt->as.var_def->decl->type->resolved_type != stmt->as.var_def->init->type) {
+        if(stmt->as.var_def->type->resolved_type != stmt->as.var_def->init->type) {
           fprintf(stderr, "[ERROR] Typechecker\n  Incompatible types when initializing type `");
-          print_type(stderr, stmt->as.var_def->decl->type->resolved_type);
+          print_type(stderr, stmt->as.var_def->type->resolved_type);
           fprintf(stderr, "` using type `");
           print_type(stderr, stmt->as.var_def->init->type);
           fprintf(stderr, "`.\n");
@@ -1884,15 +1795,15 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
   return true;
 }
 
-static inline bool resolve_func_decl(typechecker_t* t, ast_func_decl_t* decl) {
+static inline bool resolve_func_def(typechecker_t* t, ast_func_def_t* def) {
   struct {
     type_t** items;
     size_t count;
     size_t capacity;
   } params = { 0 };
 
-  if(!resolve_type_decl(t, decl->sig->ret)) return false;
-  da_foreach(ast_param_t*, p, &decl->sig->params) {
+  if(!resolve_type_decl(t, def->sig->ret)) return false;
+  da_foreach(ast_param_t*, p, &def->sig->params) {
     if(!resolve_type_decl(t, (*p)->type)) return false;
     (*p)->symbol->type = (*p)->type->resolved_type;
     da_append(&params, (*p)->type->resolved_type);
@@ -1900,14 +1811,14 @@ static inline bool resolve_func_decl(typechecker_t* t, ast_func_decl_t* decl) {
 
   type_t* sig_type = get_or_create_func_type_from_arr(
     t, 
-    decl->sig->ret->resolved_type, 
+    def->sig->ret->resolved_type, 
     params.count,
     params.items
   );
 
   da_append(&t->custom_types, sig_type);
-  decl->sig->resolved_type = sig_type;
-  decl->symbol->type = sig_type;
+  def->sig->resolved_type = sig_type;
+  def->symbol->type = sig_type;
 
   return true;
 }
@@ -1930,40 +1841,29 @@ static inline void typechecker_init(typechecker_t* t, ast_root_t* root) {
 }
 
 static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
+  // resolve types and symbols first
+  da_foreach(ast_func_def_t*, d, &root->func_defs)
+    if(!resolve_func_def(t, *d)) return false;
 
-  da_foreach(ast_func_decl_t*, d, &root->func_decls) {
-    if(!resolve_func_decl(t, *d)) return false;
-
-    if(!(*d)->has_body && !((*d)->flags & SPEC_EXTERN)) {
+  da_foreach(ast_func_def_t*, d, &root->func_defs) {
+    if(!(*d)->body && !((*d)->flags & SPEC_EXTERN)) {
       fprintf(stderr, "[ERROR] Typechecker\n  Cannot define a non-extern function without a body.\n");
       return false;
     }
-    if((*d)->has_body && ((*d)->flags & SPEC_EXTERN)) {
+    if((*d)->body && ((*d)->flags & SPEC_EXTERN)) {
       fprintf(stderr, "[ERROR] Typechecker\n  Cannot define an extern function with a body.\n");
       return false;
     }
-  }
-  da_foreach(ast_var_decl_t*, d, &root->var_decls) {
-    if(!resolve_type_decl(t, (*d)->type)) return false;
 
-    (*d)->symbol->type = (*d)->type->resolved_type;
-
-    if((*d)->initialized && ((*d)->flags & SPEC_EXTERN)) {
-      fprintf(stderr, "[ERROR] Typechecker\n  Cannot initialize an extern variable.\n");
-      return false;
-    }
-  }
-
-  da_foreach(ast_func_def_t*, d, &root->func_defs) {
     da_foreach(symbol_t, symb, &t->current_scope->symbols) {
       if (
-          symb != (*d)->decl->symbol && 
+          symb != (*d)->symbol && 
           symb->kind == SYMB_FUNC &&
-          strcmp((*d)->decl->name, symb->name) == 0 &&
-          type_equals(*symb->type, *(*d)->decl->sig->resolved_type)
+          strcmp((*d)->name, symb->name) == 0 &&
+          type_equals(*symb->type, *(*d)->sig->resolved_type)
       ) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for function `%s` with type ", (*d)->decl->name);
-        print_type(stderr, (*d)->decl->sig->resolved_type);
+        fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for function `%s` with type ", (*d)->name);
+        print_type(stderr, (*d)->sig->resolved_type);
         fprintf(stderr, " in this scope.\n");
         return false;
       }
@@ -1971,36 +1871,48 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     // NOTE: allow shadowing -> do not check in parent scope
     // TODO: maybe issue shadowing warning?
 
-    t->current_scope = (*d)->decl->scope;
-    da_foreach(ast_stmt_t*, stmt, &(*d)->body->stmts) {
-      if(!typecheck_stmt(t, *stmt, (*d)->decl->sig->ret->resolved_type)) return false;
+    if ((*d)->body) {
+      t->current_scope = (*d)->scope;
+      da_foreach(ast_stmt_t*, stmt, &(*d)->body->stmts) {
+        if(!typecheck_stmt(t, *stmt, (*d)->sig->ret->resolved_type)) return false;
+      }
+      t->current_scope = t->current_scope->parent;
     }
-    t->current_scope = t->current_scope->parent;
   }
+
   da_foreach(ast_var_def_t*, d, &root->var_defs) {
+    if(!resolve_type_decl(t, (*d)->type)) return false;
+
+    (*d)->symbol->type = (*d)->type->resolved_type;
+
+    if((*d)->init && ((*d)->flags & SPEC_EXTERN)) {
+      fprintf(stderr, "[ERROR] Typechecker\n  Cannot initialize an extern variable.\n");
+      return false;
+    }
+
     da_foreach(symbol_t, symb, &t->current_scope->symbols) {
       if (
-          symb != (*d)->decl->symbol && 
+          symb != (*d)->symbol && 
           symb->kind == SYMB_VAR &&
-          strcmp((*d)->decl->name, symb->name) == 0
+          strcmp((*d)->name, symb->name) == 0
       ) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope.\n", (*d)->decl->name);
+        fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope.\n", (*d)->name);
         return false;
       }
       // NOTE: allow shadowing -> do not check in parent scope
       // TODO: maybe issue shadowing warning?
     }
 
-    if((*d)->decl->initialized) {
+    if((*d)->init) {
       if(!typecheck_expr(t, (*d)->init)) return false;
       if(!(*d)->init->is_const) {
         fprintf(stderr, "[ERROR] Typechecker\n  Initializer is not a compile-time constant.\n");
         return false;
       }
 
-      if(!type_equals(*(*d)->decl->type->resolved_type, *(*d)->init->type)) {
+      if(!type_equals(*(*d)->type->resolved_type, *(*d)->init->type)) {
         fprintf(stderr, "[ERROR] Typechecker\n  Incompatible types when initializing type `");
-        print_type(stderr, (*d)->decl->type->resolved_type);
+        print_type(stderr, (*d)->type->resolved_type);
         fprintf(stderr, "` using type `");
         print_type(stderr, (*d)->init->type);
         fprintf(stderr, "`.\n");
@@ -2192,9 +2104,9 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
         fprintf(stderr, "[ERROR] Codegen\n  Too many local variables in function %s", f->name);
         return false;
       }
-      symbol_t* symb = s->as.var_def->decl->symbol;
+      symbol_t* symb = s->as.var_def->symbol;
       set_symbol_address(symb, f->loc_vars++);
-      if (s->as.var_def->decl->initialized) {
+      if (s->as.var_def->init) {
         if(!codegen_expr(p, scope, s->as.var_def->init)) return false;
         da_append(&p->code, INST_STORE);
         da_append(&p->code, symb->addr);
@@ -2256,10 +2168,9 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
  }
 }
 
-static inline bool codegen_func_decl(program_t* p, ast_func_decl_t* d) {
-  ast_sig_t* sig = d->sig;
-
+static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
   if (d->symbol->storage == STO_EXTERN) {
+    ast_sig_t* sig = d->sig;
     // TODO: add platform layer for malloc
     ffi_type **param_types = malloc(sizeof(*param_types) * sig->params.count);
     for(size_t i=0; i < sig->params.count; i++)
@@ -2284,47 +2195,38 @@ static inline bool codegen_func_decl(program_t* p, ast_func_decl_t* d) {
     set_symbol_address(d->symbol, p->externs.count);
     // TODO: name is leaked
     da_append(&p->externs, ((struct _extern){ cif, strdup(d->name), false }));
+  } else {
+    set_symbol_address(d->symbol, p->code.count);
+
+    frame_t f = { 0 };
+
+    // store parameters in local variables
+    f.loc_vars = d->sig->params.count;
+    // SysV-style calling convention
+    for (size_t i = 0; i < f.loc_vars; i++) {
+      da_append(&p->code, INST_STORE);
+      da_append(&p->code, i);
+    }
+
+    da_foreach(ast_stmt_t*, stmt, &d->body->stmts)
+      if(!codegen_stmt(p, d->scope, &f, *stmt)) return false;
+
+    if(da_last(&p->code) != INST_RET)
+      da_append(&p->code, INST_RET);
   }
-
-  return true;
-}
-
-static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
-  frame_t f = { 0 };
-
-  // patch symbol table
-  set_symbol_address(d->decl->symbol, p->code.count);
-
-  // store parameters in local variables
-  f.loc_vars = d->decl->sig->params.count;
-  // SysV-style calling convention
-  for (size_t i = 0; i < f.loc_vars; i++) {
-    da_append(&p->code, INST_STORE);
-    da_append(&p->code, i);
-  }
-
-  da_foreach(ast_stmt_t*, stmt, &d->body->stmts)
-    if(!codegen_stmt(p, d->decl->scope, &f, *stmt)) return false;
-
-  if(da_last(&p->code) != INST_RET)
-    da_append(&p->code, INST_RET);
 
   return true;
 }
 
 static inline int codegen(program_t* p, ast_root_t* root) {
   da_append(&p->code, INST_HALT);
-  
-  da_foreach(ast_func_decl_t*, d, &root->func_decls) {
-    if(!codegen_func_decl(p, *d)) return false;
-  }
 
   da_foreach(ast_func_def_t*, d, &root->func_defs) {
     if(!codegen_func_def(p, *d)) return false;
   }
   da_foreach(ast_var_def_t*, d, &root->var_defs) {
     data_t val = { 0 };
-    if ((*d)->decl->initialized) {
+    if ((*d)->init) {
       switch((*d)->init->kind) {
         case EXPR_STRING:
           val.number.u = p->constants.count;
@@ -2634,9 +2536,9 @@ bool compile(program_t* program, const char* source) {
   if(!builtin_interfaces_init(&tc)) return false;
   if(!typecheck(&tc, root)) return false;
 
-  print_symbol_table(stdout, root->scope);
-
   if(!codegen(program, root)) return false;
+
+  // print_symbol_table(stdout, root->scope);
 
   print_disass(stdout, program, root->scope);
 
