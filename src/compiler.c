@@ -24,6 +24,7 @@ const char* tok_keywords[] = {
   [KW_CONST]  = "const",
   [KW_IF]     = "if",
   [KW_ELSE]   = "else",
+  [KW_IMPL]   = "impl",
 };
 
 void tok_print(token_t tok) {
@@ -47,6 +48,7 @@ void tok_print(token_t tok) {
       case TOK_CONST: printf("%-20s", "TOK_CONST"); break;
       case TOK_IF: printf("%-20s", "TOK_IF"); break;
       case TOK_ELSE: printf("%-20s", "TOK_ELSE"); break;
+      case TOK_IMPL: printf("%-20s", "TOK_IMPL"); break;
       default: printf("%-20s", "<INVALID TOKEN>"); break;
     }
   }
@@ -73,6 +75,7 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_CONST:
       case TOK_IF:
       case TOK_ELSE:
+      case TOK_IMPL:
         return tok_keywords[k];
       default: return "<INVALID TOKEN>";
     }
@@ -123,6 +126,7 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
 }
 
 // TODO: support exp notation for reals 
+// TODO: fix real number tokenization: 69.str() should be TOK_INTLIT '.' TOK_IDENT '( ')', not TOK_REALLIT TOK_IDENT...
 static inline int tok_num_literal(tokenizer_t* t, char** end, size_t line, size_t col, token_t* tok) {
   int base = 10;
   int64_t integer = 0;
@@ -423,21 +427,26 @@ static inline void set_symbol_address(symbol_t* s, uint32_t addr) {
 static inline void print_symbol_table(FILE* stream, scope_t* root);
 
 // FIXME: dangling pointers
-static inline symbol_t* make_symbol(scope_t* scope, symb_kind_t kind, symb_storage_t storage, const char* name, type_t* type) {
-  da_append(&scope->symbols, ((symbol_t){ .name = name, .kind = kind, .storage = storage, .type = type }));
-  return &da_last(&scope->symbols);
+static inline symbol_t* make_symbol(arena_t* arena, scope_t* scope, symb_kind_t kind, symb_storage_t storage, const char* name, type_t* type) {
+  symbol_t* s = arena_alloc(arena, sizeof(*s));
+  s->name = name;
+  s->kind = kind;
+  s->storage = storage;
+  s->type = type;
+  da_append(&scope->symbols, s);
+  return s;
 }
 
-static inline symbol_t* make_method(const type_t* owner, const char* name, const type_t* type, symb_storage_t storage) {
-  return make_symbol(owner->scope, SYMB_FUNC, storage, name, (type_t*)type);
+static inline symbol_t* make_method(arena_t* arena, const type_t* owner, const char* name, const type_t* type, symb_storage_t storage) {
+  return make_symbol(arena, owner->scope, SYMB_FUNC, storage, name, (type_t*)type);
 }
 
 static inline symbol_t* resolve_symbol_local_any(scope_t* scope, const char* name) { 
   if (!scope) return NULL;
 
   // OPTIMIZE
-  da_foreach(symbol_t, s, &scope->symbols) {
-    if(strcmp(s->name, name) == 0) return s;
+  da_foreach(symbol_t*, s, &scope->symbols) {
+    if(strcmp((*s)->name, name) == 0) return *s;
   }
   return NULL;
 }
@@ -448,8 +457,8 @@ static inline symbol_t* resolve_symbol_local(scope_t* scope, const char* name, s
   if (!scope) return NULL;
 
   // OPTIMIZE
-  da_foreach(symbol_t, s, &scope->symbols) {
-    if(strcmp(s->name, name) == 0 && s->kind == kind) return s;
+  da_foreach(symbol_t*, s, &scope->symbols) {
+    if(strcmp((*s)->name, name) == 0 && (*s)->kind == kind) return *s;
   }
   return NULL;
 }
@@ -458,8 +467,8 @@ static inline symbol_t* resolve_symbol_any(scope_t* scope, const char* name) {
   if (!scope) return NULL;
 
   // OPTIMIZE
-  da_foreach(symbol_t, s, &scope->symbols) {
-    if(s->name && strcmp(s->name, name) == 0) return s;
+  da_foreach(symbol_t*, s, &scope->symbols) {
+    if((*s)->name && strcmp((*s)->name, name) == 0) return *s;
   }
   return resolve_symbol_any(scope->parent, name);
 }
@@ -468,26 +477,26 @@ static inline symbol_t* resolve_symbol(scope_t* scope, const char* name, symb_ki
   if (!scope) return NULL;
 
   // OPTIMIZE
-  da_foreach(symbol_t, s, &scope->symbols) {
-    if(strcmp(s->name, name) == 0 && s->kind == kind) return s;
+  da_foreach(symbol_t*, s, &scope->symbols) {
+    if(strcmp((*s)->name, name) == 0 && (*s)->kind == kind) return *s;
   }
   return resolve_symbol(scope->parent, name, kind);
 }
 
-static inline void enter_scope_new(parser_t* p, const char* name) {
-  scope_t* parent = p->current_scope;
-  p->current_scope = arena_alloc(&p->arena, sizeof(scope_t));
-  p->current_scope->name = name;
-  p->current_scope->parent = parent;
-  // fprintf(stderr, "[DEBUG] New scope %s, son of %s.\n", name, p->current_scope->parent ? p->current_scope->parent->name : "noone");
+static inline void enter_scope_new(typechecker_t* t, const char* name) {
+  scope_t* parent = t->current_scope;
+  t->current_scope = arena_alloc(&t->arena, sizeof(scope_t));
+  t->current_scope->name = name;
+  t->current_scope->parent = parent;
+  // fprintf(stderr, "[DEBUG] New scope %s, son of %s.\n", name, t->current_scope->parent ? t->current_scope->parent->name : "noone");
 }
 
-static inline void enter_scope(parser_t* p, scope_t* s) {
-  p->current_scope = s;
+static inline void enter_scope(typechecker_t* t, scope_t* s) {
+  t->current_scope = s;
 }
 
-static inline void exit_scope(parser_t* p) {
-  p->current_scope = p->current_scope->parent;
+static inline void exit_scope(typechecker_t* t) {
+  t->current_scope = t->current_scope->parent;
 }
 
 static inline bool tok_is_specifier(parser_t* p) {
@@ -499,6 +508,7 @@ static inline bool tok_is_specifier(parser_t* p) {
     case KW_RETURN:
     case KW_IF:
     case KW_ELSE:
+    case KW_IMPL:
     default: 
       return false;
   }
@@ -520,6 +530,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
       case KW_RETURN:
       case KW_IF:
       case KW_ELSE:
+      case KW_IMPL:
       default: return flags;
     }
 
@@ -741,6 +752,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
   }
 }
 
+// TODO: allow scope access (types defined in other modules)
 static inline ast_type_t* parse_type(parser_t* p) {
   ast_type_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_TYPE;
@@ -809,21 +821,17 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     if(!expect(p, ')')) return NULL;
     next(p);
 
-    enter_scope_new(p, arena_sprintf(&p->arena, "%s_if", p->current_scope->name));
     n->as.if_else.scope = p->current_scope;
     ast_body_t* if_body = parse_body(p);
     n->as.if_else.if_body = if_body;
-    exit_scope(p);
 
     if(tok_is(p, TOK_ELSE)) {
       if(!expect(p, TOK_ELSE)) return NULL;
       next(p);
 
-      enter_scope_new(p, arena_sprintf(&p->arena, "%s_else", p->current_scope->name));
       n->as.if_else.scope = p->current_scope;
       ast_body_t* else_body = parse_body(p);
       n->as.if_else.else_body = else_body;
-      exit_scope(p);
     }
     // TODO: handle else if (elif)
 
@@ -902,8 +910,6 @@ static inline ast_param_t* parse_param(parser_t* p) {
   if(!t) return NULL;
   n->type = t;
 
-  n->symbol = make_symbol(p->current_scope, SYMB_VAR, STO_LOCAL, n->name, NULL);
-
   return n;
 }
 
@@ -959,13 +965,6 @@ static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec
   n->flags = flags;
   n->name = arena_strdup(&p->arena, name);
 
-  symb_storage_t sto = STO_GLOBAL;
-  if(flags & SPEC_EXTERN) sto = STO_EXTERN; 
-  if(flags & SPEC_EXPORT) sto = STO_EXPORT; 
-
-  n->symbol = make_symbol(p->current_scope, SYMB_FUNC, sto, n->name, NULL);
-
-  enter_scope_new(p, arena_sprintf(&p->arena, "fun_%s", name));
   n->scope = p->current_scope;
 
   n->sig = parse_signature(p);
@@ -981,8 +980,6 @@ static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec
     n->body = body;
   }
 
-  exit_scope(p);
-
   return n;
 }
 
@@ -996,8 +993,6 @@ static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_f
   symb_storage_t sto = global ? STO_GLOBAL : STO_LOCAL;
   if(flags & SPEC_EXTERN) sto = STO_EXTERN; 
   if(flags & SPEC_EXPORT) sto = STO_EXPORT;
-
-  n->symbol = make_symbol(p->current_scope, SYMB_VAR, sto, n->name, NULL);
 
   // TODO:  type inference
   ast_type_t* type = parse_type(p);
@@ -1017,39 +1012,84 @@ static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_f
   return n;
 }
 
-// root: ( ( spec_flag )* ident ':' func_def )* 
-//     | ( ( spec_flag )* ident ':' var_def )*
+static inline ast_impl_t* parse_impl(parser_t* p) {
+  if(!expect(p, TOK_IMPL)) return FALSE;
+  next(p);
+
+  ast_impl_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_IMPL;
+
+  ast_type_t* interface = parse_type(p);
+  if(!interface) return NULL;
+  n->interface = interface;
+
+  if(!expect(p, ':')) return NULL;
+  next(p);
+
+  ast_type_t* type = parse_type(p);
+  if(!type) return NULL;
+  n->type = type;
+
+  if(!expect(p, '{')) return NULL;
+  next(p);
+  
+  while(!tok_is(p, '}')) {
+    if(!expect(p, TOK_IDENT)) return NULL;
+    const char* method_name = get_tok(p).as.s;
+    next(p);
+
+    if(!expect(p, ':')) return NULL;
+    next(p);
+
+    ast_func_def_t* def = parse_func_def(p, method_name, 0);
+
+    da_append(&n->methods, def);
+  }
+
+  if(!expect(p, '}')) return NULL;
+  next(p);
+
+  return n;
+}
+
+// root: ( spec_flags ident ':' func_def )* 
+//     | ( spec_flags ident ':' var_def )*
 //     | ( ident ':' 'impl' ident '{' ( ident ':' func_decl func_def '}' )+ )*
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->source = t->source;
   p->tokens = t->tokens;
   p->current = 0;
 
-  enter_scope_new(p, "root");
-
   ast_root_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_ROOT;
   n->scope = p->current_scope;
 
   while(!tok_is(p, TOK_EOF)) {
-    spec_flags_t flags = parse_specifiers(p);
+    if (tok_is(p, TOK_IMPL)) {
+      ast_impl_t* impl = parse_impl(p);
+      if(!impl) return NULL;
 
-    if(!expect(p, TOK_IDENT)) return NULL;
-    const char* name = get_tok(p).as.s; 
-    next(p);
-    if(!expect(p, ':')) return NULL;
-    next(p);
-
-    if(tok_is(p, '(')) {
-      ast_func_def_t* def = parse_func_def(p, name, flags);
-      if (!def) return NULL;
-
-      da_append(&n->func_defs, def);
+      da_append(&n->impls, impl);
     } else {
-      ast_var_def_t* def = parse_var_def(p, name, flags, true);
-      if (!def) return NULL;
+      spec_flags_t flags = parse_specifiers(p);
 
-      da_append(&n->var_defs, def);
+      if(!expect(p, TOK_IDENT)) return NULL;
+      const char* name = get_tok(p).as.s; 
+      next(p);
+      if(!expect(p, ':')) return NULL;
+      next(p);
+
+      if(tok_is(p, '(')) {
+        ast_func_def_t* def = parse_func_def(p, name, flags);
+        if (!def) return NULL;
+
+        da_append(&n->func_defs, def);
+      } else {
+        ast_var_def_t* def = parse_var_def(p, name, flags, true);
+        if (!def) return NULL;
+
+        da_append(&n->var_defs, def);
+      }
     }
   }
 
@@ -1213,6 +1253,8 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
       fprintf(stream, "%*sRet type:\n", level + 2, "");
       print_ast(stream, (ast_node_t*)sig->ret, level + 2);
       break;
+    case AST_IMPL:
+      TODO("print_ast: AST_IMPL");
     default:
       UNREACHABLE("print_ast %d", n->ast_kind);
   }
@@ -1220,9 +1262,9 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
 
 static inline void print_symbol_table_entries(FILE* stream, scope_t* scope) {
   if(!scope) return;
-  da_foreach(symbol_t, s, &scope->symbols) {
-    fprintf(stream, "%-10s %-10s ", s->name, scope->name);
-    switch(s->storage) {
+  da_foreach(symbol_t*, s, &scope->symbols) {
+    fprintf(stream, "%-10s %-10s ", (*s)->name, scope->name);
+    switch((*s)->storage) {
       case STO_LOCAL:
         fprintf(stream, "%-10s ", "scope"); break;
       case STO_GLOBAL:
@@ -1233,8 +1275,8 @@ static inline void print_symbol_table_entries(FILE* stream, scope_t* scope) {
         fprintf(stream, "%-10s ", "export"); break;
       default: break;
     }
-    fprintf(stream, "0x%08X ", s->addr);
-    print_type(stream, s->type);
+    fprintf(stream, "0x%08X ", (*s)->addr);
+    print_type(stream, (*s)->type);
     fprintf(stream, "\n");
   }
   print_symbol_table_entries(stream, scope->parent);
@@ -1249,7 +1291,7 @@ static inline void print_symbol_table(FILE* stream, scope_t* scope) {
 
 static inline int type_equals(type_t a, type_t b) {
   while (a.kind == TYPE_ALIAS) a = *a.as.alias.target;
-  while (b.kind == TYPE_ALIAS) b = *a.as.alias.target;
+  while (b.kind == TYPE_ALIAS) b = *b.as.alias.target;
 
   if (a.kind != b.kind) return 0;
 
@@ -1269,15 +1311,18 @@ static inline int type_equals(type_t a, type_t b) {
       return 1;
     case TYPE_STRUCT:
     case TYPE_MODULE:
-      // TODO: compare fields
+      TODO("type_equals: compare fields");
       return 1;
     case TYPE_FUNC:
       if (!type_equals(*a.as.func.ret, *b.as.func.ret)) return 0;
       if (a.as.func.params.count != b.as.func.params.count) return 0;
-      for (size_t i=0; i < a.as.func.params.count; i++) {
-        if (!type_equals(*a.as.func.params.items[i], *b.as.func.params.items[i])) return 0;
+      bool same = true;
+      for (size_t i=0; i < a.as.func.params.count && same; i++) {
+        same = type_equals(*a.as.func.params.items[i], *b.as.func.params.items[i]);
       }
-      return 1;
+      return same;
+    case TYPE_INTERFACE:
+      return strcmp(a.name, b.name) == 0;
     case TYPE_ALIAS:
     case TYPES_COUNT:
     default:
@@ -1320,6 +1365,10 @@ static inline void print_type(FILE* stream, const type_t* t) {
       }
       fprintf(stream, ") -> ");
       print_type(stream, t->as.func.ret);
+      break;
+    case TYPE_INTERFACE:
+      fprintf(stream, "interface %s", t->name);
+      break;
     case TYPES_COUNT:
     default: break;
   }
@@ -1336,21 +1385,16 @@ static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* nam
   type->name = name;
   type->size = size;
 
-  type->scope = arena_alloc(&t->arena, sizeof(*type->scope));
-  if (name)
-    type->scope->name = arena_sprintf(&t->arena, "type_%s", name);
-  else
-    // TODO: platform dependent
-    type->scope->name = arena_sprintf(&t->arena, "type_%d", rand());
-  type->scope->parent = t->current_scope;
-
-  if (name)
-    make_symbol(t->current_scope, SYMB_TYPE, STO_LOCAL, name, type);
-
+  if (name) {
+    make_symbol(&t->arena, t->current_scope, SYMB_TYPE, STO_LOCAL, name, type);
+    enter_scope_new(t, arena_sprintf(&t->arena, "type_%s", name));
+    type->scope = t->current_scope;
+    exit_scope(t);
+  }
+  
   return type;
 }
 
-// rename to get_or_create_array_type_of
 static inline type_t* get_or_create_array_of(typechecker_t* t, const type_t* type) {
   // OPTIMIZE
   da_foreach(type_t*, typ, &t->custom_types) {
@@ -1367,16 +1411,14 @@ static inline type_t* get_or_create_array_of(typechecker_t* t, const type_t* typ
 static inline type_t* get_or_create_func_type_from_arr(typechecker_t* t, const type_t* ret_type, size_t n_params, type_t** params) {
   // OPTIMIZE
   da_foreach(type_t*, typ, &t->custom_types) {
-    if ((*typ)->kind == TYPE_FUNC) {
-      if ((*typ)->as.func.params.count != n_params) continue;
-      if (!type_equals(*(*typ)->as.func.ret, *ret_type)) continue;
-      bool same = false;
-      for (size_t i = 0; i < n_params && !same; i++) {
-        same = type_equals(*(*typ)->as.func.params.items[i], *params[i]);
-      }
-      if (same)
-        return *typ;
-    }
+    if ((*typ)->kind != TYPE_FUNC) continue;
+    if ((*typ)->as.func.params.count != n_params) continue;
+    if (!type_equals(*(*typ)->as.func.ret, *ret_type)) continue;
+    bool same = true;
+    for (size_t i = 0; i < n_params && same; i++)
+      same = type_equals(*(*typ)->as.func.params.items[i], *params[i]);
+    if (same)
+      return *typ;
   }
 
   type_t* type = make_type(t, TYPE_FUNC, NULL, 1); // which is the correct size?
@@ -1455,6 +1497,7 @@ static inline num_rank_t get_type_rank(const type_t* t) {
     case TYPE_MODULE:
     case TYPE_ALIAS:
     case TYPE_FUNC:
+    case TYPE_INTERFACE:
     case TYPE_NONE:
     case TYPES_COUNT:
     default:
@@ -1480,11 +1523,56 @@ static inline bool is_numeric(const type_t* t) {
          t->kind == TYPE_ADDR;
 }
 
-i_method_t* find_binop_impl(const type_t* owner, op_kind_t op, const type_t* other) {
-  (void)owner;
-  (void)op;
-  (void)other;
-  TODO("find_binop_impl");
+static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const type_t* other) {
+  const char* interface_name = NULL;
+  const char* method_name = NULL;
+  switch (op) {
+    case OP_PLUS:
+      interface_name = "Add";
+      method_name = "add";
+      break;
+    case OP_MINUS:
+    case OP_MULT:
+    case OP_DIV:
+    case OP_REM:
+    case OP_EQ:
+    case OP_LEQ:
+    case OP_GEQ:
+    case OP_LT:
+    case OP_GT:
+    case OP_CALL:
+    case OP_ASSIGN:
+    case OP_MEMB:
+    case OP_SCOPE:
+    case OP_INVALID:
+    default:
+      UNREACHABLE("find_binop_impl");
+  }
+
+  if (!interface_name || !method_name) return NULL;
+
+  bool implements = false;
+  da_foreach(const char*, impl, &owner->impls) {
+    if (strcmp(*impl, interface_name) == 0) {
+      implements = true;
+      break;
+    }
+  }
+  if (!implements) return NULL;
+
+  symbol_t* method = NULL;
+  da_foreach(symbol_t*, s, &owner->scope->symbols) {
+    if(
+        (*s)->kind == SYMB_FUNC &&
+        strcmp((*s)->name, method_name) == 0 && 
+        (*s)->type->as.func.params.count == 2 &&
+        type_equals(*(*s)->type->as.func.params.items[0], *owner) &&
+        type_equals(*(*s)->type->as.func.params.items[1], *other)
+    )
+      method = *s;
+  }
+
+  return method;
 }
 
 static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
@@ -1497,14 +1585,6 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
       e->type = t->builtins.boolean; 
       return true;
     }
-    // TODO: look for compare interface implementation in left and right
-    fprintf(stderr, "[ERROR] Typechecker\n  Cannot compare expression of type `");
-    print_type(stderr, left);
-    fprintf(stderr, "` with expression of type `");
-    print_type(stderr, right);
-    fprintf(stderr, "`.\n");
-    return false;
-
   } else if (is_op_arithmetic(op)) {
     if (is_numeric(left) && is_numeric(right)) {
       const type_t* try_promotion = find_common_type(left, right);
@@ -1515,39 +1595,40 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
       e->type = try_promotion;
       return true;
     }
-
-    // TODO: is this actually the correct way? 
-    i_method_t* impl = NULL;
-    if      (left->kind  == TYPE_STRUCT) impl = find_binop_impl(left, op, right);
-    else if (right->kind == TYPE_STRUCT) impl = find_binop_impl(right, op, left);
-    if (!impl) {
-      fprintf(stderr, "[ERROR] Typechecker\n  ");
-      print_type(stderr, left);
-      fprintf(stderr, " does not implement interface for `%s` operator and ", tok_kind_str(&t->arena, (tok_kind_t)op));
-      print_type(stderr, right);
-      fprintf(stderr, " operand");
-      fprintf(stderr, "[ERROR] Typechecker\n  ");
-      print_type(stderr, right);
-      fprintf(stderr, " does not implement interface for `%s` operator and ", tok_kind_str(&t->arena, (tok_kind_t)op));
-      print_type(stderr, left);
-      fprintf(stderr, " operand");
-      return false;
-    }
-    e->type = impl->owner;
-    return true;
   }
 
-  // TODO: unhardcode concat/extend operation (impl?)
-  if (op == OP_PLUS && left->kind == TYPE_STR && right->kind == TYPE_STR) {
-    e->type = t->builtins.str;
-    return true;
-  }
-  if (op == OP_PLUS && left->kind == TYPE_ARRAY && type_equals(*left, *right)) {
-    e->type = left;
-    return true;
+  symbol_t* impl = find_binop_impl(left, op, right);
+  if (!impl) {
+    fprintf(stderr, "[ERROR] Typechecker\n  `");
+    print_type(stderr, left);
+    fprintf(stderr, "` does not implement interface method for %s operator and `", tok_kind_str(&t->arena, (tok_kind_t)op));
+    print_type(stderr, right);
+    fprintf(stderr, "` operand\n");
+    return false;
   }
 
-  return false;
+  type_t* ret = impl->type->as.func.ret;
+  if (strcmp(ret->name, "Self") == 0) ret = ret->as.alias.target;
+
+  ast_expr_t* lhs = e->as.binop.lhs;
+  ast_expr_t* rhs = e->as.binop.rhs;
+
+  e->kind = EXPR_FUNCALL;
+  e->as.funcall.args.items = NULL;
+  e->as.funcall.args.count = 0;
+  e->as.funcall.args.capacity = 0;
+  da_append(&e->as.funcall.args, rhs);
+  // crafting a new ast node on separate arena. bad idea?
+  e->as.funcall.callee = arena_alloc(&t->arena, sizeof(ast_expr_t));
+  e->as.funcall.callee->ast_kind = AST_EXPR;
+  e->as.funcall.callee->kind = EXPR_ACCESS;
+  e->as.funcall.callee->as.access.field = impl->name;
+  e->as.funcall.callee->as.access.owner = lhs;
+  e->as.funcall.callee->as.access.op = OP_MEMB;
+
+  e->type = ret;
+
+  return true;
 }
 
 static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
@@ -1555,8 +1636,6 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
   switch(expr->kind) {
     case EXPR_SYMBOL:
       symbol_t* s = resolve_symbol_any(t->current_scope, expr->as.symbol); 
-      // symbol may be already in the symbol table from parsing. to avoid using symbols
-      // declared after this point I need to check that the type is not been resolved yet.
       if (!s || !s->type) {
         fprintf(stderr, "[ERROR] Typechecker\n Undeclared symbol `%s`.\n", expr->as.symbol);
         return false;
@@ -1725,7 +1804,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
       break;
     case STMT_VAR_DEF:
       if(!resolve_type_decl(t, stmt->as.var_def->type)) return false;
-      stmt->as.var_def->symbol->type = stmt->as.var_def->type->resolved_type;
+      stmt->as.var_def->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, stmt->as.var_def->name, stmt->as.var_def->type->resolved_type);
 
       if( stmt->as.var_def->flags & SPEC_EXTERN ) {
         fprintf(stderr, "[ERROR] Typechecker\n  Cannot define an extern local variable.\n");
@@ -1737,11 +1816,11 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
       }
 
       // TODO: type inference
-      da_foreach(symbol_t, symb, &t->current_scope->symbols) {
+      da_foreach(symbol_t*, symb, &t->current_scope->symbols) {
         if (
-            symb != stmt->as.var_def->symbol && 
-            symb->kind == SYMB_VAR &&
-            strcmp(stmt->as.var_def->name, symb->name) == 0
+            *symb != stmt->as.var_def->symbol && 
+            (*symb)->kind == SYMB_VAR &&
+            strcmp(stmt->as.var_def->name, (*symb)->name) == 0
         ) {
           fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope", stmt->as.var_def->name);
           return false;
@@ -1774,18 +1853,18 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         return false;
       }
 
-      t->current_scope = if_else->scope;
+      enter_scope_new(t, arena_sprintf(&t->arena, "%s_if", t->current_scope->name));
       da_foreach(ast_stmt_t*, stmt, &if_else->if_body->stmts) {
         if(!typecheck_stmt(t, *stmt, ret_type)) return false;
       }
-      t->current_scope = t->current_scope->parent;
+      exit_scope(t);
 
       if(if_else->else_body) {
-        t->current_scope = if_else->scope;
+        enter_scope_new(t, arena_sprintf(&t->arena, "%s_else", t->current_scope->name));
         da_foreach(ast_stmt_t*, stmt, &if_else->else_body->stmts) {
           if(!typecheck_stmt(t, *stmt, ret_type)) return false;
         }
-        t->current_scope = t->current_scope->parent;
+        exit_scope(t);
       }
       break;
     default:
@@ -1802,10 +1881,15 @@ static inline bool resolve_func_def(typechecker_t* t, ast_func_def_t* def) {
     size_t capacity;
   } params = { 0 };
 
+  enter_scope_new(t, arena_sprintf(&t->arena, "fun_%s", def->name));
+
   if(!resolve_type_decl(t, def->sig->ret)) return false;
   da_foreach(ast_param_t*, p, &def->sig->params) {
     if(!resolve_type_decl(t, (*p)->type)) return false;
-    (*p)->symbol->type = (*p)->type->resolved_type;
+    symbol_t* param_sym = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, (*p)->name, (*p)->type->resolved_type);
+    param_sym->addr_resolved = true;
+    param_sym->addr = params.count;
+
     da_append(&params, (*p)->type->resolved_type);
   }
 
@@ -1818,13 +1902,58 @@ static inline bool resolve_func_def(typechecker_t* t, ast_func_def_t* def) {
 
   da_append(&t->custom_types, sig_type);
   def->sig->resolved_type = sig_type;
-  def->symbol->type = sig_type;
+
+  symb_storage_t sto = STO_LOCAL;
+  if(def->flags & SPEC_EXTERN) sto = STO_EXTERN; 
+  if(def->flags & SPEC_EXPORT) sto = STO_EXPORT; 
+
+  def->scope = t->current_scope;
+  exit_scope(t);
+
+  def->symbol = make_symbol(&t->arena, t->current_scope, SYMB_FUNC, sto, def->name, def->sig->resolved_type);
 
   return true;
 }
 
-static inline void typechecker_init(typechecker_t* t, ast_root_t* root) {
-  t->current_scope = root->scope;
+static inline bool typecheck_func(typechecker_t* t, ast_func_def_t* func) {
+  if(!func->body && !(func->flags & SPEC_EXTERN)) {
+    fprintf(stderr, "[ERROR] Typechecker\n  Cannot define a non-extern function without a body.\n");
+    return false;
+  }
+  if(func->body && (func->flags & SPEC_EXTERN)) {
+    fprintf(stderr, "[ERROR] Typechecker\n  Cannot define an extern function with a body.\n");
+    return false;
+  }
+
+  da_foreach(symbol_t*, symb, &t->current_scope->symbols) {
+    if (
+        *symb != func->symbol && 
+        (*symb)->kind == SYMB_FUNC &&
+        strcmp(func->name, (*symb)->name) == 0 &&
+        type_equals(*(*symb)->type, *func->sig->resolved_type)
+    ) {
+      fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for function `%s` with type ", func->name);
+      print_type(stderr, func->sig->resolved_type);
+      fprintf(stderr, " in this scope.\n");
+      return false;
+    }
+  }
+  // NOTE: allow shadowing -> do not check in parent scope
+  // TODO: maybe issue shadowing warning?
+
+  if (func->body) {
+    enter_scope(t, func->scope);
+    da_foreach(ast_stmt_t*, stmt, &func->body->stmts) {
+      if(!typecheck_stmt(t, *stmt, func->sig->ret->resolved_type)) return false;
+    }
+    exit_scope(t);
+  }
+
+  return true;
+}
+
+static inline void typechecker_init(typechecker_t* t) {
+  enter_scope_new(t, "root");
 
   // init builtin types
   t->builtins.none      = make_type(t, TYPE_NONE, "none", 0);
@@ -1841,43 +1970,60 @@ static inline void typechecker_init(typechecker_t* t, ast_root_t* root) {
 }
 
 static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
+  root->scope = t->current_scope;
+
   // resolve types and symbols first
   da_foreach(ast_func_def_t*, d, &root->func_defs)
     if(!resolve_func_def(t, *d)) return false;
 
-  da_foreach(ast_func_def_t*, d, &root->func_defs) {
-    if(!(*d)->body && !((*d)->flags & SPEC_EXTERN)) {
-      fprintf(stderr, "[ERROR] Typechecker\n  Cannot define a non-extern function without a body.\n");
-      return false;
-    }
-    if((*d)->body && ((*d)->flags & SPEC_EXTERN)) {
-      fprintf(stderr, "[ERROR] Typechecker\n  Cannot define an extern function with a body.\n");
-      return false;
-    }
+  da_foreach(ast_impl_t*, impl, &root->impls) {
+    if(!resolve_type_decl(t, (*impl)->interface)) return false;
+    if(!resolve_type_decl(t, (*impl)->type)) return false;
 
-    da_foreach(symbol_t, symb, &t->current_scope->symbols) {
-      if (
-          symb != (*d)->symbol && 
-          symb->kind == SYMB_FUNC &&
-          strcmp((*d)->name, symb->name) == 0 &&
-          type_equals(*symb->type, *(*d)->sig->resolved_type)
+    type_t* type = (*impl)->type->resolved_type;
+
+    enter_scope(t, type->scope);
+    
+    type_t* self = make_type(t, TYPE_ALIAS, "Self", 0);
+    self->as.alias.target = type;
+    self->scope = type->scope;
+
+    da_foreach(ast_func_def_t*, method, &(*impl)->methods) {
+      bool found = false;
+      da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
+        if(strcmp(m->name, (*method)->name) == 0) { found = true; break;}
+      }
+      if(!found) {
+        fprintf(stderr, "[ERROR] Typechecker\n  Undeclared method `%s` in `%s` interface.\n", (*method)->name, (*impl)->interface->name);
+        return false;
+      }
+      if(!resolve_func_def(t, *method)) return false;
+
+      if(
+          (*method)->symbol->type->as.func.params.count < 1 || 
+          !type_equals(*(*method)->symbol->type->as.func.params.items[0], *self)
       ) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for function `%s` with type ", (*d)->name);
-        print_type(stderr, (*d)->sig->resolved_type);
-        fprintf(stderr, " in this scope.\n");
+        fprintf(stderr, "[ERROR] Typechecker\n  Method `%s` requires `Self` first argument.\n", (*method)->name);
         return false;
       }
     }
-    // NOTE: allow shadowing -> do not check in parent scope
-    // TODO: maybe issue shadowing warning?
+    da_foreach(ast_func_def_t*, method, &(*impl)->methods)
+      if(!typecheck_func(t, *method)) return false;
+    exit_scope(t);
 
-    if ((*d)->body) {
-      t->current_scope = (*d)->scope;
-      da_foreach(ast_stmt_t*, stmt, &(*d)->body->stmts) {
-        if(!typecheck_stmt(t, *stmt, (*d)->sig->ret->resolved_type)) return false;
+    da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
+      symbol_t* s = resolve_symbol_local(type->scope, m->name, SYMB_FUNC);
+      if(!s) {
+        fprintf(stderr, "[ERROR] Typechecker\n  Missing required method `%s` in `%s` interface implementation.\n", m->name, (*impl)->interface->name);
+        return false;
       }
-      t->current_scope = t->current_scope->parent;
     }
+
+    da_append(&type->impls, (*impl)->interface->name);
+  }
+
+  da_foreach(ast_func_def_t*, d, &root->func_defs) {
+    if(!typecheck_func(t, *d)) return false;
   }
 
   da_foreach(ast_var_def_t*, d, &root->var_defs) {
@@ -1890,11 +2036,11 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       return false;
     }
 
-    da_foreach(symbol_t, symb, &t->current_scope->symbols) {
+    da_foreach(symbol_t*, symb, &t->current_scope->symbols) {
       if (
-          symb != (*d)->symbol && 
-          symb->kind == SYMB_VAR &&
-          strcmp((*d)->name, symb->name) == 0
+          *symb != (*d)->symbol && 
+          (*symb)->kind == SYMB_VAR &&
+          strcmp((*d)->name, (*symb)->name) == 0
       ) {
         fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope.\n", (*d)->name);
         return false;
@@ -2146,22 +2292,23 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
 
 static inline ffi_type* type_to_ffi_type(type_t t) {
   switch(t.kind) {
-    case TYPE_NONE:   return &ffi_type_void;
-    case TYPE_I32:    return &ffi_type_sint32;
-    case TYPE_I64:    return &ffi_type_sint64;
-    case TYPE_U32:    return &ffi_type_uint32;
-    case TYPE_U64:    return &ffi_type_uint64;
-    case TYPE_F32:    return &ffi_type_float;
-    case TYPE_F64:    return &ffi_type_double;
-    case TYPE_CHAR:   return &ffi_type_uchar;
-    case TYPE_BOOL:   return &ffi_type_uint8;
-    case TYPE_STR:    return &ffi_type_uint32; // handle
-    case TYPE_ADDR:   return &ffi_type_pointer;
-    case TYPE_ARRAY:  return &ffi_type_uint32; // handle
-    case TYPE_STRUCT: return &ffi_type_uint32; // handle
-    case TYPE_MODULE: return NULL;
-    case TYPE_ALIAS:  return type_to_ffi_type(*t.as.alias.target);
-    case TYPE_FUNC:   return &ffi_type_pointer; 
+    case TYPE_NONE:      return &ffi_type_void;
+    case TYPE_I32:       return &ffi_type_sint32;
+    case TYPE_U32:       return &ffi_type_uint32;
+    case TYPE_I64:       return &ffi_type_sint64;
+    case TYPE_U64:       return &ffi_type_uint64;
+    case TYPE_F32:       return &ffi_type_float;
+    case TYPE_F64:       return &ffi_type_double;
+    case TYPE_CHAR:      return &ffi_type_uchar;
+    case TYPE_BOOL:      return &ffi_type_uint8;
+    case TYPE_STR:       return &ffi_type_uint32; // handle
+    case TYPE_ADDR:      return &ffi_type_pointer;
+    case TYPE_ARRAY:     return &ffi_type_uint32; // handle
+    case TYPE_STRUCT:    return &ffi_type_uint32; // handle
+    case TYPE_MODULE:    return NULL;
+    case TYPE_INTERFACE: return NULL;
+    case TYPE_ALIAS:     return type_to_ffi_type(*t.as.alias.target);
+    case TYPE_FUNC:      return &ffi_type_pointer; 
     case TYPES_COUNT:
     default:
       UNREACHABLE("type_to_ffi_type - Invalid type");
@@ -2248,6 +2395,11 @@ static inline int codegen(program_t* p, ast_root_t* root) {
     }
     da_append(&p->globals, val);
   }
+  da_foreach(ast_impl_t*, impl, &root->impls) {
+    da_foreach(ast_func_def_t*, d, &(*impl)->methods) {
+      if(!codegen_func_def(p, *d)) return false;
+    }
+  }
 
   // patch addresses
   da_foreach(struct _patch, patch, &p->patches) {
@@ -2305,9 +2457,9 @@ static inline void print_data(FILE* stream, constant_t c) {
 
 static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
   for (size_t i = 0; i < p->code.count; i++) {
-    da_foreach(symbol_t, s, &root->symbols) {
-      if(i == s->addr && s->kind == SYMB_FUNC && s->storage != STO_EXTERN)
-        fprintf(stream, "function <%s>:\n", s->name);
+    da_foreach(symbol_t*, s, &root->symbols) {
+      if(i == (*s)->addr && (*s)->kind == SYMB_FUNC && (*s)->storage != STO_EXTERN)
+        fprintf(stream, "function <%s>:\n", (*s)->name);
     }
     fprintf(stream, "  0x%08" PRIx64, i);
     switch(p->code.items[i]) {
@@ -2353,10 +2505,10 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
       case INST_CALL: {
         uint32_t op = p->code.items[++i];
         fprintf(stream, "  %-10s 0x%08X        ", "CALL", op);
-        da_foreach(symbol_t, s, &root->symbols) {
-          if(op == s->addr && s->kind == SYMB_FUNC && s->storage != STO_EXTERN) {
+        da_foreach(symbol_t*, s, &root->symbols) {
+          if(op == (*s)->addr && (*s)->kind == SYMB_FUNC && (*s)->storage != STO_EXTERN) {
             fprintf(stream, "    ->    ");
-            fprintf(stream, "<%s>", s->name);
+            fprintf(stream, "<%s>", (*s)->name);
           }
           break;
         }
@@ -2366,10 +2518,10 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
       case INST_HOSTCALL: {
         uint32_t op = p->code.items[++i];
         fprintf(stream, "  %-10s 0x%08X        ", "HOSTCALL", op);
-        da_foreach(symbol_t, s, &root->symbols) {
-          if(op == s->addr && s->kind == SYMB_FUNC && s->storage == STO_EXTERN) {
+        da_foreach(symbol_t*, s, &root->symbols) {
+          if(op == (*s)->addr && (*s)->kind == SYMB_FUNC && (*s)->storage == STO_EXTERN) {
             fprintf(stream, "    ->    ");
-            fprintf(stream, "<extern::%s>", s->name);
+            fprintf(stream, "<extern::%s>", (*s)->name);
           }
           break;
         }
@@ -2425,26 +2577,19 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
   }
 }
 
-static inline interface_t* make_interface(typechecker_t* t, const char* name) {
-  interface_t* interface = arena_alloc(&t->arena, sizeof(*interface));
-  interface->name = arena_strdup(&t->arena, name);
-
-  return interface;
+static inline void add_method_to_interface(type_t* interface, interface_method_t method) {
+  da_append(&interface->as.interface.methods, method);
 }
 
-static inline void add_method_to_interface(interface_t* interface, interface_method_t method) {
-  da_append(&interface->methods, method);
-}
-
-static inline interface_t* make_interface_with_methods(typechecker_t* t, const char* name, size_t n_methods, ...) {
+static inline type_t* make_interface_with_methods(typechecker_t* t, const char* name, size_t n_methods, ...) {
   va_list args;
 
-  interface_t* interface = make_interface(t, name);
+  type_t* interface = make_type(t, TYPE_INTERFACE, name, 0);
 
   va_start(args, n_methods);
 
   for(size_t i=0; i<n_methods; i++) {
-    da_append(&interface->methods, va_arg(args, interface_method_t));
+    da_append(&interface->as.interface.methods, va_arg(args, interface_method_t));
   }
 
   va_end(args);
@@ -2458,9 +2603,10 @@ static inline type_t* method_owner(symbol_t* s) {
 
 static inline bool builtin_methods_init(program_t* p, typechecker_t* t) {
   symbol_t* bms[] = {
-    make_method(t->builtins.str, "c_str", get_or_create_func_type_of(t, t->builtins.addr, 1, t->builtins.str), STO_EXTERN),
-    make_method(t->builtins.str, "length", get_or_create_func_type_of(t, t->builtins.i32, 1, t->builtins.str), STO_EXTERN),
-    make_method(t->builtins.str, "concat", get_or_create_func_type_of(t, t->builtins.str, 2, t->builtins.str, t->builtins.str), STO_EXTERN),
+    make_method(&t->arena, t->builtins.str, "c_str", get_or_create_func_type_of(t, t->builtins.addr, 1, t->builtins.str), STO_EXTERN),
+    make_method(&t->arena, t->builtins.str, "length", get_or_create_func_type_of(t, t->builtins.i32, 1, t->builtins.str), STO_EXTERN),
+    make_method(&t->arena, t->builtins.str, "concat", get_or_create_func_type_of(t, t->builtins.str, 2, t->builtins.str, t->builtins.str), STO_EXTERN),
+    make_method(&t->arena, t->builtins.i32, "str", get_or_create_func_type_of(t, t->builtins.str, 1, t->builtins.i32), STO_EXTERN),
   };
   for (size_t j=0; j < sizeof(bms)/sizeof(*bms); j++) {
     if(!bms[j]) continue;
@@ -2500,13 +2646,7 @@ static inline bool builtin_methods_init(program_t* p, typechecker_t* t) {
 }
 
 static inline bool builtin_interfaces_init(typechecker_t* t) {
-  interface_t* ifs[] = {
-    make_interface_with_methods(t, "add_i", 1, (interface_method_t){ "add", get_or_create_func_type_of(t, t->builtins.str, 1, t->builtins.str) }),
-  };
-
-  for(size_t i=0; i<sizeof(ifs)/sizeof(*ifs); i++) {
-    da_append(&t->interfaces, ifs[i]);
-  }
+  make_interface_with_methods(t, "Add", 1, (interface_method_t){ "add", get_or_create_func_type_of(t, t->builtins.str, 1, t->builtins.str) });
 
   return true;
 }
@@ -2521,6 +2661,7 @@ bool compile(program_t* program, const char* source) {
   printf("%s\n\n", source);
 
   if(tok_tokenize(&tok)) return false;
+  fprintf(stdout, "[DEBUG] Tokenization OK.\n");
 
   // da_foreach(token_t, t, &tok.tokens) {
   //   tok_print(*t);
@@ -2528,15 +2669,18 @@ bool compile(program_t* program, const char* source) {
 
   ast_root_t* root = parse(&parser, &tok);
   if(!root) return false;
+  fprintf(stdout, "[DEBUG] Parsing OK.\n");
 
   // print_ast(stdout, (ast_node_t*)root, 0);
 
-  typechecker_init(&tc, root);
+  typechecker_init(&tc);
   if(!builtin_methods_init(program, &tc)) return false;
   if(!builtin_interfaces_init(&tc)) return false;
   if(!typecheck(&tc, root)) return false;
+  fprintf(stdout, "[DEBUG] Typechecker OK.\n");
 
   if(!codegen(program, root)) return false;
+  fprintf(stdout, "[DEBUG] Codegen OK.\n");
 
   // print_symbol_table(stdout, root->scope);
 

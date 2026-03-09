@@ -29,7 +29,8 @@ typedef enum {
   TOK_EXPORT,
   TOK_CONST,
   TOK_IF,
-  TOK_ELSE
+  TOK_ELSE,
+  TOK_IMPL,
 } tok_kind_t;
 
 typedef enum {
@@ -39,6 +40,7 @@ typedef enum {
   KW_CONST  = TOK_CONST,
   KW_IF     = TOK_IF,
   KW_ELSE   = TOK_ELSE,
+  KW_IMPL   = TOK_IMPL,
 } kw_kind_t;
 
 typedef enum {
@@ -102,6 +104,7 @@ typedef enum {
   AST_BODY,
   AST_PARAM,
   AST_SIG,
+  AST_IMPL,
 } ast_node_kind_t;
 
 #define AST_DEFAULT_FIELDS\
@@ -148,7 +151,7 @@ struct _scope {
   // TODO: OPTIMIZE
   // transform into hashmap
   struct {
-    symbol_t* items;
+    symbol_t** items;
     size_t count;
     size_t capacity;
   } symbols;
@@ -201,6 +204,18 @@ typedef struct {
   ast_type_t* type;
   ast_expr_t* init;
 } ast_var_def_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  scope_t* scope;
+  ast_type_t* type;
+  ast_type_t* interface;
+  struct {
+    ast_func_def_t** items;
+    size_t count;
+    size_t capacity;
+  } methods;
+} ast_impl_t;
 
 typedef enum {
   OP_INVALID = TOK_EOF,
@@ -334,6 +349,11 @@ typedef struct {
     size_t count;
     size_t capacity;
   } var_defs;
+  struct {
+    ast_impl_t** items;
+    size_t count;
+    size_t capacity;
+  } impls;
   scope_t* scope;
 } ast_root_t;
 
@@ -365,12 +385,17 @@ typedef enum {
   TYPE_ALIAS,
 
   TYPE_FUNC,
+  TYPE_INTERFACE,
 
   TYPES_COUNT,
 } type_kind_t;
 
 typedef struct _method method_t;
-typedef struct _interface interface_t;
+
+typedef struct {
+  const char* name;
+  const type_t* type;
+} interface_method_t;
 
 struct _type {
   const char* name;
@@ -396,10 +421,18 @@ struct _type {
     struct {
       struct _type* target;
     } alias; 
+    struct {
+      const char* name;
+      struct _i_methods {
+        interface_method_t* items;
+        size_t count;
+        size_t capacity;
+      } methods;
+    } interface;
   } as;
   scope_t* scope;
   struct {
-    interface_t** items;
+    const char** items;
     size_t count;
     size_t capacity;
   } impls;
@@ -410,20 +443,6 @@ struct _method {
   const char* name;
   const type_t* type;
   uint32_t addr;
-};
-
-typedef struct {
-  const char* name;
-  const type_t* type;
-} interface_method_t;
-
-struct _interface {
-  const char* name;
-  struct _i_methods {
-    interface_method_t* items;
-    size_t count;
-    size_t capacity;
-  } methods;
 };
 
 typedef struct {
@@ -448,11 +467,6 @@ typedef struct {
     type_t const* addr;
   } builtins;
   scope_t* current_scope;
-  struct {
-    interface_t** items;
-    size_t count;
-    size_t capacity;
-  } interfaces;
 } typechecker_t;
 
 typedef enum {

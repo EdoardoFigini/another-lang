@@ -57,6 +57,18 @@ EXPORT obj_handle_t str__concat(vm_t* vm, obj_handle_t self, obj_handle_t other)
   return vm->active_task->obj_pool.count - 1;
 }
 
+EXPORT obj_handle_t i32__str(vm_t* vm, int32_t self) {
+  obj_t* o = malloc(sizeof(*o));
+  o->kind = OBJ_STR;
+  o->as.str.data = arena_sprintf(&vm->active_task->arena, "%d", self);
+  o->as.str.size = strlen(o->as.str.data);
+  o->refs = 1;
+
+  da_append(&vm->active_task->obj_pool, o);
+
+  return vm->active_task->obj_pool.count - 1;
+}
+
 //////////////////////////////
 
 static inline bool is_ffi_arg_32(ffi_type* t) {
@@ -234,14 +246,14 @@ vm_exitcode_t exec(vm_t* vm) {
         vm->ip += 2;
       break;
     case INST_CALL:
-      // TODO: how do I handle refernces and output arguments?
       operand = *(++vm->ip);
       if (vm->active_task->call_stack.depth >= MAX_CALL_STACK) return VM_CALL_STACK_OVERFLOW;
       vm->active_task->call_stack.frames[vm->active_task->call_stack.depth++] = malloc(sizeof(virtual_frame_t));
-      CURR_FRAME(vm)->ret_addr = vm->ip;
+      CURR_FRAME(vm)->ret_addr = vm->ip + 1;
       vm->ip = vm->active_task->code + operand;
       break;
     case INST_HOSTCALL: {
+      // TODO: how do I handle refernces and output arguments?
       operand = *(++vm->ip);
       uint64_t retval = 0; 
       if (operand >= vm->active_task->externs.count) return VM_UNDEFINED_EXTERN;

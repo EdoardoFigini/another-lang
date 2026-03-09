@@ -56,9 +56,21 @@ const char* source =
 const char* source = 
  "extern print: (s: addr) -> i32;\n"
  "\n"
+ // "Add: interface {\n"
+ // "  add: (self: Self, other: Self) -> Self;\n"
+ // "}\n"
+ "\n"
  "main: () -> none {\n"
- "  world: str = \"World!\";\n"
- "  print(\"Hello\".concat(\" \").concat(world).c_str());\n"
+ "  world: str = \"World\";\n"
+ "  space: str;\n"
+ "  space = \" \";\n"
+ "  print((\"Hello\" + space + world + (67).str() + \"!\").c_str());\n"
+ "}\n"
+ "\n"
+ "impl Add: str {\n"
+ "  add: (self: Self, other: Self) -> Self {\n"
+ "    return self.concat(other);\n"
+ "  }\n"
  "}\n"
  ;
 
