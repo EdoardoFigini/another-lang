@@ -31,16 +31,18 @@ typedef enum {
   TOK_IF,
   TOK_ELSE,
   TOK_IMPL,
+  TOK_INTERFACE,
 } tok_kind_t;
 
 typedef enum {
-  KW_RETURN = TOK_RETURN,
-  KW_EXTERN = TOK_EXTERN,
-  KW_EXPORT = TOK_EXPORT,
-  KW_CONST  = TOK_CONST,
-  KW_IF     = TOK_IF,
-  KW_ELSE   = TOK_ELSE,
-  KW_IMPL   = TOK_IMPL,
+  KW_RETURN    = TOK_RETURN,
+  KW_EXTERN    = TOK_EXTERN,
+  KW_EXPORT    = TOK_EXPORT,
+  KW_CONST     = TOK_CONST,
+  KW_IF        = TOK_IF,
+  KW_ELSE      = TOK_ELSE,
+  KW_IMPL      = TOK_IMPL,
+  KW_INTERFACE = TOK_INTERFACE,
 } kw_kind_t;
 
 typedef enum {
@@ -105,6 +107,7 @@ typedef enum {
   AST_PARAM,
   AST_SIG,
   AST_IMPL,
+  AST_IFACE,
 } ast_node_kind_t;
 
 #define AST_DEFAULT_FIELDS\
@@ -216,6 +219,16 @@ typedef struct {
     size_t capacity;
   } methods;
 } ast_impl_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  const char* name;
+  struct {
+    ast_func_def_t** items;
+    size_t count;
+    size_t capacity;
+  } methods;
+} ast_iface_t;
 
 typedef enum {
   OP_INVALID = TOK_EOF,
@@ -354,6 +367,11 @@ typedef struct {
     size_t count;
     size_t capacity;
   } impls;
+  struct {
+    ast_iface_t** items;
+    size_t count;
+    size_t capacity;
+  } interfaces;
   scope_t* scope;
 } ast_root_t;
 

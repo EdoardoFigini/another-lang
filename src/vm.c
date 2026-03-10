@@ -29,6 +29,10 @@ EXPORT int print(const char* s) {
   return puts(s);
 }
 
+EXPORT int str_cmp(const char* a, const char* b) {
+  return strcmp(a, b);
+}
+
 // BUILTIN METHODS
 
 EXPORT const char* str__c_str(vm_t* vm, obj_handle_t self) {
@@ -57,7 +61,7 @@ EXPORT obj_handle_t str__concat(vm_t* vm, obj_handle_t self, obj_handle_t other)
   return vm->active_task->obj_pool.count - 1;
 }
 
-EXPORT obj_handle_t i32__str(vm_t* vm, int32_t self) {
+EXPORT obj_handle_t i32__to_str(vm_t* vm, int32_t self) {
   obj_t* o = malloc(sizeof(*o));
   o->kind = OBJ_STR;
   o->as.str.data = arena_sprintf(&vm->active_task->arena, "%d", self);
@@ -424,12 +428,12 @@ vm_exitcode_t run(vm_t* vm, size_t n_args, ...) {
   va_end(args);
 
   vm_exitcode_t ec = VM_NEXT;
-  __dbg_print_stack(stdout, vm);
+  // __dbg_print_stack(stdout, vm);
   while(!vm->halt) {
     // fprintf(stdout, "%p (0x%08lX) %d\n", vm->ip, (vm->ip - active->code), *vm->ip);
     ec = exec(vm);
     if (ec != VM_NEXT) break; 
-    __dbg_print_stack(stdout, vm);
+    // __dbg_print_stack(stdout, vm);
   }
 
   // TODO: release resources

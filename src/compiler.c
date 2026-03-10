@@ -18,13 +18,14 @@
 #include "vm.h"
 
 const char* tok_keywords[] = {
-  [KW_RETURN] = "return",
-  [KW_EXTERN] = "extern",
-  [KW_EXPORT] = "export",
-  [KW_CONST]  = "const",
-  [KW_IF]     = "if",
-  [KW_ELSE]   = "else",
-  [KW_IMPL]   = "impl",
+  [KW_RETURN]    = "return",
+  [KW_EXTERN]    = "extern",
+  [KW_EXPORT]    = "export",
+  [KW_CONST]     = "const",
+  [KW_IF]        = "if",
+  [KW_ELSE]      = "else",
+  [KW_IMPL]      = "impl",
+  [KW_INTERFACE] = "interface",
 };
 
 void tok_print(token_t tok) {
@@ -49,6 +50,7 @@ void tok_print(token_t tok) {
       case TOK_IF: printf("%-20s", "TOK_IF"); break;
       case TOK_ELSE: printf("%-20s", "TOK_ELSE"); break;
       case TOK_IMPL: printf("%-20s", "TOK_IMPL"); break;
+      case TOK_INTERFACE: printf("%-20s", "TOK_INTERFACE"); break;
       default: printf("%-20s", "<INVALID TOKEN>"); break;
     }
   }
@@ -76,6 +78,7 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_IF:
       case TOK_ELSE:
       case TOK_IMPL:
+      case TOK_INTERFACE:
         return tok_keywords[k];
       default: return "<INVALID TOKEN>";
     }
@@ -509,6 +512,7 @@ static inline bool tok_is_specifier(parser_t* p) {
     case KW_IF:
     case KW_ELSE:
     case KW_IMPL:
+    case KW_INTERFACE:
     default: 
       return false;
   }
@@ -531,6 +535,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
       case KW_IF:
       case KW_ELSE:
       case KW_IMPL:
+      case KW_INTERFACE:
       default: return flags;
     }
 
@@ -813,6 +818,7 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     next(p);
     n->kind = STMT_IF;
 
+    // TODO: remove need for parenthesis
     if(!expect(p, '(')) return NULL;
     next(p);
     ast_expr_t* expr = parse_expr(p, 0);
@@ -1034,6 +1040,8 @@ static inline ast_impl_t* parse_impl(parser_t* p) {
   next(p);
   
   while(!tok_is(p, '}')) {
+    spec_flags_t flags = parse_specifiers(p);
+
     if(!expect(p, TOK_IDENT)) return NULL;
     const char* method_name = get_tok(p).as.s;
     next(p);
@@ -1041,7 +1049,39 @@ static inline ast_impl_t* parse_impl(parser_t* p) {
     if(!expect(p, ':')) return NULL;
     next(p);
 
-    ast_func_def_t* def = parse_func_def(p, method_name, 0);
+    ast_func_def_t* def = parse_func_def(p, method_name, flags);
+
+    da_append(&n->methods, def);
+  }
+
+  if(!expect(p, '}')) return NULL;
+  next(p);
+
+  return n;
+}
+
+static inline ast_iface_t* parse_iface(parser_t* p, const char* name) {
+  if(!expect(p, TOK_INTERFACE)) return NULL;
+  next(p);
+
+  ast_iface_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_IFACE;
+  n->name = arena_strdup(&p->arena, name);
+
+  if(!expect(p, '{')) return NULL;
+  next(p);
+
+  while(!tok_is(p, '}')) {
+    spec_flags_t flags = parse_specifiers(p);
+
+    if(!expect(p, TOK_IDENT)) return NULL;
+    const char* method_name = get_tok(p).as.s;
+    next(p);
+
+    if(!expect(p, ':')) return NULL;
+    next(p);
+
+    ast_func_def_t* def = parse_func_def(p, method_name, flags);
 
     da_append(&n->methods, def);
   }
@@ -1084,6 +1124,11 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
         if (!def) return NULL;
 
         da_append(&n->func_defs, def);
+      } else if (tok_is(p, TOK_INTERFACE)) {
+        ast_iface_t* interface = parse_iface(p, name);
+        if(!interface) return NULL;
+
+        da_append(&n->interfaces, interface);
       } else {
         ast_var_def_t* def = parse_var_def(p, name, flags, true);
         if (!def) return NULL;
@@ -1402,7 +1447,7 @@ static inline type_t* get_or_create_array_of(typechecker_t* t, const type_t* typ
   }
 
   type_t* typ = make_type(t, TYPE_ARRAY, NULL, 1);
-  type_equals(*typ->as.array.inner, *(type_t*)type);
+  typ->as.array.inner = (type_t*)type;
   da_append(&t->custom_types, typ);
   
   return typ; 
@@ -1425,6 +1470,7 @@ static inline type_t* get_or_create_func_type_from_arr(typechecker_t* t, const t
   for(size_t i=0; i < n_params; i++)
     da_append(&type->as.func.params, params[i]);
   type->as.func.ret = (type_t*)ret_type;
+  da_append(&t->custom_types, type);
 
   return type;
 }
@@ -1854,6 +1900,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
       }
 
       enter_scope_new(t, arena_sprintf(&t->arena, "%s_if", t->current_scope->name));
+      if_else->scope = t->current_scope;
       da_foreach(ast_stmt_t*, stmt, &if_else->if_body->stmts) {
         if(!typecheck_stmt(t, *stmt, ret_type)) return false;
       }
@@ -1861,6 +1908,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
 
       if(if_else->else_body) {
         enter_scope_new(t, arena_sprintf(&t->arena, "%s_else", t->current_scope->name));
+        if_else->scope = t->current_scope;
         da_foreach(ast_stmt_t*, stmt, &if_else->else_body->stmts) {
           if(!typecheck_stmt(t, *stmt, ret_type)) return false;
         }
@@ -1900,7 +1948,6 @@ static inline bool resolve_func_def(typechecker_t* t, ast_func_def_t* def) {
     params.items
   );
 
-  da_append(&t->custom_types, sig_type);
   def->sig->resolved_type = sig_type;
 
   symb_storage_t sto = STO_LOCAL;
@@ -1976,8 +2023,33 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   da_foreach(ast_func_def_t*, d, &root->func_defs)
     if(!resolve_func_def(t, *d)) return false;
 
+  da_foreach(ast_iface_t*, iface, &root->interfaces) {
+    type_t* self = make_type(t, TYPE_ALIAS, "Self", 0);
+    self->as.alias.target = (type_t*)t->builtins.none;
+
+    type_t* type = make_type(t, TYPE_INTERFACE, (*iface)->name, 0);
+
+    enter_scope(t, type->scope);
+    da_foreach(ast_func_def_t*, def, &(*iface)->methods) {
+      if(!resolve_func_def(t, *def)) return false;
+
+      if((*def)->body) {
+        fprintf(stderr, "[ERROR] Typechecker\n  Cannot define method `%s` with body in `%s` interface.\n", (*def)->name, (*iface)->name);
+        return false;
+      }
+
+      if((*def)->flags) {
+        fprintf(stderr, "[WARNING] Typechecker\n  Specifiers for method `%s` in `%s` interface will be ignored.\n", (*def)->name, (*iface)->name);
+      }
+
+      da_append(&type->as.interface.methods, ((interface_method_t){ .name = (*def)->name, .type = (*def)->sig->resolved_type }));
+    }
+    exit_scope(t);
+  }
+
   da_foreach(ast_impl_t*, impl, &root->impls) {
-    if(!resolve_type_decl(t, (*impl)->interface)) return false;
+    bool impl_self = strcmp((*impl)->interface->name, "Self") == 0;
+    if(!impl_self && !resolve_type_decl(t, (*impl)->interface)) return false;
     if(!resolve_type_decl(t, (*impl)->type)) return false;
 
     type_t* type = (*impl)->type->resolved_type;
@@ -1989,13 +2061,15 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     self->scope = type->scope;
 
     da_foreach(ast_func_def_t*, method, &(*impl)->methods) {
-      bool found = false;
-      da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
-        if(strcmp(m->name, (*method)->name) == 0) { found = true; break;}
-      }
-      if(!found) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Undeclared method `%s` in `%s` interface.\n", (*method)->name, (*impl)->interface->name);
-        return false;
+      if(!impl_self) {
+        bool found = false;
+        da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
+          if(strcmp(m->name, (*method)->name) == 0) { found = true; break;}
+        }
+        if(!found) {
+          fprintf(stderr, "[ERROR] Typechecker\n  Undeclared method `%s` in `%s` interface.\n", (*method)->name, (*impl)->interface->name);
+          return false;
+        }
       }
       if(!resolve_func_def(t, *method)) return false;
 
@@ -2011,15 +2085,17 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       if(!typecheck_func(t, *method)) return false;
     exit_scope(t);
 
-    da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
-      symbol_t* s = resolve_symbol_local(type->scope, m->name, SYMB_FUNC);
-      if(!s) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Missing required method `%s` in `%s` interface implementation.\n", m->name, (*impl)->interface->name);
-        return false;
+    if (!impl_self) {
+      da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
+        // TODO: compare types, not just name
+        symbol_t* s = resolve_symbol_local(type->scope, m->name, SYMB_FUNC);
+        if(!s) {
+          fprintf(stderr, "[ERROR] Typechecker\n  Missing required method `%s` in `%s` interface implementation.\n", m->name, (*impl)->interface->name);
+          return false;
+        }
       }
+      da_append(&type->impls, (*impl)->interface->name);
     }
-
-    da_append(&type->impls, (*impl)->interface->name);
   }
 
   da_foreach(ast_func_def_t*, d, &root->func_defs) {
@@ -2171,7 +2247,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           // TODO: resolve symbol once in typechecker
           symbol = resolve_symbol(scope, callee->as.symbol, SYMB_FUNC);
           if (!symbol) {
-            fprintf(stderr, "[ERROR] Codegen\n No function `%s` in current scope.\n", e->as.symbol);
+            fprintf(stderr, "[ERROR] Codegen\n No function `%s` in current scope.\n", callee->as.symbol);
             return false;
           }
         } else if (callee->kind == EXPR_ACCESS) {
@@ -2601,12 +2677,17 @@ static inline type_t* method_owner(symbol_t* s) {
   return (*s->type->as.func.params.items);
 }
 
+// impl Self: str {
+//   extern c_str:  (self: Self) -> addr;
+//   extern length: (self: Self) -> i32;
+//   extern concat: (self: Self, other: Self) -> Self;
+// }
 static inline bool builtin_methods_init(program_t* p, typechecker_t* t) {
   symbol_t* bms[] = {
     make_method(&t->arena, t->builtins.str, "c_str", get_or_create_func_type_of(t, t->builtins.addr, 1, t->builtins.str), STO_EXTERN),
     make_method(&t->arena, t->builtins.str, "length", get_or_create_func_type_of(t, t->builtins.i32, 1, t->builtins.str), STO_EXTERN),
     make_method(&t->arena, t->builtins.str, "concat", get_or_create_func_type_of(t, t->builtins.str, 2, t->builtins.str, t->builtins.str), STO_EXTERN),
-    make_method(&t->arena, t->builtins.i32, "str", get_or_create_func_type_of(t, t->builtins.str, 1, t->builtins.i32), STO_EXTERN),
+    make_method(&t->arena, t->builtins.i32, "to_str", get_or_create_func_type_of(t, t->builtins.str, 1, t->builtins.i32), STO_EXTERN),
   };
   for (size_t j=0; j < sizeof(bms)/sizeof(*bms); j++) {
     if(!bms[j]) continue;
@@ -2645,12 +2726,6 @@ static inline bool builtin_methods_init(program_t* p, typechecker_t* t) {
   return true;
 }
 
-static inline bool builtin_interfaces_init(typechecker_t* t) {
-  make_interface_with_methods(t, "Add", 1, (interface_method_t){ "add", get_or_create_func_type_of(t, t->builtins.str, 1, t->builtins.str) });
-
-  return true;
-}
-
 bool compile(program_t* program, const char* source) {
   tokenizer_t tok = { 0 };
   sb_append(&tok.source, source);
@@ -2674,8 +2749,8 @@ bool compile(program_t* program, const char* source) {
   // print_ast(stdout, (ast_node_t*)root, 0);
 
   typechecker_init(&tc);
+  // TODO: move all "builtin" stuff to core library (always imported), do not hardcode in compiler
   if(!builtin_methods_init(program, &tc)) return false;
-  if(!builtin_interfaces_init(&tc)) return false;
   if(!typecheck(&tc, root)) return false;
   fprintf(stdout, "[DEBUG] Typechecker OK.\n");
 
