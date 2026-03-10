@@ -818,16 +818,11 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     next(p);
     n->kind = STMT_IF;
 
-    // TODO: remove need for parenthesis
-    if(!expect(p, '(')) return NULL;
-    next(p);
     ast_expr_t* expr = parse_expr(p, 0);
     if(!expr) return NULL;
     n->as.if_else.cond = expr;
-    if(!expect(p, ')')) return NULL;
-    next(p);
 
-    n->as.if_else.scope = p->current_scope;
+    n->as.if_else.if_scope = p->current_scope;
     ast_body_t* if_body = parse_body(p);
     n->as.if_else.if_body = if_body;
 
@@ -835,7 +830,7 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
       if(!expect(p, TOK_ELSE)) return NULL;
       next(p);
 
-      n->as.if_else.scope = p->current_scope;
+      n->as.if_else.else_scope = p->current_scope;
       ast_body_t* else_body = parse_body(p);
       n->as.if_else.else_body = else_body;
     }
@@ -1900,7 +1895,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
       }
 
       enter_scope_new(t, arena_sprintf(&t->arena, "%s_if", t->current_scope->name));
-      if_else->scope = t->current_scope;
+      if_else->if_scope = t->current_scope;
       da_foreach(ast_stmt_t*, stmt, &if_else->if_body->stmts) {
         if(!typecheck_stmt(t, *stmt, ret_type)) return false;
       }
@@ -1908,7 +1903,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
 
       if(if_else->else_body) {
         enter_scope_new(t, arena_sprintf(&t->arena, "%s_else", t->current_scope->name));
-        if_else->scope = t->current_scope;
+        if_else->else_scope = t->current_scope;
         da_foreach(ast_stmt_t*, stmt, &if_else->else_body->stmts) {
           if(!typecheck_stmt(t, *stmt, ret_type)) return false;
         }
@@ -2347,7 +2342,7 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
         j_to_end_offset = p->code.count - 1;
 
       da_foreach(ast_stmt_t*, stmt, &s->as.if_else.if_body->stmts)
-        if(!codegen_stmt(p, s->as.if_else.scope, f, *stmt)) return false;
+        if(!codegen_stmt(p, s->as.if_else.if_scope, f, *stmt)) return false;
 
       if(s->as.if_else.else_body) {
         da_append(&p->code, INST_JMP);
@@ -2356,7 +2351,7 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
         p->code.items[j_to_else_offset] = p->code.count - j_to_else_offset + 1;
 
         da_foreach(ast_stmt_t*, stmt, &s->as.if_else.else_body->stmts)
-          if(!codegen_stmt(p, s->as.if_else.scope, f, *stmt)) return false;
+          if(!codegen_stmt(p, s->as.if_else.else_scope, f, *stmt)) return false;
       }
 
       p->code.items[j_to_end_offset] = p->code.count - j_to_end_offset + 1;

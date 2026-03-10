@@ -333,9 +333,10 @@ typedef struct {
     ast_expr_t* retval;
     ast_var_def_t* var_def;
     struct _if_else {
-      scope_t* scope;
       ast_expr_t* cond;
+      scope_t* if_scope;
       ast_body_t* if_body;
+      scope_t* else_scope;
       ast_body_t* else_body;
     } if_else;
   } as;

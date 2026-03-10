@@ -65,7 +65,7 @@ const char* source =
  "  world: str = \"World\";\n"
  "  space: str;\n"
  "  space = \" \";\n"
- "  if (world.eq(\"World\")) {\n"
+ "  if world.eq(\"World\") {\n"
  "    println(\"Self impl works!\");\n"
  "  }\n"
  "  return println(\"Hello\" + space + world + \" \" + (67).to_str() + \"!\");\n"
