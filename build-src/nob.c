@@ -58,6 +58,11 @@ const char* tc_cc[] = {
   [T_GNU]  = "gcc",
 };
 
+const char* tc_dbg[] = {
+  [T_MSVC] = "x64dbg",
+  [T_GNU]  = "gdb",
+};
+
 // Default toolchain
 // Edit this based on platform
 #ifdef _WIN32
@@ -68,17 +73,31 @@ const char* tc_cc[] = {
 
 // Flags per toolchain
 // Edit these to change compilation settings and parameters
-const_str_list_t tc_cflags[] = {
-  [T_MSVC] = CSTR_LIST("/nologo", /*"/W4",*/ "/diagnostics:caret", "/D_CRT_SECURE_NO_WARNINGS"),
-  [T_GNU]  = CSTR_LIST("-Wall", "-Wextra", "-Wswitch-enum", "-ggdb"),
+const_str_list_t tc_cflags_debug[] = {
+  [T_MSVC] = CSTR_LIST("/nologo", /*"/W4",*/ "/diagnostics:caret", "/D_CRT_SECURE_NO_WARNINGS", "/Od"),
+  [T_GNU]  = CSTR_LIST("-Wall", "-Wextra", "-Wswitch-enum", "-ggdb", "-O0"),
 };
 
-const_str_list_t tc_lflags[] = {
+const_str_list_t tc_cflags_release[] = {
+  [T_MSVC] = CSTR_LIST("/nologo", "/D_CRT_SECURE_NO_WARNINGS", "/O2"),
+  [T_GNU]  = CSTR_LIST("-O3"),
+};
+
+const_str_list_t tc_lflags_debug[] = {
 #ifdef _WIN32
   [T_MSVC] = CSTR_LIST("/nologo"),
   [T_GNU]  = CSTR_LIST("-ggdb", "-Wl,--export-all-symbols"),
 #else
   [T_GNU]  = CSTR_LIST("-ggdb", "-rdynamic"),
+#endif
+};
+
+const_str_list_t tc_lflags_release[] = {
+#ifdef _WIN32
+  [T_MSVC] = CSTR_LIST("/nologo"),
+  [T_GNU]  = CSTR_LIST("-s", "-Wl,--export-all-symbols"),
+#else
+  [T_GNU]  = CSTR_LIST("-s", "-rdynamic"),
 #endif
 };
 
@@ -146,6 +165,11 @@ const char* tc_link_options_flag[] = {
   [T_GNU]  = "",
 };
 
+const char* tc_dbg_args_flag[] = {
+  [T_MSVC] = "",
+  [T_GNU]  = "--args",
+};
+
 //////////////////////////////////////////////////
 
 #ifdef _WIN32
@@ -165,7 +189,20 @@ typedef struct {
   } compile_commands;
 } walk_data_t;
 
-static tc_t tc = DEFAULT_TOOLCHAIN;
+typedef enum {
+  BT_DEBUG,
+  BT_RELEASE,
+
+  COUNT_BUILD_TYPES
+} build_type_t;
+
+static const char* bt_names[] = {
+  [BT_DEBUG]   = "DEBUG",
+  [BT_RELEASE] = "RELEASE",
+};
+
+static tc_t tc  = DEFAULT_TOOLCHAIN;
+static build_type_t bt = BT_DEBUG;
 
 const char* supported_tcs() {
   Nob_String_Builder sb = { 0 };
@@ -173,6 +210,17 @@ const char* supported_tcs() {
   nob_sb_appendf(&sb, "%s", tc_names[0]);
   for (size_t i = 1; i < COUNT_TOOLCHAINS; i++) {
     nob_sb_appendf(&sb, ", %s", tc_names[i]);
+  }
+
+  return nob_temp_sprintf("%.*s", (int)sb.count, sb.items);
+}
+
+const char* supported_bts() {
+  Nob_String_Builder sb = { 0 };
+
+  nob_sb_appendf(&sb, "%s", bt_names[0]);
+  for (size_t i = 1; i < COUNT_BUILD_TYPES; i++) {
+    nob_sb_appendf(&sb, ", %s", bt_names[i]);
   }
 
   return nob_temp_sprintf("%.*s", (int)sb.count, sb.items);
@@ -208,8 +256,13 @@ bool compile_tu(Nob_Walk_Entry entry) {
     const char* obj_path = nob_temp_sprintf(BUILD_FOLDER"%.*s-%s.obj", SV_Arg(filename_from_path(path)), tc_names[tc]);
 
     nob_cmd_append(&cmd, tc_cc[tc]);
-    for (size_t i=0; i < tc_cflags[tc].count; i++) {
-      nob_cmd_append(&cmd, tc_cflags[tc].items[i]);
+    const_str_list_t tc_cflags;
+    if (bt == BT_DEBUG)
+      tc_cflags = tc_cflags_debug[tc];
+    else
+      tc_cflags = tc_cflags_release[tc];
+    for (size_t i=0; i < tc_cflags.count; i++) {
+      nob_cmd_append(&cmd, tc_cflags.items[i]);
     }
     for (size_t i=0; i < tc_includes[tc].count; i++) {
       nob_cmd_append(&cmd, nob_temp_sprintf("%s%s", tc_include_flag[tc], tc_includes[tc].items[i]));
@@ -278,15 +331,25 @@ int main(int argc, char **argv)
       tc_names[DEFAULT_TOOLCHAIN], 
       nob_temp_sprintf("Select the toolchain. Available toolchains: [%s]", supported_tcs())
     );
-    bool *f_run = flag_bool(
-      "run",
-      false,
-      "Launch executable after compilation."
+    char **f_type = flag_str(
+      "type", 
+      bt_names[BT_DEBUG], 
+      nob_temp_sprintf("Select the build type. Available build types: [%s]", supported_bts())
     );
     bool *f_compile_commands = flag_bool(
       "gen_compile_commands",
       false,
       "Generates JSON Compilation Database used by clangd LSP. File will be generated in `" COMPILE_COMMANDS "`."
+    );
+    bool *f_run = flag_bool(
+      "run",
+      false,
+      "Launch executable after compilation."
+    );
+    bool *f_debug = flag_bool(
+      "debug",
+      false,
+      "Launch executable in debugger after compilation."
     );
 
     const char* exe = argv[0];
@@ -304,11 +367,20 @@ int main(int argc, char **argv)
 
     for (; tc <= COUNT_TOOLCHAINS; tc++) {
       if (tc == COUNT_TOOLCHAINS) {
-        nob_log(NOB_ERROR, "Invalid toolchain `%s`, Defaulting to %s", *f_toolchain, tc_names[0]);
-        tc = 0;
+        nob_log(NOB_ERROR, "Invalid toolchain `%s`, Defaulting to %s", *f_toolchain, tc_names[DEFAULT_TOOLCHAIN]);
+        tc = DEFAULT_TOOLCHAIN;
         break;
       }
       if(strcmp(*f_toolchain, tc_names[tc]) == 0) break;
+    }
+
+    for (; bt <= COUNT_BUILD_TYPES; bt++) {
+      if (bt == COUNT_BUILD_TYPES) {
+        nob_log(NOB_ERROR, "Invalid build type `%s`, Defaulting to %s", *f_toolchain, bt_names[BT_DEBUG]);
+        bt = BT_DEBUG;
+        break;
+      }
+      if(strcmp(*f_type, bt_names[bt]) == 0) break;
     }
 
     if (!mkdir_if_not_exists(BUILD_FOLDER)) return 1;
@@ -346,8 +418,13 @@ int main(int argc, char **argv)
 
     Cmd cmd = { 0 };
     nob_cmd_append(&cmd, tc_cc[tc]);
-    for (size_t i=0; i < tc_lflags[tc].count; i++) {
-      nob_cmd_append(&cmd, tc_lflags[tc].items[i]);
+    const_str_list_t tc_lflags;
+    if (bt == BT_DEBUG)
+      tc_lflags = tc_lflags_debug[tc];
+    else
+      tc_lflags = tc_lflags_release[tc];
+    for (size_t i=0; i < tc_lflags.count; i++) {
+      nob_cmd_append(&cmd, tc_lflags.items[i]);
     }
     da_foreach(const char*, obj, &wd.objs) {
       nob_da_append(&cmd, *obj); 
@@ -371,7 +448,20 @@ int main(int argc, char **argv)
 
     nob_log(NOB_INFO, "Compilation completed in %.03lf seconds.", ((double)delta) / NOB_NANOS_PER_SEC);
 
+    if(*f_run && *f_debug) {
+      nob_log(NOB_ERROR, "`%s` and `%s` flags are mutually exclusive.", flag_name(f_run), flag_name(f_debug));
+      return 1;
+    }
+
     if (*f_run) {
+      nob_cmd_append(&cmd, EXE_PATH(PROJ_NAME));
+      nob_da_append_many(&cmd, argv, argc);
+      if (!cmd_run(&cmd)) return 1;
+    }
+
+    if (*f_debug) {
+      nob_cmd_append(&cmd, tc_dbg[tc]);
+      nob_cmd_append(&cmd, tc_dbg_args_flag[tc]);
       nob_cmd_append(&cmd, EXE_PATH(PROJ_NAME));
       nob_da_append_many(&cmd, argv, argc);
       if (!cmd_run(&cmd)) return 1;
@@ -405,7 +495,6 @@ NOBDEF void nob_color_log_handler(Nob_Log_Level level, const char *fmt, va_list 
         NOB_UNREACHABLE("Nob_Log_Level");
   }
 
-  // vfprintf(stderr, fmt, args);
   va_list copy;
   va_copy(copy, args);
   int n = vsnprintf(NULL, 0, fmt, copy);
