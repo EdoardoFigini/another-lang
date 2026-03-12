@@ -24,6 +24,8 @@ typedef struct {
 }
 #define CSTR_LIST_EMPTY { .items = NULL, .count = 0 }
 
+NOBDEF nob_log_handler nob_color_log_handler;
+
 //////////////////////////////////////////////////
 
 // DEFINE BUILD PARAMETERS HERE 
@@ -238,7 +240,7 @@ bool run_in_msvc_env(int argc, char** argv) {
     nob_log(NOB_INFO, "Loading MSVC environment");
     Cmd cmd = { 0 };
 
-    nob_minimal_log_level = NOB_NO_LOGS;
+    nob_minimal_log_level = NOB_WARNING;
     nob_cmd_append(
       &cmd, 
       "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat", 
@@ -258,6 +260,8 @@ int main(int argc, char **argv)
 {
 #if defined(_MSC_VER) && defined(_WIN32)
     const char *binary_path = *argv;
+
+    nob_set_log_handler(nob_color_log_handler);
 
     if (!nob_sv_end_with(nob_sv_from_cstr(binary_path), ".exe")) {
       binary_path = nob_temp_sprintf("%s.exe", binary_path);
@@ -374,4 +378,46 @@ int main(int argc, char **argv)
     }
 
     return 0;
+}
+
+#define LOG_COLOR_RESET "\033[0m"
+#define LOG_COLOR_ERROR "\033[31m"
+#define LOG_COLOR_WARN  "\033[33m"
+#define LOG_COLOR_INFO  "\033[36m"
+
+NOBDEF void nob_color_log_handler(Nob_Log_Level level, const char *fmt, va_list args)
+{
+  if (level < nob_minimal_log_level) return;
+
+  Nob_String_Builder sb = { 0 };
+  switch (level) {
+    case NOB_INFO:
+    nob_sb_append_cstr(&sb, LOG_COLOR_INFO "[INFO] ");
+      break;
+    case NOB_WARNING:
+      nob_sb_append_cstr(&sb, LOG_COLOR_WARN "[WARN] ");
+      break;
+    case NOB_ERROR:
+      nob_sb_append_cstr(&sb, LOG_COLOR_ERROR "[ERROR] ");
+      break;
+    case NOB_NO_LOGS: return;
+    default:
+        NOB_UNREACHABLE("Nob_Log_Level");
+  }
+
+  // vfprintf(stderr, fmt, args);
+  va_list copy;
+  va_copy(copy, args);
+  int n = vsnprintf(NULL, 0, fmt, copy);
+  va_end(copy);
+
+  nob_da_reserve(&sb, sb.count + n + 1);
+  char *dest = sb.items + sb.count;
+  vsnprintf(dest, n+1, fmt, args);
+  sb.count += n;
+
+  nob_sb_append_cstr(&sb, LOG_COLOR_RESET);
+  nob_sb_append(&sb, '\n');
+
+  fprintf(stderr, SV_Fmt, SV_Arg(sb_to_sv(sb)));
 }
