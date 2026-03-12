@@ -156,7 +156,12 @@ task_t* load_task(vm_t* vm, program_t* p) {
     for (size_t i=0; i < p->externs.count; i++) {
       t->externs.data[i].cif = p->externs.items[i].cif;
       t->externs.data[i].name = arena_strdup(&t->arena, p->externs.items[i].name);
-      t->externs.data[i].is_builtin_method = p->externs.items[i].is_builtin_method;
+      t->externs.data[i].lib = p->externs.items[i].lib ? arena_strdup(&t->arena, p->externs.items[i].lib) : NULL;
+      t->externs.data[i].access_state = p->externs.items[i].access_state;
+
+#ifdef _WIN32
+      LoadLibraryA(p->externs.items[i].lib);
+#endif
     }
   }
 
@@ -262,11 +267,15 @@ vm_exitcode_t exec(vm_t* vm) {
       uint64_t retval = 0; 
       if (operand >= vm->active_task->externs.count) return VM_UNDEFINED_EXTERN;
       struct _extern* ext = &vm->active_task->externs.data[operand]; 
+
 #ifdef _WIN32
-      void* func = GetProcAddress(vm->host, ext->name);
+      HMODULE lib = GetModuleHandleA(ext->lib);
+      void* func = GetProcAddress(lib, ext->name);
 #else
-      void* func = dlsym(vm->host, ext->name);
+      void* lib = dlopen(ext->lib, RTLD_LAZY);
+      void* func = dlsym(lib, ext->name);
 #endif
+
       if (!func) {
         fprintf(stderr, "Cannot resolve function `%s`\n", ext->name);
         return VM_UNDEFINED_EXTERN; 
@@ -275,7 +284,7 @@ vm_exitcode_t exec(vm_t* vm) {
       uint64_t** args   = malloc(sizeof(*args) * ext->cif.nargs);
       uint64_t*  values = malloc(sizeof(*args) * ext->cif.nargs);
       size_t i = 0;
-      if (ext->is_builtin_method)
+      if (ext->access_state)
         values[i++] = (uint64_t)vm;
       for(; i < ext->cif.nargs; i++) {
         if(is_ffi_arg_32(ext->cif.arg_types[i])) {
@@ -408,13 +417,6 @@ vm_exitcode_t run(vm_t* vm, size_t n_args, ...) {
   vm->ip = active->code + 1; // skip halt
   vm->sp = active->stack;
   vm->halt = false;
-
-  // TODO: move to something like vm_init or make_vm
-#if defined(_WIN32)
-  vm->host = GetModuleHandleA(NULL);
-#elif defined(__linux__)
-  vm->host = dlopen(NULL, RTLD_LAZY);
-#endif
 
   active->call_stack.frames[0] = malloc(sizeof(virtual_frame_t));
   active->call_stack.depth++;

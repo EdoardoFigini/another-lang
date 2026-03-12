@@ -102,6 +102,7 @@ typedef enum {
   AST_STMT,
   AST_FUNC_DEF,
   AST_VAR_DEF,
+  AST_DEC_LIST,
   AST_TYPE,
   AST_BODY,
   AST_PARAM,
@@ -189,6 +190,20 @@ typedef struct {
 
 typedef struct _ast_body_t ast_body_t;
 
+struct _decorator {
+  const char* key;
+  const char* value;
+}; 
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  struct {
+    struct _decorator* items;
+    size_t count;
+    size_t capacity;
+  } decs;
+} ast_dec_list_t;
+
 typedef struct {
   AST_DEFAULT_FIELDS;
   const char* name;
@@ -197,6 +212,7 @@ typedef struct {
   ast_sig_t* sig;
   scope_t* scope;
   ast_body_t* body;
+  ast_dec_list_t* decorators;
 } ast_func_def_t;
 
 typedef struct {
@@ -206,6 +222,7 @@ typedef struct {
   symbol_t* symbol;
   ast_type_t* type;
   ast_expr_t* init;
+  ast_dec_list_t* decorators;
 } ast_var_def_t;
 
 typedef struct {
@@ -611,7 +628,8 @@ typedef struct {
     struct _extern{ 
       ffi_cif cif;
       const char* name;
-      bool is_builtin_method;
+      const char* lib;
+      bool access_state;
     }* items;
     size_t count;
     size_t capacity;

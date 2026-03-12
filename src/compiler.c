@@ -502,6 +502,15 @@ static inline void exit_scope(typechecker_t* t) {
   t->current_scope = t->current_scope->parent;
 }
 
+static inline const char* decorators_get(ast_dec_list_t* l, const char* key) {
+  if(!l) return NULL;
+  // OPTIMIZE
+  da_foreach(struct _decorator, d, &l->decs) {
+    if(strcmp(d->key, key) == 0) return d->value;
+  }
+  return NULL;
+}
+
 static inline bool tok_is_specifier(parser_t* p) {
   switch((kw_kind_t)get_tok(p).kind) {
     case KW_EXTERN:
@@ -779,8 +788,8 @@ static inline ast_type_t* parse_type(parser_t* p) {
   return n;
 }
 
-static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec_flags_t flags);
-static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_flags_t flags, bool global);
+static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec_flags_t flags, ast_dec_list_t* decorators);
+static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_flags_t flags, bool global, ast_dec_list_t* decorators);
 static inline ast_body_t* parse_body(parser_t* p);
 
 // stmt = return [ expr ] ';' 
@@ -853,7 +862,7 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
 
       n->kind = STMT_VAR_DEF;
 
-      ast_var_def_t* var_def = parse_var_def(p, name, flags, false);
+      ast_var_def_t* var_def = parse_var_def(p, name, flags, false, NULL);
       if(!var_def) return NULL;
 
       n->as.var_def = var_def;
@@ -960,7 +969,7 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
 }
 
 // func_def = type [ body ]
-static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec_flags_t flags) {
+static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec_flags_t flags, ast_dec_list_t* decorators) {
   ast_func_def_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_FUNC_DEF;
   n->flags = flags;
@@ -981,11 +990,13 @@ static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec
     n->body = body;
   }
 
+  n->decorators = decorators;
+
   return n;
 }
 
 // var_def = type [ '=' expr ] ';'
-static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_flags_t flags, bool global) {
+static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_flags_t flags, bool global, ast_dec_list_t* decorators) {
   ast_var_def_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_VAR_DEF;
   n->flags = flags;
@@ -1010,11 +1021,65 @@ static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_f
   if(!expect(p, ';')) return NULL;
   next(p);
 
+  n->decorators = decorators;
+
+  return n;
+}
+
+// dec_list: '[' '[' ident ':' TOK_STRLIT ( ',' ident ':' TOK_STRLIT )* ']' ']'
+static inline ast_dec_list_t* parse_dec_list(parser_t* p) {
+  if(!expect(p, '[')) return NULL;
+  next(p);
+  if(!expect(p, '[')) return NULL;
+  next(p);
+
+  ast_dec_list_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_DEC_LIST;
+  
+  // NOTE: do not allow empty decorator list
+  struct _decorator dec = { 0 };
+  if(!expect(p, TOK_IDENT)) return NULL;
+  dec.key = arena_strdup(&p->arena, get_tok(p).as.s);
+  next(p);
+
+  if(!expect(p, ':')) return NULL;
+  next(p);
+
+  if(!expect(p, TOK_STRLIT)) return NULL;
+  dec.value = arena_strdup(&p->arena, get_tok(p).as.s);
+  next(p);
+
+  da_append(&n->decs, dec);
+
+  while(!tok_is(p, ']')) {
+    if(!expect(p, ',')) return NULL;
+    next(p);
+
+    struct _decorator dec = { 0 };
+    if(!expect(p, TOK_IDENT)) return NULL;
+    dec.key = arena_strdup(&p->arena, get_tok(p).as.s);
+    next(p);
+
+    if(!expect(p, ':')) return NULL;
+    next(p);
+
+    if(!expect(p, TOK_STRLIT)) return NULL;
+    dec.value = arena_strdup(&p->arena, get_tok(p).as.s);
+    next(p);
+
+    da_append(&n->decs, dec);
+  }
+
+  if(!expect(p, ']')) return NULL;
+  next(p);
+  if(!expect(p, ']')) return NULL;
+  next(p);
+
   return n;
 }
 
 static inline ast_impl_t* parse_impl(parser_t* p) {
-  if(!expect(p, TOK_IMPL)) return FALSE;
+  if(!expect(p, TOK_IMPL)) return NULL;
   next(p);
 
   ast_impl_t* n = arena_alloc(&p->arena, sizeof(*n));
@@ -1035,6 +1100,12 @@ static inline ast_impl_t* parse_impl(parser_t* p) {
   next(p);
   
   while(!tok_is(p, '}')) {
+    ast_dec_list_t* decorators = NULL;
+    if(tok_is(p, '[')) {
+      decorators = parse_dec_list(p);
+      if(!decorators) return NULL;
+    }
+
     spec_flags_t flags = parse_specifiers(p);
 
     if(!expect(p, TOK_IDENT)) return NULL;
@@ -1044,7 +1115,7 @@ static inline ast_impl_t* parse_impl(parser_t* p) {
     if(!expect(p, ':')) return NULL;
     next(p);
 
-    ast_func_def_t* def = parse_func_def(p, method_name, flags);
+    ast_func_def_t* def = parse_func_def(p, method_name, flags, decorators);
 
     da_append(&n->methods, def);
   }
@@ -1076,7 +1147,7 @@ static inline ast_iface_t* parse_iface(parser_t* p, const char* name) {
     if(!expect(p, ':')) return NULL;
     next(p);
 
-    ast_func_def_t* def = parse_func_def(p, method_name, flags);
+    ast_func_def_t* def = parse_func_def(p, method_name, flags, NULL);
 
     da_append(&n->methods, def);
   }
@@ -1087,8 +1158,8 @@ static inline ast_iface_t* parse_iface(parser_t* p, const char* name) {
   return n;
 }
 
-// root: ( spec_flags ident ':' func_def )* 
-//     | ( spec_flags ident ':' var_def )*
+// root: ( [ dec_list ] spec_flags ident ':' func_def )* 
+//     | ( [ dec_list ] spec_flags ident ':' var_def )*
 //     | ( ident ':' 'impl' ident '{' ( ident ':' func_decl func_def '}' )+ )*
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->source = t->source;
@@ -1106,6 +1177,12 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
 
       da_append(&n->impls, impl);
     } else {
+      ast_dec_list_t* decorators = NULL;
+      if(tok_is(p, '[')) {
+        decorators = parse_dec_list(p);
+        if(!decorators) return NULL;
+      }
+
       spec_flags_t flags = parse_specifiers(p);
 
       if(!expect(p, TOK_IDENT)) return NULL;
@@ -1115,7 +1192,7 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
       next(p);
 
       if(tok_is(p, '(')) {
-        ast_func_def_t* def = parse_func_def(p, name, flags);
+        ast_func_def_t* def = parse_func_def(p, name, flags, decorators);
         if (!def) return NULL;
 
         da_append(&n->func_defs, def);
@@ -1125,7 +1202,7 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
 
         da_append(&n->interfaces, interface);
       } else {
-        ast_var_def_t* def = parse_var_def(p, name, flags, true);
+        ast_var_def_t* def = parse_var_def(p, name, flags, true, decorators);
         if (!def) return NULL;
 
         da_append(&n->var_defs, def);
@@ -2076,8 +2153,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
         return false;
       }
     }
-    da_foreach(ast_func_def_t*, method, &(*impl)->methods)
-      if(!typecheck_func(t, *method)) return false;
+
     exit_scope(t);
 
     if (!impl_self) {
@@ -2091,6 +2167,14 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       }
       da_append(&type->impls, (*impl)->interface->name);
     }
+  }
+
+  da_foreach(ast_impl_t*, impl, &root->impls) {
+    type_t* type = (*impl)->type->resolved_type;
+    enter_scope(t, type->scope);
+    da_foreach(ast_func_def_t*, method, &(*impl)->methods)
+      if(!typecheck_func(t, *method)) return false;
+    exit_scope(t);
   }
 
   da_foreach(ast_func_def_t*, d, &root->func_defs) {
@@ -2388,21 +2472,35 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
 
 static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
   if (d->symbol->storage == STO_EXTERN) {
-    ast_sig_t* sig = d->sig;
-    // TODO: add platform layer for malloc
-    ffi_type **param_types = malloc(sizeof(*param_types) * sig->params.count);
-    for(size_t i=0; i < sig->params.count; i++)
-      param_types[i] = type_to_ffi_type(*sig->params.items[i]->type->resolved_type);
+    type_t* sig = d->sig->resolved_type;
 
-    ffi_type* ret = type_to_ffi_type(*sig->ret->resolved_type);
+    size_t additional_params = 0;
+
+    const char* as_value = decorators_get(d->decorators, "access_state");
+    bool access_state = as_value && strcmp(as_value, "true") == 0;
+    if(access_state) additional_params++;
+
+    struct {
+      ffi_type** items;
+      size_t count;
+      size_t capacity;
+    } param_types = { 0 };
+
+    if (access_state)
+      da_append(&param_types, &ffi_type_pointer); // vm_t*
+
+    for(size_t i=0; i < sig->as.func.params.count; i++)
+      da_append(&param_types, type_to_ffi_type(*sig->as.func.params.items[i]));
+
+    ffi_type* ret = type_to_ffi_type(*sig->as.func.ret);
 
     ffi_cif cif = { 0 };
     ffi_status status = ffi_prep_cif(
       &cif,
       FFI_DEFAULT_ABI,
-      sig->params.count,
+      param_types.count,
       ret,
-      param_types
+      param_types.items
     );
 
     if (status != FFI_OK) {
@@ -2411,8 +2509,23 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
     }
 
     set_symbol_address(d->symbol, p->externs.count);
+
+    const char* name = decorators_get(d->decorators, "name");
+    if(!name) name = d->name;
     // TODO: name is leaked
-    da_append(&p->externs, ((struct _extern){ cif, strdup(d->name), false }));
+    name = strdup(name);
+
+    const char* lib = decorators_get(d->decorators, "lib");
+    if(lib)
+      // TODO: lib is leaked
+      lib = strdup(lib);
+
+    da_append(&p->externs, ((struct _extern){ 
+      .cif = cif,
+      .name = name,
+      .lib = lib,
+      .access_state = access_state 
+    }));
   } else {
     set_symbol_address(d->symbol, p->code.count);
 
@@ -2672,55 +2785,6 @@ static inline type_t* method_owner(symbol_t* s) {
   return (*s->type->as.func.params.items);
 }
 
-// impl Self: str {
-//   extern c_str:  (self: Self) -> addr;
-//   extern length: (self: Self) -> i32;
-//   extern concat: (self: Self, other: Self) -> Self;
-// }
-static inline bool builtin_methods_init(program_t* p, typechecker_t* t) {
-  symbol_t* bms[] = {
-    make_method(&t->arena, t->builtins.str, "c_str", get_or_create_func_type_of(t, t->builtins.addr, 1, t->builtins.str), STO_EXTERN),
-    make_method(&t->arena, t->builtins.str, "length", get_or_create_func_type_of(t, t->builtins.i32, 1, t->builtins.str), STO_EXTERN),
-    make_method(&t->arena, t->builtins.str, "concat", get_or_create_func_type_of(t, t->builtins.str, 2, t->builtins.str, t->builtins.str), STO_EXTERN),
-    make_method(&t->arena, t->builtins.i32, "to_str", get_or_create_func_type_of(t, t->builtins.str, 1, t->builtins.i32), STO_EXTERN),
-  };
-  for (size_t j=0; j < sizeof(bms)/sizeof(*bms); j++) {
-    if(!bms[j]) continue;
-    size_t n_params = bms[j]->type->as.func.params.count + 1;
-    // TODO: add platform layer for malloc
-    ffi_type **param_types = malloc(sizeof(*param_types) * n_params);
-    size_t i = 0;
-    param_types[i++] = &ffi_type_pointer;                 // vm_t* vm 
-    for(; i < n_params; i++)
-      param_types[i] = type_to_ffi_type(*bms[j]->type->as.func.params.items[i - 1]);
-
-    ffi_type* ret = type_to_ffi_type(*bms[j]->type->as.func.ret);
-
-    ffi_cif cif = { 0 };
-    ffi_status status = ffi_prep_cif(
-      &cif,
-      FFI_DEFAULT_ABI,
-      n_params,
-      ret,
-      param_types
-    );
-
-    if (status != FFI_OK) {
-      fprintf(stderr, "[ERROR] Codegen\n  Could not initialize FFI CIF\n");
-      return false;
-    }
-
-    // TODO: name is leaked
-    size_t len = snprintf(NULL, 0, "%s__%s", method_owner(bms[j])->name, bms[j]->name);
-    char* name = malloc(len + 1);
-    snprintf(name, len + 1, "%s__%s", method_owner(bms[j])->name, bms[j]->name);
-    bms[j]->addr = p->externs.count;
-    da_append(&p->externs, ((struct _extern){ cif, name, true }));
-  }
-
-  return true;
-}
-
 bool compile(program_t* program, const char* source) {
   tokenizer_t tok = { 0 };
   sb_append(&tok.source, source);
@@ -2744,8 +2808,6 @@ bool compile(program_t* program, const char* source) {
   // print_ast(stdout, (ast_node_t*)root, 0);
 
   typechecker_init(&tc);
-  // TODO: move all "builtin" stuff to core library (always imported), do not hardcode in compiler
-  if(!builtin_methods_init(program, &tc)) return false;
   if(!typecheck(&tc, root)) return false;
   fprintf(stdout, "[DEBUG] Typechecker OK.\n");
 
