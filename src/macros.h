@@ -22,7 +22,7 @@
     int line_len = line_end - line_start;\
     fprintf( \
         stderr, \
-        "[" #lvl "]\n  %zu:%zu: " fmt "\n    %.*s\n    %*s^\n\n", \
+        "[" #lvl "] Parser\n  %zu:%zu: " fmt "\n    %.*s\n    %*s^\n\n", \
         (p)->line, (p)->col, \
         ## __VA_ARGS__, \
         line_len, line_start, \

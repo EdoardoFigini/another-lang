@@ -12,7 +12,7 @@
 #error Unsupported platform
 #endif
 
-bool compile(program_t* program, const char* source);
+bool compile(program_t* program, const char* path, const char* source);
 
 task_t* load_task(vm_t*, program_t*);
 void set_active_task(vm_t*, task_t*);

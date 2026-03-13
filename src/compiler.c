@@ -5,12 +5,14 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <inttypes.h>
+#include <stdarg.h>
 
 #include <ffi.h>
 
 #include "sb.h"
 #include "da.h"
 #include "arena.h"
+#include "slice.h"
 
 #include "types.h"
 #include "macros.h"
@@ -28,8 +30,69 @@ const char* tok_keywords[] = {
   [KW_INTERFACE] = "interface",
 };
 
+typedef enum {
+  DIAG_DEBUG = 0,
+  DIAG_INFO,
+  DIAG_WARN,
+  DIAG_ERROR,
+  DIAG_FATAL,
+} diag_lvl_t;
+
+const char* diag_lvl_txt[] = {
+  [DIAG_DEBUG] = "[DEBUG]",
+  [DIAG_INFO]  = "[INFO]",
+  [DIAG_WARN]  = "[WARN]",
+  [DIAG_ERROR] = "[ERROR]",
+  [DIAG_FATAL] = "[FATAL]",
+};
+
+const char* diag_lvl_color[] = {
+  [DIAG_DEBUG] = "\033[35;1m",
+  [DIAG_INFO]  = "\033[34;1m",
+  [DIAG_WARN]  = "\033[33;1m",
+  [DIAG_ERROR] = "\033[31;1m",
+  [DIAG_FATAL] = "\033[41;1m",
+};
+
+void sb_vdiagf(sb_t* sb, diag_lvl_t lvl, loc_t loc, const char* fmt, va_list args) {
+  sb_append(sb, diag_lvl_color[lvl]);
+  sb_append(sb, diag_lvl_txt[lvl]);
+  sb_append(sb, "\033[0m");
+
+  sb_append(sb, " ");
+
+  int n = vsnprintf(NULL, 0, fmt, args);
+  // TODO: malloc layer?
+  char* buf = malloc(n * sizeof(*buf));
+  n = vsnprintf(buf, n + 1, fmt, args);
+
+  sb_n_append(sb, buf, n);
+  free(buf);
+
+  sb_appendf(sb, "\n");
+  sb_appendf(sb, "%s:%zu:%zu", loc.path, loc.line, loc.col);
+  sb_appendf(sb, "\n");
+  sb_appendf(sb, "%6zu | ", loc.line);
+  sb_appendf(sb, "%.*s", SLICE_FMT(loc.line_view));
+  sb_appendf(sb, "\n");
+  sb_appendf(sb, "%*s | %*s^", 6, "", loc.col - 1, "");
+}
+
+void fdiagf(FILE* stream, diag_lvl_t lvl, loc_t loc, const char* fmt, ...) {
+  va_list args;
+  sb_t sb = { 0 };
+
+  va_start(args, fmt);
+  sb_vdiagf(&sb, lvl, loc, fmt, args);
+  va_end(args);
+
+  fprintf(stream, "%.*s\n", SB_FMT(sb));
+
+  sb_free(&sb);
+}
+
 void tok_print(token_t tok) {
-  printf("%zu:%zu: ", tok.line, tok.col);
+  printf("%3zu:%3zu: ", tok.loc.line, tok.loc.col);
   if(tok.kind < 256) printf("%-20c", tok.kind);
   else {
     switch(tok.kind) {
@@ -54,7 +117,7 @@ void tok_print(token_t tok) {
       default: printf("%-20s", "<INVALID TOKEN>"); break;
     }
   }
-  printf(": `%.*s`\n", tok.len, tok.start);
+  fprintf(stderr, "%.*s\n", SLICE_FMT(tok.view));
 };
 
 const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
@@ -85,7 +148,7 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
   }
 }
 
-static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, size_t col) {
+static inline const char* tok_string(tokenizer_t* t, char** end, loc_t loc) {
   int escape = 0;
 
   sb_t sb = { 0 };
@@ -103,7 +166,7 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
         case '\"': sb_n_append(&sb, "\"", 1); break;
         case '\\': sb_n_append(&sb, "\\", 1); break;
         default:
-          fprintf(stderr, "[ERROR] %zu:%zu: Unknown escape sequence\n", line, col);
+          fdiagf(stderr, DIAG_ERROR, loc, "Unknown escape sequence");
           return NULL;
       }
 
@@ -112,13 +175,13 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
       if      (**end == '\"') break;
       else if (**end == '\\') escape = 1;
       else if (**end == '\n') {
-        fprintf(stderr, "[ERROR] %zu:%zu: Missing closing `\"`\n", line, col);
+        fdiagf(stderr, DIAG_ERROR, loc, "Missing closing `\"`");
         return NULL;
       }
       else
         sb_appendf(&sb, "%c", **end);
     }
-    col++;
+    loc.col++;
   }
 
   const char* ret = arena_sprintf(&t->arena, "%.*s", (int)sb.count, sb.items);
@@ -130,13 +193,13 @@ static inline const char* tok_string(tokenizer_t* t, char** end, size_t line, si
 
 // TODO: support exp notation for reals 
 // TODO: fix real number tokenization: 69.str() should be TOK_INTLIT '.' TOK_IDENT '( ')', not TOK_REALLIT TOK_IDENT...
-static inline int tok_num_literal(tokenizer_t* t, char** end, size_t line, size_t col, token_t* tok) {
+static inline int tok_num_literal(tokenizer_t* t, char** end, loc_t loc, token_t* tok) {
   int base = 10;
   int64_t integer = 0;
   double real = 0.0;
   int sign = 1;
 
-  tok->start = *end;
+  char* start = *end;
 
   lit_type_info_flags_t type_info = 0;
 
@@ -146,9 +209,9 @@ static inline int tok_num_literal(tokenizer_t* t, char** end, size_t line, size_
 
   if (**end == '0') {
     switch (*(*end + 1)) {
-      case 'x': base = 16; (*end)+=2; col+=2; break;
-      case 'b': base = 2;  (*end)+=2; col+=2; break;
-      case 'o': base = 8;  (*end)+=2; col+=2; break;
+      case 'x': base = 16; (*end)+=2; loc.col+=2; break;
+      case 'b': base = 2;  (*end)+=2; loc.col+=2; break;
+      case 'o': base = 8;  (*end)+=2; loc.col+=2; break;
       default: break;
     }
   }
@@ -185,7 +248,7 @@ static inline int tok_num_literal(tokenizer_t* t, char** end, size_t line, size_
     integer += digit;
 
     (*end)++;
-    col++;
+    loc.col++;
   }
 
   if (type_info & TI_REAL) {
@@ -194,7 +257,7 @@ static inline int tok_num_literal(tokenizer_t* t, char** end, size_t line, size_
     int64_t power = 10;
 
     while(isdigit(*++(*end))) {
-      col++;
+      loc.col++;
       real += (**end - '0') / power;
       power *= 10;
     }
@@ -215,12 +278,12 @@ static inline int tok_num_literal(tokenizer_t* t, char** end, size_t line, size_
 
   if (type_info & TI_UNSIGNED) {
     if (sign < 0) {
-      fprintf(stderr, "[ERROR] %zu:%zu: Cannot declare a negative unsigned literal.\n", line, col);
+      fdiagf(stderr, DIAG_ERROR, loc, "Cannot declare a negative unsigned literal.");
       return 1;
     }
 
     if (type_info & TI_REAL) {
-      fprintf(stderr, "[ERROR] %zu:%zu: Cannot declare an unsigned real literal.\n", line, col);
+      fdiagf(stderr, DIAG_ERROR, loc, "Cannot declare an unsigned real literal.");
       return 1;
     }
     tok->as.u = integer;
@@ -230,7 +293,7 @@ static inline int tok_num_literal(tokenizer_t* t, char** end, size_t line, size_
 
   tok->kind = type_info & TI_REAL ? TOK_REALLIT : TOK_INTLIT;
   tok->type_info = type_info;
-  tok->len = (int)(*end - tok->start);
+  tok->view = (slice_t){ .data = start, .size = (int)(*end - start)};
 
   return 0;
 }
@@ -239,16 +302,32 @@ static inline int tok_tokenize(tokenizer_t* t) {
   token_t tok = { 0 };
   size_t line = 1;
   size_t col  = 1;
+  slice_t line_view    = { 0 };
+  slice_t src_view     = slice_from_sb(t->source);
+  slice_t src_rem_view = slice_from_sb(t->source);
+
+  line_view    = slice_sub(src_rem_view, 0, slice_index_of(src_view, '\n'));
+  src_rem_view = slice_advance_after(src_rem_view, "\n");
 
   char* p = t->source.items;
   while(*p && ((size_t)(p - t->source.items) < t->source.count)) {
     if(*p == '\n') {
+      line_view    = slice_sub(src_rem_view, 0, slice_index_of(src_rem_view, '\n'));
+      src_rem_view = slice_advance_after(src_rem_view, "\n");
+
       line++;
       p++;
       col = 1;
       continue;
     }
     if(isspace(*p)) { p++; col++; continue; }
+
+    loc_t loc = (loc_t){
+      .line      = line,
+      .col       = col,
+      .line_view = line_view,
+      .path      = t->path,
+    };
 
     switch(*p) {
       case '(':
@@ -263,61 +342,61 @@ static inline int tok_tokenize(tokenizer_t* t) {
       case '*':
       case '/':
       case '%':
-        tok = (token_t){ .kind = *p, .start = p, .len = 1 }; 
+        tok = (token_t){ .kind = *p, .view = { .data = p, .size = 1 } }; 
         break;
       case '>':
         switch(*(p + 1)) {
-          case '=': tok = (token_t){ .kind = TOK_GEQ, .start = p, .len = 2 }; break;
+          case '=': tok = (token_t){ .kind = TOK_GEQ, .view = { .data = p, .size = 2 } }; break;
           default: 
-            tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+            tok = (token_t){ .kind = *p, .view = { .data = p, .size = 1 } };
             break;
         }
         break;
       case '<':
         switch(*(p + 1)) {
-          case '=': tok = (token_t){ .kind = TOK_LEQ, .start = p, .len = 2 }; break;
+          case '=': tok = (token_t){ .kind = TOK_LEQ, .view = { .data = p, .size = 2 } }; break;
           default: 
-            tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+            tok = (token_t){ .kind = *p, .view = { .data = p, .size = 1 } };
             break;
         }
         break;
       case '=':
         switch(*(p + 1)) {
-          case '=': tok = (token_t){ .kind = TOK_EQEQ, .start = p, .len = 2 }; break;
+          case '=': tok = (token_t){ .kind = TOK_EQEQ, .view = { .data = p, .size = 2 } }; break;
           default: 
-            tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+            tok = (token_t){ .kind = *p, .view = { .data = p, .size = 1 } };
             break;
         }
         break;
       case ':':
         switch(*(p + 1)) {
-          case ':': tok = (token_t){ .kind = TOK_COLCOL, .start = p, .len = 2 }; break;
+          case ':': tok = (token_t){ .kind = TOK_COLCOL, .view = { .data = p, .size = 2 } }; break;
           default: 
-            tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+            tok = (token_t){ .kind = *p, .view = { .data = p, .size = 1 } };
             break;
         }
         break;
       case '.':
         if (isdigit(*(p + 1))) { 
           char* end = p;
-          if(tok_num_literal(t, &end, line, col, &tok)) return 1;
+          if(tok_num_literal(t, &end, loc, &tok)) return 1;
           break;
         } 
 
-        tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+        tok = (token_t){ .kind = *p, .view = { .data = p, .size = 1 } };
         break;
       case '-':
         if (isdigit(*(p + 1))) { 
           char* end = p;
-          if(tok_num_literal(t, &end, line, col, &tok)) return 1;
+          if(tok_num_literal(t, &end, loc, &tok)) return 1;
           break;
         }
 
         switch(*(p + 1)) {
-          case '>': tok = (token_t){ .kind = TOK_ARROW, .start = p, .len = 2 }; break;
+          case '>': tok = (token_t){ .kind = TOK_ARROW, .view = { .data = p, .size = 2 } }; break;
           // case '=': tok = (token_t){ .kind = TOK_MINEQS }; break;
           default: 
-            tok = (token_t){ .kind = *p, .start = p, .len = 1 };
+            tok = (token_t){ .kind = *p, .view = { .data = p, .size = 1 } };
             break;
         }
         break;
@@ -330,7 +409,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
             int kw_len = strlen(tok_keywords[i]);
             if(memcmp(p, tok_keywords[i], kw_len) == 0) {
               kw = 1;
-              tok = (token_t){ .kind = i, .start = p, .len = kw_len };
+              tok = (token_t){ .kind = i, .view = { .data = p, .size = kw_len } };
               break;
             }
           }
@@ -340,45 +419,37 @@ static inline int tok_tokenize(tokenizer_t* t) {
           for (; *end && (isalpha(*end) || isdigit(*end) || *end == '_'); end++);
           tok = (token_t){
             .kind = TOK_IDENT,
-            .len = (int)(end - p),
-            .start = p,
+            .view = { .data = p, .size = (int)(end - p) },
             .as.s = arena_sprintf(&t->arena, "%.*s", (int)(end - p), p),
           };
         } else if (isdigit(*p)) {
           char* end = p;
-          if(tok_num_literal(t, &end, line, col, &tok)) return 1;
+          if(tok_num_literal(t, &end, loc, &tok)) return 1;
 
         } else if (*p == '"') {
           char* end = p;
-          const char* str = tok_string(t, &end, line, col);
+          const char* str = tok_string(t, &end, loc);
           if (!str) return 1;
           tok = (token_t){ 
             .kind = TOK_STRLIT,
-            .len = (int)(end - p),
-            .start = p,
+            .view = { .data = p, .size = (int)(end - p) },
             .as.s = str
           };
         } else {
-          char* line_start = p;
-          char* line_end   = p;
-          while(line_start != t->source.items && *(line_start-1) != '\n') line_start--;
-          while(*line_end && *line_end != '\n') line_end++;
-          int line_length = line_end - line_start;
-          fprintf(stderr, "[ERROR] Lexer:\n  %zu:%zu Unrecognized token (%c, 0x%x)\n%.*s\n%*s^\n", line, col, *p, *p, line_length, line_start, (int)col - 1, "");
+          fdiagf(stderr, DIAG_ERROR, loc, "Tokenizer: - Unrecognized token");
           // TODO: continue instead of returning
           return 1;
         }
     }
 
-    tok.line = line;
-    tok.col  = col;
+    tok.loc = loc; 
     da_append(&t->tokens, tok);
 
-    p  += tok.len;
-    col += tok.len;
+    p   += tok.view.size;
+    col += tok.view.size;
   }
 
-  da_append(&t->tokens, ((token_t){ .kind = TOK_EOF, .line = line, .col = col }));
+  da_append(&t->tokens, ((token_t){ .kind = TOK_EOF, .loc = { .line = line, .col = col, .line_view = line_view }}));
   return 0;
 }
 
@@ -390,7 +461,7 @@ void tok_destroy(tokenizer_t* t) {
 
 static inline token_t get_tok(parser_t* p) {
   if (p->current >= p->tokens.count) {
-    fprintf(stderr, "[FATAL] Lexer\n  No more tokens.");
+    fdiagf(stderr, DIAG_FATAL, p->tokens.items[p->current].loc, "No more tokens.");
     abort();
   }
   return p->tokens.items[p->current];
@@ -403,7 +474,7 @@ static inline int tok_is(parser_t* p, tok_kind_t kind) {
 static inline int expect_with_name(parser_t* p, tok_kind_t kind, const char* exp_name) {
   token_t t = get_tok(p);
   if (t.kind != kind) {
-    DIAGF(p, ERROR, "Expected %s, found %s", exp_name, tok_kind_str(&p->arena, t.kind));
+    fdiagf(stderr, DIAG_ERROR, t.loc, "Expected %s, found %s.", exp_name, tok_kind_str(&p->arena, t.kind));
     abort();
     return 0;
   }
@@ -416,11 +487,11 @@ static inline int expect(parser_t* p, tok_kind_t kind) {
 
 static inline void next(parser_t* p) {
   p->current++;
-  p->line = get_tok(p).line;
-  p->col = get_tok(p).col;
 }
 
 static inline void print_type(FILE* stream, const type_t* t);
+static inline void render_type(sb_t* sb, const type_t* t);
+static inline const char* type_to_str(arena_t* a, const type_t* t);
 
 static inline void set_symbol_address(symbol_t* s, uint32_t addr) {
   s->addr = addr;
@@ -549,7 +620,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
     }
 
     if (flags & cur_flag)
-      DIAGF(p, WARN, "Duplicate specifier `%.*s`, will be considered as one.\n", t.len, t.start);
+      fdiagf(stderr, DIAG_WARN, t.loc, "Duplicate specifier `%.*s`, will be considered as one.\n", SLICE_FMT(t.view));
 
     flags |= cur_flag;
 
@@ -582,6 +653,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp);
 static inline ast_expr_t* parse_primary_expr(parser_t* p) {
   ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_EXPR;
+  n->loc = get_tok(p).loc;
 
   if (tok_is(p, TOK_IDENT)) {
     n->kind = EXPR_SYMBOL;
@@ -641,6 +713,7 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
 static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
   ast_expr_t* lhs = parse_primary_expr(p);
   if(!lhs) return NULL;
+  loc_t loc = get_tok(p).loc;
 
   for(;;) {
     op_kind_t op = OP_INVALID;
@@ -691,6 +764,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
         ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
         n->ast_kind = AST_EXPR;
         n->kind = kind;
+        n->loc = loc;
         n->as.binop.lhs = lhs;
         n->as.binop.rhs = rhs;
         n->as.binop.op = op;
@@ -705,6 +779,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
 
         ast_expr_t* n = arena_alloc(&p->arena, sizeof(*n));
         n->ast_kind = AST_EXPR;
+        n->loc = get_tok(p).loc;
         n->kind = kind;
 
         n->as.access.owner = lhs;
@@ -719,6 +794,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
       case EXPR_FUNCALL: {
         ast_expr_t* n = arena_alloc(&p->arena, sizeof(*n));
         n->ast_kind = AST_EXPR;
+        n->loc = loc;
         n->kind = kind;
 
         if (!tok_is(p, ')')) {
@@ -749,6 +825,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
 
         ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
         n->ast_kind = AST_EXPR;
+        n->loc = loc;
         n->kind = kind;
         n->as.assign.lhs = lhs;
         n->as.assign.rhs = rhs;
@@ -770,6 +847,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
 static inline ast_type_t* parse_type(parser_t* p) {
   ast_type_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_TYPE;
+  n->loc = get_tok(p).loc;
 
   if(!expect_with_name(p, TOK_IDENT, "type")) return NULL;
   token_t tok = get_tok(p);
@@ -788,8 +866,8 @@ static inline ast_type_t* parse_type(parser_t* p) {
   return n;
 }
 
-static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec_flags_t flags, ast_dec_list_t* decorators);
-static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_flags_t flags, bool global, ast_dec_list_t* decorators);
+static inline ast_func_def_t* parse_func_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, ast_dec_list_t* decorators);
+static inline ast_var_def_t* parse_var_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, bool global, ast_dec_list_t* decorators);
 static inline ast_body_t* parse_body(parser_t* p);
 
 // stmt = return [ expr ] ';' 
@@ -800,6 +878,7 @@ static inline ast_body_t* parse_body(parser_t* p);
 static inline ast_stmt_t* parse_stmt(parser_t* p) {
   ast_stmt_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_STMT;
+  n->loc = get_tok(p).loc;
 
   if(tok_is(p, ';')) {
     if(!expect(p,';')) return NULL;
@@ -857,12 +936,13 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     next(p);
 
     if(tok_is(p, ':')) {
+      loc_t loc = get_tok(p).loc;
       if(!expect(p, ':')) return NULL;
       next(p);
 
       n->kind = STMT_VAR_DEF;
 
-      ast_var_def_t* var_def = parse_var_def(p, name, flags, false, NULL);
+      ast_var_def_t* var_def = parse_var_def(p, loc, name, flags, false, NULL);
       if(!var_def) return NULL;
 
       n->as.var_def = var_def;
@@ -886,6 +966,7 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
 static inline ast_body_t* parse_body(parser_t* p) {
   ast_body_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_BODY;
+  n->loc = get_tok(p).loc;
 
   if(!expect(p, '{')) return NULL;
   next(p);
@@ -908,6 +989,7 @@ static inline ast_body_t* parse_body(parser_t* p) {
 static inline ast_param_t* parse_param(parser_t* p) {
   ast_param_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_PARAM;
+  n->loc = get_tok(p).loc;
 
   if(!expect(p, TOK_IDENT)) return NULL;
   n->name = arena_strdup(&p->arena, get_tok(p).as.s);
@@ -927,6 +1009,7 @@ static inline ast_param_t* parse_param(parser_t* p) {
 static inline ast_sig_t* parse_signature(parser_t* p) {
   ast_sig_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_SIG;
+  n->loc = get_tok(p).loc;
 
   if(!expect(p, '(')) return NULL;
   next(p);
@@ -969,11 +1052,12 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
 }
 
 // func_def = type [ body ]
-static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec_flags_t flags, ast_dec_list_t* decorators) {
+static inline ast_func_def_t* parse_func_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, ast_dec_list_t* decorators) {
   ast_func_def_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_FUNC_DEF;
   n->flags = flags;
   n->name = arena_strdup(&p->arena, name);
+  n->loc = loc;
 
   n->scope = p->current_scope;
 
@@ -996,11 +1080,12 @@ static inline ast_func_def_t* parse_func_def(parser_t* p, const char* name, spec
 }
 
 // var_def = type [ '=' expr ] ';'
-static inline ast_var_def_t* parse_var_def(parser_t* p, const char* name, spec_flags_t flags, bool global, ast_dec_list_t* decorators) {
+static inline ast_var_def_t* parse_var_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, bool global, ast_dec_list_t* decorators) {
   ast_var_def_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_VAR_DEF;
   n->flags = flags;
   n->name = arena_strdup(&p->arena, name);
+  n->loc = loc;
 
   symb_storage_t sto = global ? STO_GLOBAL : STO_LOCAL;
   if(flags & SPEC_EXTERN) sto = STO_EXTERN; 
@@ -1035,6 +1120,7 @@ static inline ast_dec_list_t* parse_dec_list(parser_t* p) {
 
   ast_dec_list_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_DEC_LIST;
+  n->loc = get_tok(p).loc;
   
   // NOTE: do not allow empty decorator list
   struct _decorator dec = { 0 };
@@ -1079,11 +1165,12 @@ static inline ast_dec_list_t* parse_dec_list(parser_t* p) {
 }
 
 static inline ast_impl_t* parse_impl(parser_t* p) {
-  if(!expect(p, TOK_IMPL)) return NULL;
-  next(p);
-
   ast_impl_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_IMPL;
+  n->loc = get_tok(p).loc;
+
+  if(!expect(p, TOK_IMPL)) return NULL;
+  next(p);
 
   ast_type_t* interface = parse_type(p);
   if(!interface) return NULL;
@@ -1108,6 +1195,8 @@ static inline ast_impl_t* parse_impl(parser_t* p) {
 
     spec_flags_t flags = parse_specifiers(p);
 
+    loc_t loc = get_tok(p).loc;
+
     if(!expect(p, TOK_IDENT)) return NULL;
     const char* method_name = get_tok(p).as.s;
     next(p);
@@ -1115,7 +1204,7 @@ static inline ast_impl_t* parse_impl(parser_t* p) {
     if(!expect(p, ':')) return NULL;
     next(p);
 
-    ast_func_def_t* def = parse_func_def(p, method_name, flags, decorators);
+    ast_func_def_t* def = parse_func_def(p, loc, method_name, flags, decorators);
 
     da_append(&n->methods, def);
   }
@@ -1126,19 +1215,22 @@ static inline ast_impl_t* parse_impl(parser_t* p) {
   return n;
 }
 
-static inline ast_iface_t* parse_iface(parser_t* p, const char* name) {
+static inline ast_iface_t* parse_iface(parser_t* p, loc_t loc, const char* name) {
   if(!expect(p, TOK_INTERFACE)) return NULL;
   next(p);
 
   ast_iface_t* n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_IFACE;
   n->name = arena_strdup(&p->arena, name);
+  n->loc = loc;
 
   if(!expect(p, '{')) return NULL;
   next(p);
 
   while(!tok_is(p, '}')) {
     spec_flags_t flags = parse_specifiers(p);
+
+    loc_t loc = get_tok(p).loc;
 
     if(!expect(p, TOK_IDENT)) return NULL;
     const char* method_name = get_tok(p).as.s;
@@ -1147,7 +1239,7 @@ static inline ast_iface_t* parse_iface(parser_t* p, const char* name) {
     if(!expect(p, ':')) return NULL;
     next(p);
 
-    ast_func_def_t* def = parse_func_def(p, method_name, flags, NULL);
+    ast_func_def_t* def = parse_func_def(p, loc, method_name, flags, NULL);
 
     da_append(&n->methods, def);
   }
@@ -1162,7 +1254,6 @@ static inline ast_iface_t* parse_iface(parser_t* p, const char* name) {
 //     | ( [ dec_list ] spec_flags ident ':' var_def )*
 //     | ( ident ':' 'impl' ident '{' ( ident ':' func_decl func_def '}' )+ )*
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
-  p->source = t->source;
   p->tokens = t->tokens;
   p->current = 0;
 
@@ -1185,6 +1276,8 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
 
       spec_flags_t flags = parse_specifiers(p);
 
+      loc_t loc = get_tok(p).loc;
+
       if(!expect(p, TOK_IDENT)) return NULL;
       const char* name = get_tok(p).as.s; 
       next(p);
@@ -1192,17 +1285,17 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
       next(p);
 
       if(tok_is(p, '(')) {
-        ast_func_def_t* def = parse_func_def(p, name, flags, decorators);
+        ast_func_def_t* def = parse_func_def(p, loc, name, flags, decorators);
         if (!def) return NULL;
 
         da_append(&n->func_defs, def);
       } else if (tok_is(p, TOK_INTERFACE)) {
-        ast_iface_t* interface = parse_iface(p, name);
+        ast_iface_t* interface = parse_iface(p, loc, name);
         if(!interface) return NULL;
 
         da_append(&n->interfaces, interface);
       } else {
-        ast_var_def_t* def = parse_var_def(p, name, flags, true, decorators);
+        ast_var_def_t* def = parse_var_def(p, loc, name, flags, true, decorators);
         if (!def) return NULL;
 
         da_append(&n->var_defs, def);
@@ -1447,8 +1540,8 @@ static inline int type_equals(type_t a, type_t b) {
   }
 }
 
-static inline void print_type(FILE* stream, const type_t* t) {
-  if(!t) UNREACHABLE("print_type: null type*");
+static inline void render_type(sb_t* sb, const type_t* t) {
+  if(!t) UNREACHABLE("render_type: null type*");
   switch(t->kind) {
     case TYPE_NONE:
     case TYPE_I32:
@@ -1462,33 +1555,47 @@ static inline void print_type(FILE* stream, const type_t* t) {
     case TYPE_STR:
     case TYPE_ADDR:
     case TYPE_ALIAS:
-      fprintf(stream, "%s", t->name);
+      sb_appendf(sb, "%s", t->name);
       break;
     case TYPE_STRUCT:
-      fprintf(stream, "struct %s", t->name);
+      sb_appendf(sb, "struct %s", t->name);
       break;
     case TYPE_MODULE:
-      fprintf(stream, "module %s", t->name);
+      sb_appendf(sb, "module %s", t->name);
       break;
     case TYPE_ARRAY:
-      print_type(stream, t->as.array.inner);
-      fprintf(stream, "[]");
+      render_type(sb, t->as.array.inner);
+      sb_appendf(sb, "[]");
       break;
     case TYPE_FUNC:
-      fprintf(stream, "(");
+      sb_appendf(sb, "(");
       da_foreach(type_t*, typ, &t->as.func.params) {
-        print_type(stream, *typ);
-        fprintf(stream, ",");
+        render_type(sb, *typ);
+        sb_appendf(sb, ",");
       }
-      fprintf(stream, ") -> ");
-      print_type(stream, t->as.func.ret);
+      sb_appendf(sb, ") -> ");
+      render_type(sb, t->as.func.ret);
       break;
     case TYPE_INTERFACE:
-      fprintf(stream, "interface %s", t->name);
+      sb_appendf(sb, "interface %s", t->name);
       break;
     case TYPES_COUNT:
     default: break;
   }
+}
+
+static inline const char* type_to_str(arena_t* a, const type_t* t) {
+  sb_t sb = { 0 };
+
+  render_type(&sb, t);
+  sb_appendz(&sb, "");
+  return arena_sprintf(a, "%.*s", SB_FMT(sb));
+}
+
+static inline void print_type(FILE* stream, const type_t* t) {
+  sb_t sb = { 0 };
+  render_type(&sb, t);
+  fprintf(stream, "%.*s", SB_FMT(sb));
 }
 
 static inline void typechecker_destroy(typechecker_t* t) {
@@ -1705,23 +1812,22 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
     }
   } else if (is_op_arithmetic(op)) {
     if (is_numeric(left) && is_numeric(right)) {
-      const type_t* try_promotion = find_common_type(left, right);
-      if (!try_promotion) {
-        fprintf(stderr, "[ERROR] Typechecker\n  ");
-        return false;
-      }
-      e->type = try_promotion;
+      e->type = find_common_type(left, right);
       return true;
     }
   }
 
   symbol_t* impl = find_binop_impl(left, op, right);
   if (!impl) {
-    fprintf(stderr, "[ERROR] Typechecker\n  `");
-    print_type(stderr, left);
-    fprintf(stderr, "` does not implement interface method for %s operator and `", tok_kind_str(&t->arena, (tok_kind_t)op));
-    print_type(stderr, right);
-    fprintf(stderr, "` operand\n");
+    fdiagf(
+      stderr,
+      DIAG_ERROR,
+      e->loc,
+      "`%s` does not implement interface method for %s operator and `%s` operand.",
+      type_to_str(&t->arena, left),
+      tok_kind_str(&t->arena, (tok_kind_t)op),
+      type_to_str(&t->arena, right)
+    );
     return false;
   }
 
@@ -1755,7 +1861,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
     case EXPR_SYMBOL:
       symbol_t* s = resolve_symbol_any(t->current_scope, expr->as.symbol); 
       if (!s || !s->type) {
-        fprintf(stderr, "[ERROR] Typechecker\n Undeclared symbol `%s`.\n", expr->as.symbol);
+        fdiagf(stderr, DIAG_ERROR, expr->loc, "Undeclared symbol `%s`.", expr->as.symbol);
         return false;
       }
       expr->type = s->type;
@@ -1797,16 +1903,21 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
 
       if (expr->as.access.op == OP_SCOPE) {
         if (expr->as.access.owner->type->kind != TYPE_MODULE) {
-          fprintf(stderr, "[ERROR] Typechecker\n Owner is not a module.\n");
+          fdiagf(stderr, DIAG_ERROR, expr->as.access.owner->loc, "Not a module.");
           return false;
         }
         TODO("typecheck_expr: EXPR_ACCESS - module fields");
       } else if (expr->as.access.op == OP_MEMB) {
         symbol_t* s = resolve_symbol_any(expr->as.access.owner->type->scope, expr->as.access.field);
         if (!s) {
-          fprintf(stderr, "[ERROR] Typechecker\n  `");
-          print_type(stderr, expr->as.access.owner->type);
-          fprintf(stderr, "` has no field named `%s`\n", expr->as.access.field);
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            expr->loc,
+            "`%s` has no field named `%s`.",
+            type_to_str(&t->arena, expr->as.access.owner->type),
+            expr->as.access.field
+          );
           return false;
         }
         expr->type = s->type;
@@ -1820,17 +1931,16 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       if(!typecheck_expr(t, callee)) return false;
 
       if (callee->type->kind != TYPE_FUNC) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Attempting to call non-callable type ");
-        print_type(stderr, callee->type);
-        fprintf(stderr, ".\n");
+        fdiagf(stderr, DIAG_ERROR, callee->loc, "Attempting to call non-callable type `%s`", type_to_str(&t->arena, callee->type));
         return false;
       }
 
       if (expr->as.funcall.args.count + (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB) != callee->type->as.func.params.count) {
-          fprintf(
+          fdiagf(
             stderr, 
-            "[ERROR] Typechecker\n  "
-            "Mismatched number of arguments in function call: expected %zu, got %zu.\n",
+            DIAG_ERROR,
+            expr->loc,
+            "Mismatched number of arguments in function call: expected %zu, got %zu.",
             callee->type->as.func.params.count,
             expr->as.funcall.args.count
           );
@@ -1840,11 +1950,14 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       // NOTE: should never happen
       if (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB) {
         if(!type_equals(*callee->as.access.owner->type, **callee->type->as.func.params.items)) {
-          fprintf(stderr, "[ERROR] Typechecker\n  Mismatched type for method: expected ");
-          print_type(stderr, *callee->type->as.func.params.items);
-          fprintf(stderr, ", got ");
-          print_type(stderr, callee->as.access.owner->type);
-          fprintf(stderr, ".\n");
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            callee->loc,
+            "Mismatched type for method: expected `%s`, got `%s`",
+            type_to_str(&t->arena, *callee->type->as.func.params.items),
+            type_to_str(&t->arena, callee->as.access.owner->type)
+          );
           return false;
         }
       }
@@ -1856,11 +1969,15 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         type_t const* b = da_at(callee->type->as.func.params, i + (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB));
         if (!type_equals(*a, *b)) {
           // TODO: find way to retrieve argument name for better diagnostics
-          fprintf(stderr, "[ERROR] Typechecker\n  Mismatched type for argument %zu in function call: expected ", i);
-          print_type(stderr, b);
-          fprintf(stderr, ", got ");
-          print_type(stderr, a);
-          fprintf(stderr, ".\n");
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            arg->loc,
+            "Mismatched type for argument %zu in function call: expected `%s`, got `%s`.", 
+            i,
+            type_to_str(&t->arena, b),
+            type_to_str(&t->arena, a)
+          );
           return false;
         }
       }
@@ -1877,11 +1994,14 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       if(!typecheck_expr(t, expr->as.binop.rhs)) return false;
 
       if(expr->as.binop.lhs->type != expr->as.binop.rhs->type) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Incompatible types when assigning expression of type `");
-        print_type(stderr, expr->as.binop.rhs->type);
-        fprintf(stderr, "` to variable of type `");
-        print_type(stderr, expr->as.binop.lhs->type );
-        fprintf(stderr, "`.\n");
+        fdiagf(
+          stderr,
+          DIAG_ERROR,
+          expr->as.binop.rhs->loc,
+          "Incompatible types when assigning expression of type `%s` to variable of type `%s`.",
+          type_to_str(&t->arena, expr->as.binop.rhs->type),
+          type_to_str(&t->arena, expr->as.binop.lhs->type )
+        );
         return false;
       }
       expr->type = t->builtins.none;
@@ -1895,7 +2015,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
 static inline bool resolve_type_decl(typechecker_t* t, ast_type_t* type) {
   type_t* res = resolve_type(t, type->name, type->array_depth);
   if(!res) {
-    fprintf(stderr, "[ERROR] Typechecker\n  Undefined type `%s`.\n", type->name);
+    fdiagf(stderr, DIAG_ERROR, type->loc, " Undefined type `%s`.", type->name);
     return false;
   }
   type->resolved_type = res;
@@ -1909,11 +2029,14 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
     case STMT_RET:
       if(!typecheck_expr(t, stmt->as.retval)) return false;
       if(!type_equals(*stmt->as.retval->type, *ret_type)) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Incompatible return type: have `");
-        print_type(stderr, stmt->as.retval->type);
-        fprintf(stderr, "`, expect `");
-        print_type(stderr, ret_type);
-        fprintf(stderr, "`.\n");
+        fdiagf(
+          stderr,
+          DIAG_ERROR,
+          stmt->loc,
+          "Incompatible return type: expected `%s`, got `%s`.",
+          type_to_str(&t->arena, ret_type),
+          type_to_str(&t->arena, stmt->as.retval->type)
+        );
         return false; 
       }
       break;
@@ -1925,11 +2048,11 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
       stmt->as.var_def->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, stmt->as.var_def->name, stmt->as.var_def->type->resolved_type);
 
       if( stmt->as.var_def->flags & SPEC_EXTERN ) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Cannot define an extern local variable.\n");
+        fdiagf(stderr, DIAG_ERROR, stmt->loc, "Cannot define an extern local variable.");
         return false;
       }
       if( stmt->as.var_def->flags & SPEC_EXPORT ) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Cannot export a local variable.\n");
+        fdiagf(stderr, DIAG_ERROR, stmt->loc, "Cannot export a local variable.n");
         return false;
       }
 
@@ -1940,7 +2063,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
             (*symb)->kind == SYMB_VAR &&
             strcmp(stmt->as.var_def->name, (*symb)->name) == 0
         ) {
-          fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope", stmt->as.var_def->name);
+          fdiagf(stderr, DIAG_ERROR, stmt->loc, "Multiple definitions for variable `%s` in this scope", stmt->as.var_def->name);
           return false;
         }
         // NOTE: allow shadowing -> do not check in parent scope
@@ -1950,11 +2073,14 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
       if(stmt->as.var_def->init) {
         if(!typecheck_expr(t, stmt->as.var_def->init)) return false;
         if(stmt->as.var_def->type->resolved_type != stmt->as.var_def->init->type) {
-          fprintf(stderr, "[ERROR] Typechecker\n  Incompatible types when initializing type `");
-          print_type(stderr, stmt->as.var_def->type->resolved_type);
-          fprintf(stderr, "` using type `");
-          print_type(stderr, stmt->as.var_def->init->type);
-          fprintf(stderr, "`.\n");
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            stmt->loc,
+            "Incompatible types when initializing type `%s` using type `%s`.",
+            type_to_str(&t->arena, stmt->as.var_def->type->resolved_type),
+            type_to_str(&t->arena, stmt->as.var_def->init->type)
+          );
           return false;
         }
       }
@@ -1963,11 +2089,14 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
       struct _if_else* if_else = &stmt->as.if_else;
       if(!typecheck_expr(t, if_else->cond)) return false;
       if(!type_equals(*if_else->cond->type, *t->builtins.boolean)) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Incompatible type in condition: expected `");
-        print_type(stderr, t->builtins.boolean);
-        fprintf(stderr, "`, got `");
-        print_type(stderr, if_else->cond->type);
-        fprintf(stderr, "`.\n");
+        fdiagf(
+          stderr,
+          DIAG_ERROR,
+          if_else->cond->loc,
+          "Incompatible type in condition: expected `%s`, got `%s`.",
+          type_to_str(&t->arena, t->builtins.boolean),
+          type_to_str(&t->arena, if_else->cond->type)
+        );
         return false;
       }
 
@@ -2036,11 +2165,11 @@ static inline bool resolve_func_def(typechecker_t* t, ast_func_def_t* def) {
 
 static inline bool typecheck_func(typechecker_t* t, ast_func_def_t* func) {
   if(!func->body && !(func->flags & SPEC_EXTERN)) {
-    fprintf(stderr, "[ERROR] Typechecker\n  Cannot define a non-extern function without a body.\n");
+    fdiagf(stderr, DIAG_ERROR, func->loc, "Cannot define a non-extern function without a body.");
     return false;
   }
   if(func->body && (func->flags & SPEC_EXTERN)) {
-    fprintf(stderr, "[ERROR] Typechecker\n  Cannot define an extern function with a body.\n");
+    fdiagf(stderr, DIAG_ERROR, func->loc, "Cannot define an extern function with a body.");
     return false;
   }
 
@@ -2051,9 +2180,14 @@ static inline bool typecheck_func(typechecker_t* t, ast_func_def_t* func) {
         strcmp(func->name, (*symb)->name) == 0 &&
         type_equals(*(*symb)->type, *func->sig->resolved_type)
     ) {
-      fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for function `%s` with type ", func->name);
-      print_type(stderr, func->sig->resolved_type);
-      fprintf(stderr, " in this scope.\n");
+      fdiagf(
+        stderr,
+        DIAG_ERROR,
+        func->loc,
+        "Multiple definitions for function `%s` with type `%s` in this scope.",
+        func->name,
+        type_to_str(&t->arena, func->sig->resolved_type)
+      );
       return false;
     }
   }
@@ -2106,12 +2240,12 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       if(!resolve_func_def(t, *def)) return false;
 
       if((*def)->body) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Cannot define method `%s` with body in `%s` interface.\n", (*def)->name, (*iface)->name);
+        fdiagf(stderr, DIAG_ERROR, (*def)->loc, "Cannot define method `%s` with body in `%s` interface.", (*def)->name, (*iface)->name);
         return false;
       }
 
       if((*def)->flags) {
-        fprintf(stderr, "[WARNING] Typechecker\n  Specifiers for method `%s` in `%s` interface will be ignored.\n", (*def)->name, (*iface)->name);
+        fdiagf(stderr, DIAG_ERROR, (*def)->loc, "Specifiers for method `%s` in `%s` interface will be ignored.", (*def)->name, (*iface)->name);
       }
 
       da_append(&type->as.interface.methods, ((interface_method_t){ .name = (*def)->name, .type = (*def)->sig->resolved_type }));
@@ -2139,7 +2273,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
           if(strcmp(m->name, (*method)->name) == 0) { found = true; break;}
         }
         if(!found) {
-          fprintf(stderr, "[ERROR] Typechecker\n  Undeclared method `%s` in `%s` interface.\n", (*method)->name, (*impl)->interface->name);
+          fdiagf(stderr, DIAG_ERROR, (*method)->loc, "Undeclared method `%s` in `%s` interface.", (*method)->name, (*impl)->interface->name);
           return false;
         }
       }
@@ -2149,7 +2283,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
           (*method)->symbol->type->as.func.params.count < 1 || 
           !type_equals(*(*method)->symbol->type->as.func.params.items[0], *self)
       ) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Method `%s` requires `Self` first argument.\n", (*method)->name);
+        fdiagf(stderr, DIAG_ERROR, (*method)->loc, "Method `%s` requires `Self` first argument.", (*method)->name);
         return false;
       }
     }
@@ -2161,7 +2295,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
         // TODO: compare types, not just name
         symbol_t* s = resolve_symbol_local(type->scope, m->name, SYMB_FUNC);
         if(!s) {
-          fprintf(stderr, "[ERROR] Typechecker\n  Missing required method `%s` in `%s` interface implementation.\n", m->name, (*impl)->interface->name);
+          fdiagf(stderr, DIAG_ERROR, (*impl)->loc, "Missing required method `%s` in `%s` interface implementation.", m->name, (*impl)->interface->name);
           return false;
         }
       }
@@ -2187,7 +2321,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     (*d)->symbol->type = (*d)->type->resolved_type;
 
     if((*d)->init && ((*d)->flags & SPEC_EXTERN)) {
-      fprintf(stderr, "[ERROR] Typechecker\n  Cannot initialize an extern variable.\n");
+      fdiagf(stderr, DIAG_ERROR, (*d)->loc, "Cannot initialize an extern variable.");
       return false;
     }
 
@@ -2197,7 +2331,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
           (*symb)->kind == SYMB_VAR &&
           strcmp((*d)->name, (*symb)->name) == 0
       ) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Multiple definitions for variable `%s` in this scope.\n", (*d)->name);
+        fdiagf(stderr, DIAG_ERROR, (*d)->loc, "Multiple definitions for variable `%s` in this scope.", (*d)->name);
         return false;
       }
       // NOTE: allow shadowing -> do not check in parent scope
@@ -2207,16 +2341,19 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     if((*d)->init) {
       if(!typecheck_expr(t, (*d)->init)) return false;
       if(!(*d)->init->is_const) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Initializer is not a compile-time constant.\n");
+        fdiagf(stderr, DIAG_ERROR, (*d)->init->loc, "Initializer is not a compile-time constant.");
         return false;
       }
 
       if(!type_equals(*(*d)->type->resolved_type, *(*d)->init->type)) {
-        fprintf(stderr, "[ERROR] Typechecker\n  Incompatible types when initializing type `");
-        print_type(stderr, (*d)->type->resolved_type);
-        fprintf(stderr, "` using type `");
-        print_type(stderr, (*d)->init->type);
-        fprintf(stderr, "`.\n");
+        fdiagf(
+          stderr,
+          DIAG_ERROR,
+          (*d)->init->loc,
+          "Incompatible types when initializing type `%s` using type `%s`.",
+          type_to_str(&t->arena, (*d)->type->resolved_type),
+          type_to_str(&t->arena, (*d)->init->type)
+        );
         return false;
       }
     }
@@ -2231,7 +2368,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
         symbol_t* symbol = resolve_symbol(scope, e->as.symbol, SYMB_VAR);
         if (!symbol) {
-          fprintf(stderr, "[ERROR] Codegen\n No variable `%s` in current scope.\n", e->as.symbol);
+          fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in current scope.", e->as.symbol);
           return false;
         }
         switch (symbol->storage) {
@@ -2309,7 +2446,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           } else if (e->as.access.owner->type->kind == TYPE_STRUCT) {
             TODO("codegen_expr: EXPR_ACCESS - struct");
           } else {
-            fprintf(stderr, "[ERROR] Codegen\n Owner is not a built-in or a structure.\n");
+            fdiagf(stderr, DIAG_ERROR, e->loc, "Not a built-in or a structure.");
             return false;
           }
         }
@@ -2326,7 +2463,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           // TODO: resolve symbol once in typechecker
           symbol = resolve_symbol(scope, callee->as.symbol, SYMB_FUNC);
           if (!symbol) {
-            fprintf(stderr, "[ERROR] Codegen\n No function `%s` in current scope.\n", callee->as.symbol);
+            fdiagf(stderr, DIAG_ERROR, callee->loc, "No function `%s` in current scope.", callee->as.symbol);
             return false;
           }
         } else if (callee->kind == EXPR_ACCESS) {
@@ -2334,9 +2471,16 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           if(!codegen_expr(p, scope, owner)) return false;
           symbol = resolve_symbol(owner->type->scope, callee->as.access.field, SYMB_FUNC);
           if (!symbol) {
-            fprintf(stderr, "[ERROR] Codegen\n No method `%s` in type ", callee->as.access.field);
-            print_type(stderr, owner->type);
-            fprintf(stderr, ".\n");
+            // TODO: remove this abomination
+            arena_t temp = { 0 };
+            fdiagf(
+              stderr,
+              DIAG_ERROR,
+              callee->loc,
+              "No method `%s` in type `%s`.",
+              callee->as.access.field,
+              type_to_str(&temp, owner->type)
+            );
             return false;
           }
         } else {
@@ -2360,7 +2504,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
           symbol_t* symbol = resolve_symbol(scope, e->as.assign.lhs->as.symbol, SYMB_VAR);
           if (!symbol) {
-            fprintf(stderr, "[ERROR] Codegen\n No variable `%s` in current scope.\n", e->as.symbol);
+            fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in current scope.", e->as.symbol);
             return false;
           }
           switch (symbol->storage) {
@@ -2402,8 +2546,8 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
     }
     case STMT_VAR_DEF:
       if (f->loc_vars >= MAX_LOC_VARS) {
-        fprintf(stderr, "[ERROR] Codegen\n  Too many local variables in function %s", f->name);
-        return false;
+        fdiagf(stderr, DIAG_FATAL, s->loc, "Too many local variables in function %s", f->name);
+        abort();
       }
       symbol_t* symb = s->as.var_def->symbol;
       set_symbol_address(symb, f->loc_vars++);
@@ -2504,8 +2648,8 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
     );
 
     if (status != FFI_OK) {
-      fprintf(stderr, "[ERROR] Codegen\n  Could not initialize FFI CIF\n");
-      return false;
+      fdiagf(stderr, DIAG_FATAL, d->loc, "Could not initialize FFI CIF");
+      abort();
     }
 
     set_symbol_address(d->symbol, p->externs.count);
@@ -2785,9 +2929,11 @@ static inline type_t* method_owner(symbol_t* s) {
   return (*s->type->as.func.params.items);
 }
 
-bool compile(program_t* program, const char* source) {
+// TODO: save slice_t instead of sb_t in tokenizer
+bool compile(program_t* program, const char* path, const char* source) {
   tokenizer_t tok = { 0 };
   sb_append(&tok.source, source);
+  tok.path = path;
 
   parser_t parser = { 0 };
   typechecker_t tc = { 0 };
@@ -2795,7 +2941,7 @@ bool compile(program_t* program, const char* source) {
   printf("%s\n\n", source);
 
   if(tok_tokenize(&tok)) return false;
-  fprintf(stdout, "[DEBUG] Tokenization OK.\n");
+  fprintf(stdout, "%s%s\033[0m Tokenization OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
   // da_foreach(token_t, t, &tok.tokens) {
   //   tok_print(*t);
@@ -2803,16 +2949,16 @@ bool compile(program_t* program, const char* source) {
 
   ast_root_t* root = parse(&parser, &tok);
   if(!root) return false;
-  fprintf(stdout, "[DEBUG] Parsing OK.\n");
+  fprintf(stdout, "%s%s\033[0m Parsing OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
   // print_ast(stdout, (ast_node_t*)root, 0);
 
   typechecker_init(&tc);
   if(!typecheck(&tc, root)) return false;
-  fprintf(stdout, "[DEBUG] Typechecker OK.\n");
+  fprintf(stdout, "%s%s\033[0m Typechecker OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
   if(!codegen(program, root)) return false;
-  fprintf(stdout, "[DEBUG] Codegen OK.\n");
+  fprintf(stdout, "%s%s\033[0m Codegen OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
   // print_symbol_table(stdout, root->scope);
 

@@ -6,6 +6,7 @@
 
 #include "arena.h"
 #include "sb.h"
+#include "slice.h"
 
 #ifndef MAX_CALL_STACK
 #define MAX_CALL_STACK 1024
@@ -52,9 +53,13 @@ typedef enum {
 } lit_type_info_flags_t;
 
 typedef struct {
+  size_t line, col;
+  slice_t line_view; 
+  const char* path;
+} loc_t;
+
+typedef struct {
   tok_kind_t kind;
-  const char* start;
-  int len;
   lit_type_info_flags_t type_info;
   union {
     const char* s;
@@ -62,8 +67,8 @@ typedef struct {
     uint64_t    u;
     int64_t     i;
   } as;
-  size_t line;
-  size_t col;
+  slice_t view;
+  loc_t loc;
 } token_t;
 
 typedef struct {
@@ -76,15 +81,12 @@ typedef struct {
   sb_t source;
   tokenarr_t tokens;
   arena_t arena;
+  const char* path;
 } tokenizer_t;
 
 typedef struct _scope scope_t;
 
 typedef struct {
-  sb_t source;
-  size_t line;
-  size_t col;
-
   arena_t arena;
   tokenarr_t tokens;
   size_t current;
@@ -112,7 +114,8 @@ typedef enum {
 } ast_node_kind_t;
 
 #define AST_DEFAULT_FIELDS\
-  ast_node_kind_t ast_kind \
+  ast_node_kind_t ast_kind; \
+  loc_t loc
 
 typedef struct {
   AST_DEFAULT_FIELDS;

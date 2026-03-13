@@ -97,7 +97,7 @@ void test() {
 
 int main() {
   program_t prog = { 0 };
-  if(!compile(&prog, source)) {
+  if(!compile(&prog, NULL, source)) {
     fprintf(stderr, "compilation failed!\n");
     return 1;
   }
@@ -114,3 +114,5 @@ int main() {
 #include "da.h"
 #define ARENA_IMPLEMENTATION
 #include "arena.h"
+#define SLICE_IMPLEMENTATION
+#include "slice.h"
