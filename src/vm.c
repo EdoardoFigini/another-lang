@@ -236,13 +236,13 @@ vm_exitcode_t exec(vm_t* vm) {
       break;
     case INST_JMP:
       operand = *(vm->ip + 1);
-      vm->ip += operand;
+      vm->ip += (int32_t)operand;
       break;
     case INST_JNZ:
       operand = *(vm->ip + 1);
       POP(vm, a);
       if (a != 0)
-        vm->ip += operand;
+        vm->ip += (int32_t)operand;
       else
         vm->ip += 2;
       break;
@@ -250,7 +250,7 @@ vm_exitcode_t exec(vm_t* vm) {
       operand = *(vm->ip + 1);
       POP(vm, a);
       if (a == 0)
-        vm->ip += operand;
+        vm->ip += (int32_t)operand;
       else
         vm->ip += 2;
       break;

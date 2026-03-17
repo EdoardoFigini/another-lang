@@ -26,6 +26,7 @@ const char* tok_keywords[] = {
   [KW_CONST]     = "const",
   [KW_IF]        = "if",
   [KW_ELSE]      = "else",
+  [KW_WHILE]     = "while",
   [KW_IMPL]      = "impl",
   [KW_INTERFACE] = "interface",
 };
@@ -112,6 +113,7 @@ void tok_print(token_t tok) {
       case TOK_CONST: printf("%-20s", "TOK_CONST"); break;
       case TOK_IF: printf("%-20s", "TOK_IF"); break;
       case TOK_ELSE: printf("%-20s", "TOK_ELSE"); break;
+      case TOK_WHILE: printf("%-20s", "TOK_WHILE"); break;
       case TOK_IMPL: printf("%-20s", "TOK_IMPL"); break;
       case TOK_INTERFACE: printf("%-20s", "TOK_INTERFACE"); break;
       default: printf("%-20s", "<INVALID TOKEN>"); break;
@@ -140,6 +142,7 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_CONST:
       case TOK_IF:
       case TOK_ELSE:
+      case TOK_WHILE:
       case TOK_IMPL:
       case TOK_INTERFACE:
         return tok_keywords[k];
@@ -591,6 +594,7 @@ static inline bool tok_is_specifier(parser_t* p) {
     case KW_RETURN:
     case KW_IF:
     case KW_ELSE:
+    case KW_WHILE:
     case KW_IMPL:
     case KW_INTERFACE:
     default: 
@@ -614,6 +618,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
       case KW_RETURN:
       case KW_IF:
       case KW_ELSE:
+      case KW_WHILE:
       case KW_IMPL:
       case KW_INTERFACE:
       default: return flags;
@@ -910,19 +915,34 @@ static inline ast_stmt_t* parse_stmt(parser_t* p) {
     if(!expr) return NULL;
     n->as.if_else.cond = expr;
 
-    n->as.if_else.if_scope = p->current_scope;
     ast_body_t* if_body = parse_body(p);
+    if(!if_body) return NULL;
     n->as.if_else.if_body = if_body;
 
     if(tok_is(p, TOK_ELSE)) {
       if(!expect(p, TOK_ELSE)) return NULL;
       next(p);
 
-      n->as.if_else.else_scope = p->current_scope;
       ast_body_t* else_body = parse_body(p);
+      if(!else_body) return NULL;
       n->as.if_else.else_body = else_body;
     }
     // TODO: handle else if (elif)
+
+    return n;
+  
+  } else if (tok_is(p, TOK_WHILE)) {
+    if(!expect(p, TOK_WHILE)) return NULL;
+    next(p);
+    n->kind = STMT_WHILE; 
+
+    ast_expr_t* expr = parse_expr(p, 0);
+    if(!expr) return NULL;
+    n->as.while_loop.cond = expr;
+
+    ast_body_t* body = parse_body(p);
+    if(!body) return NULL;
+    n->as.while_loop.body = body;
 
     return n;
 
@@ -2116,6 +2136,30 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         exit_scope(t);
       }
       break;
+    case STMT_WHILE:
+      struct _while* wl = &stmt->as.while_loop;
+      if(!typecheck_expr(t, wl->cond)) return false;
+      if(!type_equals(*wl->cond->type, *t->builtins.boolean)) {
+        fdiagf(
+          stderr,
+          DIAG_ERROR,
+          wl->cond->loc,
+          "Incompatible type in condition: expected `%s`, got `%s`.",
+          type_to_str(&t->arena, t->builtins.boolean),
+          type_to_str(&t->arena, wl->cond->type)
+        );
+        return false;
+      }
+
+      enter_scope_new(t, arena_sprintf(&t->arena, "%s_while", t->current_scope->name));
+      wl->scope = t->current_scope;
+      da_foreach(ast_stmt_t*, stmt, &wl->body->stmts) {
+        if(!typecheck_stmt(t, *stmt, ret_type)) return false;
+      }
+      exit_scope(t);
+
+      break;
+
     default:
       UNREACHABLE("typecheck_stmt");
   }
@@ -2557,7 +2601,7 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
         da_append(&p->code, symb->addr);
       }
       return true;
-    case STMT_IF:
+    case STMT_IF: {
       size_t j_to_end_offset = 0; 
       size_t j_to_else_offset = 0;
 
@@ -2584,6 +2628,29 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
 
       p->code.items[j_to_end_offset] = p->code.count - j_to_end_offset + 1;
       return true;
+    }
+    case STMT_WHILE: {
+      size_t j_to_start = p->code.count - 1;
+      size_t j_to_end_offset = 0;
+
+      struct _while* wl = &s->as.while_loop;
+      if(!codegen_expr(p, scope, wl->cond)) return false;
+
+      da_append(&p->code, INST_JZ);
+      da_append(&p->code, 0);
+      j_to_end_offset = p->code.count - 1;
+
+      da_foreach(ast_stmt_t*, stmt, &wl->body->stmts)
+        if(!codegen_stmt(p, wl->scope, f, *stmt)) return false;
+
+      int32_t rel_jmp = (p->code.count - 1) - j_to_start;
+      da_append(&p->code, INST_JMP);
+      da_append(&p->code, -rel_jmp);
+
+      p->code.items[j_to_end_offset] = p->code.count - j_to_end_offset + 1;
+
+      return true;
+    }
     default: 
       UNREACHABLE("codegen_stmt");
   }

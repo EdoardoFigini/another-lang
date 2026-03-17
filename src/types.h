@@ -31,6 +31,7 @@ typedef enum {
   TOK_CONST,
   TOK_IF,
   TOK_ELSE,
+  TOK_WHILE,
   TOK_IMPL,
   TOK_INTERFACE,
 } tok_kind_t;
@@ -42,6 +43,7 @@ typedef enum {
   KW_CONST     = TOK_CONST,
   KW_IF        = TOK_IF,
   KW_ELSE      = TOK_ELSE,
+  KW_WHILE     = TOK_WHILE,
   KW_IMPL      = TOK_IMPL,
   KW_INTERFACE = TOK_INTERFACE,
 } kw_kind_t;
@@ -343,6 +345,7 @@ typedef enum {
   STMT_EXPR,
   STMT_VAR_DEF,
   STMT_IF,
+  STMT_WHILE,
 } ast_stmt_kind_t;
 
 typedef struct {
@@ -359,6 +362,11 @@ typedef struct {
       scope_t* else_scope;
       ast_body_t* else_body;
     } if_else;
+    struct _while {
+      ast_expr_t* cond;
+      scope_t* scope;
+      ast_body_t* body;
+    } while_loop;
   } as;
 } ast_stmt_t;
 
