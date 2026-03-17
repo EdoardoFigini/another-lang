@@ -573,10 +573,10 @@ static inline void exit_scope(typechecker_t* t) {
   t->current_scope = t->current_scope->parent;
 }
 
-static inline const char* decorators_get(ast_dec_list_t* l, const char* key) {
+static inline const char* attributes_get(ast_attr_list_t* l, const char* key) {
   if(!l) return NULL;
   // OPTIMIZE
-  da_foreach(struct _decorator, d, &l->decs) {
+  da_foreach(struct _attribute, d, &l->attrs) {
     if(strcmp(d->key, key) == 0) return d->value;
   }
   return NULL;
@@ -866,8 +866,8 @@ static inline ast_type_t* parse_type(parser_t* p) {
   return n;
 }
 
-static inline ast_func_def_t* parse_func_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, ast_dec_list_t* decorators);
-static inline ast_var_def_t* parse_var_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, bool global, ast_dec_list_t* decorators);
+static inline ast_func_def_t* parse_func_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, ast_attr_list_t* attributes);
+static inline ast_var_def_t* parse_var_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, bool global, ast_attr_list_t* attributes);
 static inline ast_body_t* parse_body(parser_t* p);
 
 // stmt = return [ expr ] ';' 
@@ -1052,7 +1052,7 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
 }
 
 // func_def = type [ body ]
-static inline ast_func_def_t* parse_func_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, ast_dec_list_t* decorators) {
+static inline ast_func_def_t* parse_func_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, ast_attr_list_t* attributes) {
   ast_func_def_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_FUNC_DEF;
   n->flags = flags;
@@ -1074,13 +1074,13 @@ static inline ast_func_def_t* parse_func_def(parser_t* p, loc_t loc, const char*
     n->body = body;
   }
 
-  n->decorators = decorators;
+  n->attributes = attributes;
 
   return n;
 }
 
 // var_def = type [ '=' expr ] ';'
-static inline ast_var_def_t* parse_var_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, bool global, ast_dec_list_t* decorators) {
+static inline ast_var_def_t* parse_var_def(parser_t* p, loc_t loc, const char* name, spec_flags_t flags, bool global, ast_attr_list_t* attributes) {
   ast_var_def_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_VAR_DEF;
   n->flags = flags;
@@ -1106,54 +1106,54 @@ static inline ast_var_def_t* parse_var_def(parser_t* p, loc_t loc, const char* n
   if(!expect(p, ';')) return NULL;
   next(p);
 
-  n->decorators = decorators;
+  n->attributes = attributes;
 
   return n;
 }
 
-// dec_list: '[' '[' ident ':' TOK_STRLIT ( ',' ident ':' TOK_STRLIT )* ']' ']'
-static inline ast_dec_list_t* parse_dec_list(parser_t* p) {
+// attr_list: '[' '[' ident '=' TOK_STRLIT ( ',' ident '=' TOK_STRLIT )* ']' ']'
+static inline ast_attr_list_t* parse_attr_list(parser_t* p) {
   if(!expect(p, '[')) return NULL;
   next(p);
   if(!expect(p, '[')) return NULL;
   next(p);
 
-  ast_dec_list_t* n = arena_alloc(&p->arena, sizeof(*n));
-  n->ast_kind = AST_DEC_LIST;
+  ast_attr_list_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_ATTR_LIST;
   n->loc = get_tok(p).loc;
   
-  // NOTE: do not allow empty decorator list
-  struct _decorator dec = { 0 };
+  // NOTE: do not allow empty attribute list
+  struct _attribute attr = { 0 };
   if(!expect(p, TOK_IDENT)) return NULL;
-  dec.key = arena_strdup(&p->arena, get_tok(p).as.s);
+  attr.key = arena_strdup(&p->arena, get_tok(p).as.s);
   next(p);
 
-  if(!expect(p, ':')) return NULL;
+  if(!expect(p, '=')) return NULL;
   next(p);
 
   if(!expect(p, TOK_STRLIT)) return NULL;
-  dec.value = arena_strdup(&p->arena, get_tok(p).as.s);
+  attr.value = arena_strdup(&p->arena, get_tok(p).as.s);
   next(p);
 
-  da_append(&n->decs, dec);
+  da_append(&n->attrs, attr);
 
   while(!tok_is(p, ']')) {
     if(!expect(p, ',')) return NULL;
     next(p);
 
-    struct _decorator dec = { 0 };
+    struct _attribute attr = { 0 };
     if(!expect(p, TOK_IDENT)) return NULL;
-    dec.key = arena_strdup(&p->arena, get_tok(p).as.s);
+    attr.key = arena_strdup(&p->arena, get_tok(p).as.s);
     next(p);
 
-    if(!expect(p, ':')) return NULL;
+    if(!expect(p, '=')) return NULL;
     next(p);
 
     if(!expect(p, TOK_STRLIT)) return NULL;
-    dec.value = arena_strdup(&p->arena, get_tok(p).as.s);
+    attr.value = arena_strdup(&p->arena, get_tok(p).as.s);
     next(p);
 
-    da_append(&n->decs, dec);
+    da_append(&n->attrs, attr);
   }
 
   if(!expect(p, ']')) return NULL;
@@ -1187,10 +1187,10 @@ static inline ast_impl_t* parse_impl(parser_t* p) {
   next(p);
   
   while(!tok_is(p, '}')) {
-    ast_dec_list_t* decorators = NULL;
+    ast_attr_list_t* attributes = NULL;
     if(tok_is(p, '[')) {
-      decorators = parse_dec_list(p);
-      if(!decorators) return NULL;
+      attributes = parse_attr_list(p);
+      if(!attributes) return NULL;
     }
 
     spec_flags_t flags = parse_specifiers(p);
@@ -1204,7 +1204,7 @@ static inline ast_impl_t* parse_impl(parser_t* p) {
     if(!expect(p, ':')) return NULL;
     next(p);
 
-    ast_func_def_t* def = parse_func_def(p, loc, method_name, flags, decorators);
+    ast_func_def_t* def = parse_func_def(p, loc, method_name, flags, attributes);
 
     da_append(&n->methods, def);
   }
@@ -1250,8 +1250,8 @@ static inline ast_iface_t* parse_iface(parser_t* p, loc_t loc, const char* name)
   return n;
 }
 
-// root: ( [ dec_list ] spec_flags ident ':' func_def )* 
-//     | ( [ dec_list ] spec_flags ident ':' var_def )*
+// root: ( [ attr_list ] spec_flags ident ':' func_def )* 
+//     | ( [ attr_list ] spec_flags ident ':' var_def )*
 //     | ( ident ':' 'impl' ident '{' ( ident ':' func_decl func_def '}' )+ )*
 static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   p->tokens = t->tokens;
@@ -1268,10 +1268,10 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
 
       da_append(&n->impls, impl);
     } else {
-      ast_dec_list_t* decorators = NULL;
+      ast_attr_list_t* attributes = NULL;
       if(tok_is(p, '[')) {
-        decorators = parse_dec_list(p);
-        if(!decorators) return NULL;
+        attributes = parse_attr_list(p);
+        if(!attributes) return NULL;
       }
 
       spec_flags_t flags = parse_specifiers(p);
@@ -1285,7 +1285,7 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
       next(p);
 
       if(tok_is(p, '(')) {
-        ast_func_def_t* def = parse_func_def(p, loc, name, flags, decorators);
+        ast_func_def_t* def = parse_func_def(p, loc, name, flags, attributes);
         if (!def) return NULL;
 
         da_append(&n->func_defs, def);
@@ -1295,7 +1295,7 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
 
         da_append(&n->interfaces, interface);
       } else {
-        ast_var_def_t* def = parse_var_def(p, loc, name, flags, true, decorators);
+        ast_var_def_t* def = parse_var_def(p, loc, name, flags, true, attributes);
         if (!def) return NULL;
 
         da_append(&n->var_defs, def);
@@ -2620,7 +2620,7 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
 
     size_t additional_params = 0;
 
-    const char* as_value = decorators_get(d->decorators, "access_state");
+    const char* as_value = attributes_get(d->attributes, "access_state");
     bool access_state = as_value && strcmp(as_value, "true") == 0;
     if(access_state) additional_params++;
 
@@ -2654,12 +2654,12 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
 
     set_symbol_address(d->symbol, p->externs.count);
 
-    const char* name = decorators_get(d->decorators, "name");
+    const char* name = attributes_get(d->attributes, "name");
     if(!name) name = d->name;
     // TODO: name is leaked
     name = strdup(name);
 
-    const char* lib = decorators_get(d->decorators, "lib");
+    const char* lib = attributes_get(d->attributes, "lib");
     if(lib)
       // TODO: lib is leaked
       lib = strdup(lib);

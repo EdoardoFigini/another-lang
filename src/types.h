@@ -104,7 +104,7 @@ typedef enum {
   AST_STMT,
   AST_FUNC_DEF,
   AST_VAR_DEF,
-  AST_DEC_LIST,
+  AST_ATTR_LIST,
   AST_TYPE,
   AST_BODY,
   AST_PARAM,
@@ -193,7 +193,7 @@ typedef struct {
 
 typedef struct _ast_body_t ast_body_t;
 
-struct _decorator {
+struct _attribute {
   const char* key;
   const char* value;
 }; 
@@ -201,11 +201,11 @@ struct _decorator {
 typedef struct {
   AST_DEFAULT_FIELDS;
   struct {
-    struct _decorator* items;
+    struct _attribute* items;
     size_t count;
     size_t capacity;
-  } decs;
-} ast_dec_list_t;
+  } attrs;
+} ast_attr_list_t;
 
 typedef struct {
   AST_DEFAULT_FIELDS;
@@ -215,7 +215,7 @@ typedef struct {
   ast_sig_t* sig;
   scope_t* scope;
   ast_body_t* body;
-  ast_dec_list_t* decorators;
+  ast_attr_list_t* attributes;
 } ast_func_def_t;
 
 typedef struct {
@@ -225,7 +225,7 @@ typedef struct {
   symbol_t* symbol;
   ast_type_t* type;
   ast_expr_t* init;
-  ast_dec_list_t* decorators;
+  ast_attr_list_t* attributes;
 } ast_var_def_t;
 
 typedef struct {
