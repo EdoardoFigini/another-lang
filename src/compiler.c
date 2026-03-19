@@ -29,6 +29,7 @@ const char* tok_keywords[] = {
   [KW_WHILE]     = "while",
   [KW_IMPL]      = "impl",
   [KW_INTERFACE] = "interface",
+  [KW_MOD]       = "mod",
 };
 
 typedef enum {
@@ -116,6 +117,7 @@ void tok_print(token_t tok) {
       case TOK_WHILE: printf("%-20s", "TOK_WHILE"); break;
       case TOK_IMPL: printf("%-20s", "TOK_IMPL"); break;
       case TOK_INTERFACE: printf("%-20s", "TOK_INTERFACE"); break;
+      case TOK_MOD: printf("%-20s", "TOK_MOD"); break;
       default: printf("%-20s", "<INVALID TOKEN>"); break;
     }
   }
@@ -145,6 +147,7 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_WHILE:
       case TOK_IMPL:
       case TOK_INTERFACE:
+      case TOK_MOD:
         return tok_keywords[k];
       default: return "<INVALID TOKEN>";
     }
@@ -597,6 +600,7 @@ static inline bool tok_is_specifier(parser_t* p) {
     case KW_WHILE:
     case KW_IMPL:
     case KW_INTERFACE:
+    case KW_MOD:
     default: 
       return false;
   }
@@ -621,6 +625,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
       case KW_WHILE:
       case KW_IMPL:
       case KW_INTERFACE:
+      case KW_MOD:
       default: return flags;
     }
 
@@ -1270,18 +1275,39 @@ static inline ast_iface_t* parse_iface(parser_t* p, loc_t loc, const char* name)
   return n;
 }
 
+static inline ast_root_t* parse(parser_t* p);
+
+static inline ast_mod_t* parse_mod(parser_t* p, loc_t loc, const char* name) {
+  if(!expect(p, TOK_MOD)) return NULL;
+  next(p);
+
+  if(!expect(p, '{')) return NULL;
+  next(p);
+
+  ast_mod_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_MOD;
+  n->loc = loc;
+  n->name = arena_strdup(&p->arena, name);
+
+  ast_root_t* root = parse(p);
+  if(!root) return NULL;
+  n->root = root;
+
+  if(!expect(p, '}')) return NULL;
+  next(p);
+
+  return n;
+}
+
 // root: ( [ attr_list ] spec_flags ident ':' func_def )* 
 //     | ( [ attr_list ] spec_flags ident ':' var_def )*
 //     | ( ident ':' 'impl' ident '{' ( ident ':' func_decl func_def '}' )+ )*
-static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
-  p->tokens = t->tokens;
-  p->current = 0;
-
+static inline ast_root_t* parse(parser_t* p) {
   ast_root_t *n = arena_alloc(&p->arena, sizeof(*n));
   n->ast_kind = AST_ROOT;
   n->scope = p->current_scope;
 
-  while(!tok_is(p, TOK_EOF)) {
+  while(!tok_is(p, TOK_EOF) && !tok_is(p, '}')) {
     if (tok_is(p, TOK_IMPL)) {
       ast_impl_t* impl = parse_impl(p);
       if(!impl) return NULL;
@@ -1314,6 +1340,11 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
         if(!interface) return NULL;
 
         da_append(&n->interfaces, interface);
+      } else if (tok_is(p, TOK_MOD)) {
+        ast_mod_t* submod = parse_mod(p, loc, name);
+        if(!submod) return NULL;
+
+        da_append(&n->submods, submod);
       } else {
         ast_var_def_t* def = parse_var_def(p, loc, name, flags, true, attributes);
         if (!def) return NULL;
@@ -1324,6 +1355,11 @@ static inline ast_root_t* parse(parser_t* p, tokenizer_t* t) {
   }
 
   return n;
+}
+
+static inline void parser_init(parser_t* p, const tokenizer_t* t) {
+  p->tokens = t->tokens;
+  p->current = 0;
 }
 
 static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
@@ -1493,7 +1529,7 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
 static inline void print_symbol_table_entries(FILE* stream, scope_t* scope) {
   if(!scope) return;
   da_foreach(symbol_t*, s, &scope->symbols) {
-    fprintf(stream, "%-10s %-10s ", (*s)->name, scope->name);
+    fprintf(stream, "%-30s %-30s ", (*s)->name, scope->name);
     switch((*s)->storage) {
       case STO_LOCAL:
         fprintf(stream, "%-10s ", "scope"); break;
@@ -1515,7 +1551,7 @@ static inline void print_symbol_table_entries(FILE* stream, scope_t* scope) {
 static inline void print_symbol_table(FILE* stream, scope_t* scope) {
   if(!scope) return;
   fprintf(stream, "%s symbol Table:\n", scope->name);
-  fprintf(stream, "%-10s %-10s %-10s %-10s %s\n", "name", "scope", "storage", "addr", "type");
+  fprintf(stream, "%-30s %-30s %-10s %-10s %s\n", "name", "scope", "storage", "addr", "type");
   print_symbol_table_entries(stream, scope);
 }
 
@@ -1926,7 +1962,21 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
           fdiagf(stderr, DIAG_ERROR, expr->as.access.owner->loc, "Not a module.");
           return false;
         }
-        TODO("typecheck_expr: EXPR_ACCESS - module fields");
+
+        symbol_t*s = resolve_symbol_any(expr->as.access.owner->type->scope, expr->as.access.field);
+        if (!s) {
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            expr->loc,
+            "`%s` has no field named `%s`.",
+            type_to_str(&t->arena, expr->as.access.owner->type),
+            expr->as.access.field
+          );
+          return false;
+        }
+        expr->type = s->type;
+        return true;
       } else if (expr->as.access.op == OP_MEMB) {
         symbol_t* s = resolve_symbol_any(expr->as.access.owner->type->scope, expr->as.access.field);
         if (!s) {
@@ -2250,9 +2300,9 @@ static inline bool typecheck_func(typechecker_t* t, ast_func_def_t* func) {
 }
 
 static inline void typechecker_init(typechecker_t* t) {
-  enter_scope_new(t, "root");
-
-  // init builtin types
+  enter_scope_new(t, "__builtin_types");
+  t->builtins.scope = t->current_scope;
+  
   t->builtins.none      = make_type(t, TYPE_NONE, "none", 0);
   t->builtins.i32       = make_type(t, TYPE_I32,  "i32",  1);
   t->builtins.i64       = make_type(t, TYPE_I64,  "i64",  2);
@@ -2264,12 +2314,24 @@ static inline void typechecker_init(typechecker_t* t) {
   t->builtins.boolean   = make_type(t, TYPE_BOOL, "bool", 1);
   t->builtins.str       = make_type(t, TYPE_STR,  "str",  1);
   t->builtins.addr      = make_type(t, TYPE_ADDR, "addr", 1);
+
+  enter_scope_new(t, "root");
 }
 
 static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   root->scope = t->current_scope;
 
   // resolve types and symbols first
+
+  da_foreach(ast_mod_t*, mod, &root->submods) {
+    type_t* type = make_type(t, TYPE_MODULE, (*mod)->name, 0);
+
+    enter_scope(t, type->scope);
+    t->current_scope->parent = t->builtins.scope; 
+    typecheck(t, (*mod)->root);
+    t->current_scope = root->scope;
+  }
+
   da_foreach(ast_func_def_t*, d, &root->func_defs)
     if(!resolve_func_def(t, *d)) return false;
 
@@ -2289,7 +2351,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       }
 
       if((*def)->flags) {
-        fdiagf(stderr, DIAG_ERROR, (*def)->loc, "Specifiers for method `%s` in `%s` interface will be ignored.", (*def)->name, (*iface)->name);
+        fdiagf(stderr, DIAG_WARN, (*def)->loc, "Specifiers for method `%s` in `%s` interface will be ignored.", (*def)->name, (*iface)->name);
       }
 
       da_append(&type->as.interface.methods, ((interface_method_t){ .name = (*def)->name, .type = (*def)->sig->resolved_type }));
@@ -2347,6 +2409,8 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     }
   }
 
+  // then check bodies
+
   da_foreach(ast_impl_t*, impl, &root->impls) {
     type_t* type = (*impl)->type->resolved_type;
     enter_scope(t, type->scope);
@@ -2361,8 +2425,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
   da_foreach(ast_var_def_t*, d, &root->var_defs) {
     if(!resolve_type_decl(t, (*d)->type)) return false;
-
-    (*d)->symbol->type = (*d)->type->resolved_type;
+    (*d)->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_GLOBAL, (*d)->name, (*d)->type->resolved_type);
 
     if((*d)->init && ((*d)->flags & SPEC_EXTERN)) {
       fdiagf(stderr, DIAG_ERROR, (*d)->loc, "Cannot initialize an extern variable.");
@@ -2483,7 +2546,29 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         break;
       case EXPR_ACCESS:
         if (e->as.access.op == OP_SCOPE) {
-          TODO("codegen_expr: EXPR_ACCESS - scope access");
+          // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
+          symbol_t* symbol = resolve_symbol(e->as.access.owner->type->scope, e->as.access.field, SYMB_VAR);
+          if (!symbol) {
+            arena_t a = { 0 };
+            fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in %s.", e->as.access.field, type_to_str(&a, e->as.access.owner->type));
+            return false;
+          }
+          switch (symbol->storage) {
+            case STO_EXTERN:
+              TODO("codegen_expr - load extern symbol");
+            case STO_LOCAL:
+              da_append(&p->code, INST_LOAD);
+              da_append(&p->code, symbol->addr);
+              break;
+            case STO_EXPORT:
+            case STO_GLOBAL:
+              da_append(&p->code, INST_LOADG);
+              da_append(&p->code, symbol->addr);
+              break;
+            default: 
+              UNREACHABLE("codegen_expr");
+          }
+          break;
         } else if (e->as.access.op == OP_MEMB) {
           if (e->as.access.owner->type->kind == TYPE_STR) {
             TODO("codegen_expr: EXPR_ACCESS - string");
@@ -2512,7 +2597,10 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           }
         } else if (callee->kind == EXPR_ACCESS) {
           ast_expr_t* owner = callee->as.access.owner;
-          if(!codegen_expr(p, scope, owner)) return false;
+
+          if (callee->as.access.op == OP_MEMB)
+            if(!codegen_expr(p, scope, owner)) return false;
+
           symbol = resolve_symbol(owner->type->scope, callee->as.access.field, SYMB_FUNC);
           if (!symbol) {
             // TODO: remove this abomination
@@ -2521,8 +2609,10 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
               stderr,
               DIAG_ERROR,
               callee->loc,
-              "No method `%s` in type `%s`.",
+              "No %s `%s` in %s `%s`.",
+              callee->as.access.op == OP_MEMB ? "method" : "function",
               callee->as.access.field,
+              callee->as.access.op == OP_MEMB ? "type" : "module",
               type_to_str(&temp, owner->type)
             );
             return false;
@@ -2772,7 +2862,7 @@ static inline int codegen(program_t* p, ast_root_t* root) {
       switch((*d)->init->kind) {
         case EXPR_STRING:
           val.number.u = p->constants.count;
-          da_append(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = (*d)->init->as.s }));
+          da_append(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = strdup((*d)->init->as.s) }));
           break;
         case EXPR_NUMBER:
           val.number.u = (*d)->init->as.number.u;
@@ -2788,12 +2878,18 @@ static inline int codegen(program_t* p, ast_root_t* root) {
           UNREACHABLE("codegen - var initialization (messed up typechecker?)");
       }
     }
+    set_symbol_address((*d)->symbol, p->globals.count);
+
     da_append(&p->globals, val);
   }
   da_foreach(ast_impl_t*, impl, &root->impls) {
     da_foreach(ast_func_def_t*, d, &(*impl)->methods) {
       if(!codegen_func_def(p, *d)) return false;
     }
+  }
+
+  da_foreach(ast_mod_t*, mod, &root->submods) {
+    if(!codegen(p, (*mod)->root)) return false;
   }
 
   // patch addresses
@@ -3014,7 +3110,8 @@ bool compile(program_t* program, const char* path, const char* source) {
   //   tok_print(*t);
   // }
 
-  ast_root_t* root = parse(&parser, &tok);
+  parser_init(&parser, &tok);
+  ast_root_t* root = parse(&parser);
   if(!root) return false;
   fprintf(stdout, "%s%s\033[0m Parsing OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
@@ -3027,7 +3124,7 @@ bool compile(program_t* program, const char* path, const char* source) {
   if(!codegen(program, root)) return false;
   fprintf(stdout, "%s%s\033[0m Codegen OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
-  // print_symbol_table(stdout, root->scope);
+  print_symbol_table(stdout, root->scope);
 
   print_disass(stdout, program, root->scope);
 

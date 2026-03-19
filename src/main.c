@@ -53,6 +53,7 @@ const char* source =
   ;
 #endif
 
+#if 0
 const char* source = 
  "extern print: (s: addr) -> i32;\n"
  "\n"
@@ -90,6 +91,57 @@ const char* source =
  "  extern to_str: (n: Self) -> str;\n"
  "}\n"
  ;
+#endif
+
+const char* source =
+  "Raylib: mod {\n"
+  "  impl Self: str {\n"
+  "    [[name=\"str__c_str\", access_state=\"true\"]]\n"
+  "    extern c_str: (s: Self) -> addr;\n"
+  "  }\n"
+  "\n"
+  "  [[name=\"InitWindow\", lib=\"raylib.dll\"]]\n"
+  "  extern __init_window: (w: i32, h: i32, title: addr) -> none;\n"
+  "  [[name=\"CloseWindow\", lib=\"raylib.dll\"]]\n"
+  "  extern close_window: () -> none;\n"
+  "  [[name=\"BeginDrawing\", lib=\"raylib.dll\"]]\n"
+  "  extern begin_drawing: () -> none;\n"
+  "  [[name=\"EndDrawing\", lib=\"raylib.dll\"]]\n"
+  "  extern end_drawing: () -> none;\n"
+  "  [[name=\"ClearBackground\", lib=\"raylib.dll\"]]\n"
+  "  extern clear_background: (color: u32) -> none;\n"
+  "  [[name=\"WindowShouldClose\", lib=\"raylib.dll\"]]\n"
+  "  extern window_should_close: () -> i32;\n"
+  "  [[name=\"DrawText\", lib=\"raylib.dll\"]]\n"
+  "  extern __draw_text: (text: addr, pos_x: i32, pos_y: i32, font_size: i32, color: u32) -> none;\n"
+  "\n"
+  "  init_window: (w: i32, h: i32, title: str) -> none {\n"
+  "    __init_window(w, h, title.c_str()); \n"
+  "  }\n"
+  "\n"
+  "  draw_text: (text: str, pos_x: i32, pos_y: i32, font_size: i32, color: u32) -> none {\n"
+  "    __draw_text(text.c_str(), pos_x, pos_y, font_size, color); \n"
+  "  }\n"
+  "}\n"
+  "\n"
+  "main: () -> none {\n"
+  "  Raylib::init_window(800, 600, \"Hello Raylib!\");\n"
+  "  while Raylib::window_should_close() == 0 {\n"
+  "    Raylib::begin_drawing();\n"
+  "    Raylib::clear_background(0xFF181818U);\n"
+  "    Raylib::draw_text(\"Congrats! You created your first window!\", 190, 200, 20, 0xFFFFFFFFu);\n"
+  "    Raylib::end_drawing();\n"
+  "  }\n"
+  "}\n"
+  "\n"
+  "impl Self: str {\n"
+  "  [[name=\"str__concat\", access_state=\"true\"]]\n"
+  "  extern concat: (s: Self, other: Self) -> Self;\n"
+  "\n"
+  "  [[name=\"str__length\", access_state=\"true\"]]\n"
+  "  extern length: (s: Self) -> i32;\n"
+  "}\n"
+  ;
 
 void test() {
   printf("Hello from host!\n");

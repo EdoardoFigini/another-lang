@@ -34,6 +34,7 @@ typedef enum {
   TOK_WHILE,
   TOK_IMPL,
   TOK_INTERFACE,
+  TOK_MOD,
 } tok_kind_t;
 
 typedef enum {
@@ -46,6 +47,7 @@ typedef enum {
   KW_WHILE     = TOK_WHILE,
   KW_IMPL      = TOK_IMPL,
   KW_INTERFACE = TOK_INTERFACE,
+  KW_MOD = TOK_MOD,
 } kw_kind_t;
 
 typedef enum {
@@ -113,6 +115,7 @@ typedef enum {
   AST_SIG,
   AST_IMPL,
   AST_IFACE,
+  AST_MOD,
 } ast_node_kind_t;
 
 #define AST_DEFAULT_FIELDS\
@@ -252,6 +255,14 @@ typedef struct {
   } methods;
 } ast_iface_t;
 
+typedef struct _ast_root ast_root_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  const char* name;
+  ast_root_t* root;
+} ast_mod_t;
+
 typedef enum {
   OP_INVALID = TOK_EOF,
   OP_PLUS    = '+',
@@ -379,7 +390,7 @@ struct _ast_body_t {
   } stmts;
 };
 
-typedef struct {
+struct _ast_root {
   AST_DEFAULT_FIELDS;
   struct {
     ast_func_def_t** items;
@@ -401,8 +412,13 @@ typedef struct {
     size_t count;
     size_t capacity;
   } interfaces;
+  struct {
+    ast_mod_t** items;
+    size_t count;
+    size_t capacity;
+  } submods;
   scope_t* scope;
-} ast_root_t;
+};
 
 typedef enum {
   TYPE_NONE,
@@ -512,6 +528,8 @@ typedef struct {
     type_t const* str;
     type_t const* array;
     type_t const* addr;
+
+    scope_t* scope;
   } builtins;
   scope_t* current_scope;
 } typechecker_t;
