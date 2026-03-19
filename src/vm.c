@@ -145,7 +145,6 @@ task_t* load_task(vm_t* vm, program_t* p) {
       }
     }
   }
-  DLLIST_ADD(t, vm->tasks_head);
 
   // externs
   // TODO: configurable lazy/eager externs loading
@@ -165,6 +164,17 @@ task_t* load_task(vm_t* vm, program_t* p) {
     }
   }
 
+  // global vars
+  {
+    t->globals.data  = arena_alloc(&t->arena, sizeof(*t->globals.data) * p->globals.count);
+    t->globals.count = p->globals.count;
+
+    for (size_t i=0; i < t->globals.count; i++) {
+      t->globals.data[i] = p->globals.items[i];
+    }
+  }
+
+  DLLIST_ADD(t, vm->tasks_head);
   return t;
 }
 
@@ -219,7 +229,9 @@ vm_exitcode_t exec(vm_t* vm) {
       vm->ip++;
       break;
     case INST_LOADG:
-      TODO("INST_LOADG");
+      operand = *(++vm->ip);
+      PUSH(vm, task->globals.data[operand]);
+      vm->ip++;
       break;
     case INST_LOADC:
       operand = *(++vm->ip);

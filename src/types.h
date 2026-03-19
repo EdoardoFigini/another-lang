@@ -649,7 +649,7 @@ typedef struct {
     size_t capacity;
   } constants;
   struct _glob {
-    data_t* items;
+    uint32_t* items;
     size_t count;
     size_t capacity;
   } globals;
@@ -714,6 +714,11 @@ typedef struct _task {
     uint32_t* data;
     size_t count;
   } consts;
+
+  struct _task_globals {
+    uint32_t* data;
+    size_t count;
+  } globals;
 
   uint32_t* stack;
   struct {

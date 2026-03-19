@@ -2478,6 +2478,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in current scope.", e->as.symbol);
           return false;
         }
+
         switch (symbol->storage) {
           case STO_EXTERN:
             TODO("codegen_expr - load extern symbol");
@@ -2493,6 +2494,9 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           default: 
             UNREACHABLE("codegen_expr");
         }
+        
+        if (!symbol->addr_resolved)
+          da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count - 1}));
         break;
       }
       case EXPR_STRING:
@@ -2547,7 +2551,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
       case EXPR_ACCESS:
         if (e->as.access.op == OP_SCOPE) {
           // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
-          symbol_t* symbol = resolve_symbol(e->as.access.owner->type->scope, e->as.access.field, SYMB_VAR);
+          symbol_t* symbol = resolve_symbol_local(e->as.access.owner->type->scope, e->as.access.field, SYMB_VAR);
           if (!symbol) {
             arena_t a = { 0 };
             fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in %s.", e->as.access.field, type_to_str(&a, e->as.access.owner->type));
@@ -2568,6 +2572,10 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
             default: 
               UNREACHABLE("codegen_expr");
           }
+
+          if (!symbol->addr_resolved)
+            da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count - 1}));
+
           break;
         } else if (e->as.access.op == OP_MEMB) {
           if (e->as.access.owner->type->kind == TYPE_STR) {
@@ -2856,16 +2864,17 @@ static inline int codegen(program_t* p, ast_root_t* root) {
   da_foreach(ast_func_def_t*, d, &root->func_defs) {
     if(!codegen_func_def(p, *d)) return false;
   }
+
   da_foreach(ast_var_def_t*, d, &root->var_defs) {
-    data_t val = { 0 };
+    uint32_t val = 0;
     if ((*d)->init) {
       switch((*d)->init->kind) {
         case EXPR_STRING:
-          val.number.u = p->constants.count;
+          val = p->constants.count;
           da_append(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = strdup((*d)->init->as.s) }));
           break;
         case EXPR_NUMBER:
-          val.number.u = (*d)->init->as.number.u;
+          val = (*d)->init->as.number.u;
           break;
         case EXPR_SYMBOL:
         case EXPR_BINOP:
