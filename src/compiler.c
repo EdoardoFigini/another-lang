@@ -2469,6 +2469,28 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   return true;
 }
 
+static inline void codegen_load_var(program_t* p, symbol_t* symbol) {
+
+  switch (symbol->storage) {
+    case STO_EXTERN:
+      TODO("codegen_load_var - load extern symbol");
+    case STO_LOCAL:
+      da_append(&p->code, INST_LOAD);
+      da_append(&p->code, symbol->addr);
+      break;
+    case STO_EXPORT:
+    case STO_GLOBAL:
+      da_append(&p->code, INST_LOADG);
+      da_append(&p->code, symbol->addr);
+      break;
+    default: 
+      UNREACHABLE("codegen_load_var");
+  }
+  
+  if (!symbol->addr_resolved)
+    da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count - 1}));
+}
+
 static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
   switch(e->kind) {
       case EXPR_SYMBOL: {
@@ -2478,25 +2500,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in current scope.", e->as.symbol);
           return false;
         }
-
-        switch (symbol->storage) {
-          case STO_EXTERN:
-            TODO("codegen_expr - load extern symbol");
-          case STO_LOCAL:
-            da_append(&p->code, INST_LOAD);
-            da_append(&p->code, symbol->addr);
-            break;
-          case STO_EXPORT:
-          case STO_GLOBAL:
-            da_append(&p->code, INST_LOADG);
-            da_append(&p->code, symbol->addr);
-            break;
-          default: 
-            UNREACHABLE("codegen_expr");
-        }
-        
-        if (!symbol->addr_resolved)
-          da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count - 1}));
+        codegen_load_var(p, symbol);
         break;
       }
       case EXPR_STRING:
@@ -2523,8 +2527,6 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         codegen_expr(p, scope, e->as.binop.rhs);
         //TODO: implicit cast if either type is different from the result
 
-        // NOTE: if operators are objects, check if implements interface and 
-        // emit icall instruction to operator implementation
         switch(e->as.binop.op){
           case OP_PLUS: da_append(&p->code, INST_ADD); break;
           case OP_MINUS: da_append(&p->code, INST_SUB); break;
@@ -2548,46 +2550,17 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
       case EXPR_UNOP:
         TODO("codegen_expr (UNOP)");
         break;
-      case EXPR_ACCESS:
-        if (e->as.access.op == OP_SCOPE) {
-          // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
-          symbol_t* symbol = resolve_symbol_local(e->as.access.owner->type->scope, e->as.access.field, SYMB_VAR);
-          if (!symbol) {
-            arena_t a = { 0 };
-            fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in %s.", e->as.access.field, type_to_str(&a, e->as.access.owner->type));
-            return false;
-          }
-          switch (symbol->storage) {
-            case STO_EXTERN:
-              TODO("codegen_expr - load extern symbol");
-            case STO_LOCAL:
-              da_append(&p->code, INST_LOAD);
-              da_append(&p->code, symbol->addr);
-              break;
-            case STO_EXPORT:
-            case STO_GLOBAL:
-              da_append(&p->code, INST_LOADG);
-              da_append(&p->code, symbol->addr);
-              break;
-            default: 
-              UNREACHABLE("codegen_expr");
-          }
-
-          if (!symbol->addr_resolved)
-            da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count - 1}));
-
-          break;
-        } else if (e->as.access.op == OP_MEMB) {
-          if (e->as.access.owner->type->kind == TYPE_STR) {
-            TODO("codegen_expr: EXPR_ACCESS - string");
-          } else if (e->as.access.owner->type->kind == TYPE_STRUCT) {
-            TODO("codegen_expr: EXPR_ACCESS - struct");
-          } else {
-            fdiagf(stderr, DIAG_ERROR, e->loc, "Not a built-in or a structure.");
-            return false;
-          }
+      case EXPR_ACCESS: {
+        arena_t a = { 0 };
+        // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
+        symbol_t* symbol = resolve_symbol_local(e->as.access.owner->type->scope, e->as.access.field, SYMB_VAR);
+        if (!symbol) {
+          fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in `%s`.", e->as.symbol, type_to_str(&a, e->as.access.owner->type));
+          return false;
         }
-        return true;
+        codegen_load_var(p, symbol);
+        break;
+      }
       case EXPR_FUNCALL:
         // SysV-style calling convention
         for(int i = e->as.funcall.args.count - 1; i >= 0; i--) {
