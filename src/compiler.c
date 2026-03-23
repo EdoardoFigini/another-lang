@@ -309,14 +309,17 @@ static inline int tok_tokenize(tokenizer_t* t) {
   size_t line = 1;
   size_t col  = 1;
   slice_t line_view    = { 0 };
-  slice_t src_view     = slice_from_sb(t->source);
-  slice_t src_rem_view = slice_from_sb(t->source);
+  slice_t src_view     = t->source;
+  slice_t src_rem_view = t->source;
 
   line_view    = slice_sub(src_rem_view, 0, slice_index_of(src_view, '\n'));
   src_rem_view = slice_advance_after(src_rem_view, "\n");
 
-  char* p = t->source.items;
-  while(*p && ((size_t)(p - t->source.items) < t->source.count)) {
+  char* p = (char*)t->source.data;
+  while(*p && ((size_t)(p - t->source.data) < t->source.size)) {
+    // skip comments
+    if(*p == '#') while(*p && *p++ != '\n');
+
     if(*p == '\n') {
       line_view    = slice_sub(src_rem_view, 0, slice_index_of(src_rem_view, '\n'));
       src_rem_view = slice_advance_after(src_rem_view, "\n");
@@ -460,7 +463,6 @@ static inline int tok_tokenize(tokenizer_t* t) {
 }
 
 void tok_destroy(tokenizer_t* t) {
-  sb_free(&t->source);
   da_free(t->tokens);
   arena_free(&t->arena);
 }
@@ -506,7 +508,6 @@ static inline void set_symbol_address(symbol_t* s, uint32_t addr) {
 
 static inline void print_symbol_table(FILE* stream, scope_t* root);
 
-// FIXME: dangling pointers
 static inline symbol_t* make_symbol(arena_t* arena, scope_t* scope, symb_kind_t kind, symb_storage_t storage, const char* name, type_t* type) {
   symbol_t* s = arena_alloc(arena, sizeof(*s));
   s->name = name;
@@ -3075,15 +3076,15 @@ static inline type_t* method_owner(symbol_t* s) {
 }
 
 // TODO: save slice_t instead of sb_t in tokenizer
-bool compile(program_t* program, const char* path, const char* source) {
+static inline bool compile(program_t* program, const char* path, const sb_t* source) {
   tokenizer_t tok = { 0 };
-  sb_append(&tok.source, source);
+  tok.source = slice_from_sb(*source);
   tok.path = path;
 
   parser_t parser = { 0 };
   typechecker_t tc = { 0 };
 
-  printf("%s\n\n", source);
+  printf("%.*s\n\n", SB_FMT(*source));
 
   if(tok_tokenize(&tok)) return false;
   fprintf(stdout, "%s%s\033[0m Tokenization OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
@@ -3115,4 +3116,24 @@ bool compile(program_t* program, const char* path, const char* source) {
   typechecker_destroy(&tc);
 
   return true;
+}
+
+bool compile_from_file(program_t* program, const char* path) {
+  sb_t sb = { 0 };
+  if (sb_read_file(path, &sb) < 0) {
+    fprintf(stdout, "%s%s\033[0m Could Not Open file `%s`.\n", diag_lvl_color[DIAG_FATAL], diag_lvl_txt[DIAG_FATAL], path);
+    return false;
+  }
+  sb_appendz(&sb, "");
+  bool res = compile(program, path, &sb);
+  sb_free(&sb);
+  return res;
+}
+
+bool compile_from_cstr(program_t* program, const char* source) {
+  sb_t sb = { 0 };
+  sb_appendz(&sb, source);
+  bool res = compile(program, NULL, &sb);
+  sb_free(&sb);
+  return res;
 }

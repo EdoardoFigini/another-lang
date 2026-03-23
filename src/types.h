@@ -82,7 +82,7 @@ typedef struct {
 } tokenarr_t;
 
 typedef struct {
-  sb_t source;
+  slice_t source;
   tokenarr_t tokens;
   arena_t arena;
   const char* path;
