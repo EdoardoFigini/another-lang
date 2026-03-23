@@ -1,0 +1,59 @@
+Raylib: mod {
+
+  # Raylib bindings module
+
+  Colors: mod {
+    const RED   : u32 = 0xFF0000FFU;
+    const GREEN : u32 = 0xFF00FF00U;
+    const BLUE  : u32 = 0xFFFF0000U;
+    const WHITE : u32 = 0xFFFFFFFFU;
+  }
+
+  hello: str ="Hello Raylib!";
+
+  impl Self: str {
+    [[name="str__c_str"]]
+    extern c_str: (s: Self) -> addr;
+  }
+
+  [[name="InitWindow", lib="raylib.dll"]]
+  extern __init_window: (w: i32, h: i32, title: addr) -> none;
+  [[name="CloseWindow", lib="raylib.dll"]]
+  extern close_window: () -> none;
+  [[name="BeginDrawing", lib="raylib.dll"]]
+  extern begin_drawing: () -> none;
+  [[name="EndDrawing", lib="raylib.dll"]]
+  extern end_drawing: () -> none;
+  [[name="ClearBackground", lib="raylib.dll"]]
+  extern clear_background: (color: u32) -> none;
+  [[name="WindowShouldClose", lib="raylib.dll"]]
+  extern window_should_close: () -> i32;
+  [[name="DrawText", lib="raylib.dll"]]
+  extern __draw_text: (text: addr, pos_x: i32, pos_y: i32, font_size: i32, color: u32) -> none;
+
+  init_window: (w: i32, h: i32, title: str) -> none {
+    __init_window(w, h, title.c_str()); 
+  }
+
+  draw_text: (text: str, pos_x: i32, pos_y: i32, font_size: i32, color: u32) -> none {
+    __draw_text(text.c_str(), pos_x, pos_y, font_size, color); 
+  }
+}
+
+export main: () -> none {
+  Raylib::init_window(800, 600, Raylib::hello);
+  while Raylib::window_should_close() == 0 {
+    Raylib::begin_drawing();
+    Raylib::clear_background(0xFF181818U);
+    Raylib::draw_text("Congrats! You created your first window!", 190, 200, 20, Raylib::Colors::RED);
+    Raylib::end_drawing();
+  }
+}
+
+impl Self: str {
+  [[name="str__concat"]]
+  extern concat: (s: Self, other: Self) -> Self;
+
+  [[name="str__length"]]
+  extern length: (s: Self) -> i32;
+}

@@ -1,0 +1,11 @@
+export main: () -> u32 {
+  return fib(9U);
+}
+
+fib: (n : u32) -> u32 {
+  if n < 2U {
+    return n;
+  } else {
+    return fib(n - 1U) + fib(n - 2U);
+  }
+}
