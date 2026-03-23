@@ -29,10 +29,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  vm_t vm = { 0 };
-  task_t* t = load_task(&vm, &prog);
-  set_active_task(&vm, t);
-  return run(&vm, 0);
+  task_t* t = load_task(&prog);
+  set_active_task(t);
+  return run(0);
 }
 
 #define SB_IMPLEMENTATION

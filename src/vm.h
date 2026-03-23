@@ -15,8 +15,8 @@
 bool compile_from_file(program_t* program, const char* path);
 bool compile_from_cstr(program_t* program, const char* source);
 
-task_t* load_task(vm_t*, program_t*);
-void set_active_task(vm_t*, task_t*);
-vm_exitcode_t run(vm_t*, size_t, ...);
+task_t* load_task(program_t*);
+void set_active_task(task_t*);
+vm_exitcode_t run(size_t, ...);
 
 #endif

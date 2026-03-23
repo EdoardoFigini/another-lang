@@ -15,6 +15,19 @@
 
 #include "vm.h"
 
+// TODO: add platform dependent mutex to vm_t
+static vm_t __vm;
+
+vm_t* get_vm_instance() {
+  // TODO: make thread safe (should block)
+  return &__vm;
+}
+
+obj_t* get_obj(obj_handle_t h) {
+  const vm_t* vm = get_vm_instance();
+  return vm->active_task->obj_pool.items[h];
+}
+
 #ifdef _MSC_VER
 #define EXPORT __declspec(dllexport)
 #else
@@ -35,20 +48,20 @@ EXPORT int str_cmp(const char* a, const char* b) {
 
 // BUILTIN METHODS
 
-EXPORT const char* str__c_str(vm_t* vm, obj_handle_t self) {
-  obj_t* str = vm->active_task->obj_pool.items[self];
+EXPORT const char* str__c_str(obj_handle_t self) {
   // TODO: duplicate data
-  return str->as.str.data; 
+  return get_obj(self)->as.str.data; 
 }
 
-EXPORT int str__length(vm_t* vm, obj_handle_t self) {
-  obj_t* str = vm->active_task->obj_pool.items[self];
-  return (int)str->as.str.size; 
+EXPORT int str__length(obj_handle_t self) {
+  return (int)get_obj(self)->as.str.size; 
 }
 
-EXPORT obj_handle_t str__concat(vm_t* vm, obj_handle_t self, obj_handle_t other) {
-  obj_t* str = vm->active_task->obj_pool.items[self];
-  obj_t* str_other = vm->active_task->obj_pool.items[other];
+EXPORT obj_handle_t str__concat(obj_handle_t self, obj_handle_t other) {
+  obj_t* str = get_obj(self);
+  obj_t* str_other = get_obj(other);
+
+  vm_t* vm = get_vm_instance();
 
   obj_t* o = malloc(sizeof(*o));
   o->kind = OBJ_STR;
@@ -61,7 +74,9 @@ EXPORT obj_handle_t str__concat(vm_t* vm, obj_handle_t self, obj_handle_t other)
   return vm->active_task->obj_pool.count - 1;
 }
 
-EXPORT obj_handle_t i32__to_str(vm_t* vm, int32_t self) {
+EXPORT obj_handle_t i32__to_str(int32_t self) {
+  vm_t* vm = get_vm_instance();
+
   obj_t* o = malloc(sizeof(*o));
   o->kind = OBJ_STR;
   o->as.str.data = arena_sprintf(&vm->active_task->arena, "%d", self);
@@ -83,7 +98,9 @@ static inline bool is_ffi_arg_32(ffi_type* t) {
          t == &ffi_type_uint8;
 }
 
-task_t* load_task(vm_t* vm, program_t* p) {
+task_t* load_task(program_t* p) {
+  vm_t* vm = get_vm_instance();
+
   task_t* t = malloc(sizeof(*t));
   memset(t, 0, sizeof(*t));
   t->program = p;
@@ -295,10 +312,7 @@ vm_exitcode_t exec(vm_t* vm) {
 
       uint64_t** args   = malloc(sizeof(*args) * ext->cif.nargs);
       uint64_t*  values = malloc(sizeof(*args) * ext->cif.nargs);
-      size_t i = 0;
-      if (ext->access_state)
-        values[i++] = (uint64_t)vm;
-      for(; i < ext->cif.nargs; i++) {
+      for(size_t i=0; i < ext->cif.nargs; i++) {
         if(is_ffi_arg_32(ext->cif.arg_types[i])) {
           POP(vm, values[i]);
         } else {
@@ -415,15 +429,17 @@ vm_exitcode_t exec(vm_t* vm) {
   return VM_NEXT;
 }
 
-void set_active_task(vm_t* vm, task_t* t) {
+void set_active_task(task_t* t) {
   assert(t);
-  vm->active_task = t;
+  get_vm_instance()->active_task = t;
 }
 
 // TODO: handle non-uint32_t args
 // -> have bind() macro/function that populates the stack before run()
-vm_exitcode_t run(vm_t* vm, size_t n_args, ...) {
+vm_exitcode_t run(size_t n_args, ...) {
   va_list args;
+
+  vm_t* vm = get_vm_instance();
 
   task_t* active = vm->active_task;
   vm->ip = active->code + 1; // skip halt

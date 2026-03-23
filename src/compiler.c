@@ -2757,20 +2757,11 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
   if (d->symbol->storage == STO_EXTERN) {
     type_t* sig = d->sig->resolved_type;
 
-    size_t additional_params = 0;
-
-    const char* as_value = attributes_get(d->attributes, "access_state");
-    bool access_state = as_value && strcmp(as_value, "true") == 0;
-    if(access_state) additional_params++;
-
     struct {
       ffi_type** items;
       size_t count;
       size_t capacity;
     } param_types = { 0 };
-
-    if (access_state)
-      da_append(&param_types, &ffi_type_pointer); // vm_t*
 
     for(size_t i=0; i < sig->as.func.params.count; i++)
       da_append(&param_types, type_to_ffi_type(*sig->as.func.params.items[i]));
@@ -2807,7 +2798,6 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
       .cif = cif,
       .name = name,
       .lib = lib,
-      .access_state = access_state 
     }));
   } else {
     set_symbol_address(d->symbol, p->code.count);
