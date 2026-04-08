@@ -503,6 +503,7 @@ static inline void next(parser_t* p) {
 static inline void print_type(FILE* stream, const type_t* t);
 static inline void render_type(sb_t* sb, const type_t* t);
 static inline const char* type_to_str(arena_t* a, const type_t* t);
+static inline const char* qn_to_str(arena_t* a, const ast_qn_t* qn); 
 
 static inline void set_symbol_address(symbol_t* s, uint32_t addr) {
   s->addr = addr;
@@ -525,46 +526,92 @@ static inline symbol_t* make_method(arena_t* arena, const type_t* owner, const c
   return make_symbol(arena, owner->scope, SYMB_FUNC, storage, name, (type_t*)type);
 }
 
-static inline symbol_t* resolve_symbol_local_any(scope_t* scope, const char* name) { 
+static inline symbol_t* resolve_symbol_local_any(scope_t* scope, ast_qn_t* name) { 
   if (!scope) return NULL;
+  if (!name) return NULL;
 
+  symbol_t* symb = NULL;
   // OPTIMIZE
+  da_foreach(symbol_t*, s, &scope->symbols) {
+    if(strcmp((*s)->name, name->name) == 0) { symb = *s; break; }
+  }
+
+  if (name->next && symb->kind != SYMB_TYPE) return NULL;
+  if (name->next) return resolve_symbol_local_any(symb->type->scope, name->next);
+
+  return symb;
+}
+
+static inline symbol_t* resolve_field(scope_t* scope, const char* name) {
+  if (!scope) return NULL;
+  if (!name) return NULL;
+
   da_foreach(symbol_t*, s, &scope->symbols) {
     if(strcmp((*s)->name, name) == 0) return *s;
   }
+  
   return NULL;
 }
 
 static inline int type_equals(type_t a, type_t b);
 
-static inline symbol_t* resolve_symbol_local(scope_t* scope, const char* name, symb_kind_t kind) { 
+static inline symbol_t* resolve_symbol_local(scope_t* scope, ast_qn_t* name, symb_kind_t kind) { 
   if (!scope) return NULL;
+  if (!name) return NULL;
+
+  symbol_t* symb = NULL;
+  if (name->next) {
+    // OPTIMIZE
+    da_foreach(symbol_t*, s, &scope->symbols) {
+      if(strcmp((*s)->name, name->name) == 0 && (*s)->kind == SYMB_TYPE) { symb = *s; break; }
+    }
+
+    if (!symb) return NULL;
+
+    return resolve_symbol_local(symb->type->scope, name->next, kind);
+  }
 
   // OPTIMIZE
   da_foreach(symbol_t*, s, &scope->symbols) {
-    if(strcmp((*s)->name, name) == 0 && (*s)->kind == kind) return *s;
+    if(strcmp((*s)->name, name->name) == 0 && (*s)->kind == kind) return *s;
   }
+
   return NULL;
 }
 
-static inline symbol_t* resolve_symbol_any(scope_t* scope, const char* name) {
+static inline symbol_t* resolve_qn_root(scope_t* scope, const char* name) {
   if (!scope) return NULL;
+  if (!name) return NULL;
 
-  // OPTIMIZE
   da_foreach(symbol_t*, s, &scope->symbols) {
     if((*s)->name && strcmp((*s)->name, name) == 0) return *s;
   }
-  return resolve_symbol_any(scope->parent, name);
+
+  return resolve_qn_root(scope->parent, name);
 }
 
-static inline symbol_t* resolve_symbol(scope_t* scope, const char* name, symb_kind_t kind) {
+static inline symbol_t* resolve_symbol_any(scope_t* scope, ast_qn_t* name) {
   if (!scope) return NULL;
+  if (!name) return NULL;
 
-  // OPTIMIZE
-  da_foreach(symbol_t*, s, &scope->symbols) {
-    if(strcmp((*s)->name, name) == 0 && (*s)->kind == kind) return *s;
-  }
-  return resolve_symbol(scope->parent, name, kind);
+  symbol_t* symb = resolve_qn_root(scope, name->name);
+  if (!symb) return NULL;
+
+  if (name->next) return resolve_symbol_local_any(symb->type->scope, name->next);
+
+  return symb;
+}
+
+static inline symbol_t* resolve_symbol(scope_t* scope, ast_qn_t* name, symb_kind_t kind) {
+  if (!scope) return NULL;
+  if (!name) return NULL;
+
+  symbol_t* symb = resolve_qn_root(scope, name->name);
+  if (!symb) return NULL;
+
+  if (name->next) return resolve_symbol_local(symb->type->scope, name->next, kind);
+
+  return symb->kind == kind ? symb : NULL;
 }
 
 static inline void enter_scope_new(typechecker_t* t, const char* name) {
@@ -663,8 +710,26 @@ const enum _bp expr_bp_table[] = {
   [OP_CALL]    = BP_CALL,
   [OP_ASSIGN]  = BP_ASSIGN,
   [OP_MEMB]    = BP_ACCESS,
-  [OP_SCOPE]   = BP_ACCESS,
 };
+
+static inline ast_qn_t* parse_qualified_name(parser_t* p) {
+  if(!expect(p, TOK_IDENT)) return NULL;
+  token_t tok = get_tok(p);
+  next(p);
+  
+  ast_qn_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->name = arena_strdup(&p->arena, tok.as.s);
+
+  if (tok_is(p, TOK_COLCOL)) {
+    next(p);
+
+    ast_qn_t* next = parse_qualified_name(p);
+    if (!next) return NULL;
+    n->next = next;
+  }
+
+  return n;
+}
 
 static inline ast_expr_t* parse_expr(parser_t* p, int bp);
 
@@ -676,12 +741,10 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
   if (tok_is(p, TOK_IDENT)) {
     n->kind = EXPR_SYMBOL;
 
-    if(!expect(p, TOK_IDENT)) return NULL;
-    const char* name = arena_strdup(&p->arena, get_tok(p).as.s);
-    next(p);
-
+    ast_qn_t* name = parse_qualified_name(p);
     if(!name) return NULL;
     n->as.symbol = name;
+
   } else if (tok_is(p, TOK_STRLIT)) {
     n->kind = EXPR_STRING;
 
@@ -758,7 +821,6 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
         kind = EXPR_ASSIGNMENT;
         break;
       case OP_MEMB: 
-      case OP_SCOPE: 
         kind = EXPR_ACCESS;
         break;
       case OP_INVALID:
@@ -867,11 +929,10 @@ static inline ast_type_t* parse_type(parser_t* p) {
   n->ast_kind = AST_TYPE;
   n->loc = get_tok(p).loc;
 
-  if(!expect_with_name(p, TOK_IDENT, "type")) return NULL;
-  token_t tok = get_tok(p);
-  next(p);
+  ast_qn_t* name = parse_qualified_name(p);
+  if(!name) return NULL;
+  n->name = name;
 
-  n->name = arena_strdup(&p->arena, tok.as.s);
   n->array_depth = 0;
   while(tok_is(p, '[')) {
     if (!expect(p, '[')) return NULL;
@@ -1416,13 +1477,18 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
         print_ast(stream, (ast_node_t*)*d, level + 4);
       }
       break;
+    case AST_QN:
+      ast_qn_t* qn = (ast_qn_t*)n;
+      fprintf(stream, "%*s%s\n", level, "", "AST_QN");
+      fprintf(stream, "%*sName: %s\n", level, "", qn->name);
+      print_ast(stream, (ast_node_t*)qn->next, level + 2);
     case AST_EXPR:
       ast_expr_t* expr = (ast_expr_t*)n;
       fprintf(stream, "%*s%s", level, "", "AST_EXPR");
       switch(expr->kind) {
         case EXPR_SYMBOL:
           fprintf(stream, " (%s)\n", "EXPR_SYMBOL");
-          fprintf(stream, "%*s%s\n", level + 2, "", expr->as.symbol);
+          print_ast(stream, (ast_node_t*)expr->as.symbol, level + 2);
           break;
         case EXPR_STRING:
           fprintf(stream, " (%s)\n", "EXPR_STRING");
@@ -1452,13 +1518,7 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
           break;
         case EXPR_ACCESS:
           fprintf(stream, " (%s)\n", "EXPR_ACCESS");
-          if(expr->as.access.op == OP_MEMB) {
-            fprintf(stream, "%*sobject:\n", level + 2, "");
-          } else if (expr->as.access.op == OP_SCOPE) {
-            fprintf(stream, "%*smodule:\n", level + 2, "");
-          } else {
-            UNREACHABLE("print_ast: ACCESS op");
-          }
+          fprintf(stream, "%*sobject:\n", level + 2, "");
           print_ast(stream, (ast_node_t*)expr->as.access.owner, level + 2);
           fprintf(stream, "%*sfield:\n", level + 2, "");
           fprintf(stream, "%*s%s\n", level + 2, "", expr->as.access.field);
@@ -1535,7 +1595,8 @@ static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
     }
     case AST_TYPE:
       fprintf(stream, "%*s%s\n", level, "", "AST_TYPE");
-      fprintf(stream, "%*sName: %s\n", level + 2, "", ((ast_type_t*)n)->name);
+      fprintf(stream, "%*sName:", level + 2, "");
+      print_ast(stream, (ast_node_t*)((ast_type_t*)n)->name, level + 2);
       break;
     case AST_BODY:
       fprintf(stream, "%*s%s\n", level, "", "AST_BODY");
@@ -1580,6 +1641,8 @@ static inline void print_symbol_table_entries(FILE* stream, scope_t* scope) {
         fprintf(stream, "%-10s ", "extern"); break;
       case STO_EXPORT:
         fprintf(stream, "%-10s ", "export"); break;
+      case STO_INSTANCE:
+        fprintf(stream, "%-10s ", "instance"); break;
       default: break;
     }
     fprintf(stream, "0x%08X ", (*s)->addr);
@@ -1699,6 +1762,18 @@ static inline void print_type(FILE* stream, const type_t* t) {
   fprintf(stream, "%.*s", SB_FMT(sb));
 }
 
+static inline const char* qn_to_str(arena_t* a, const ast_qn_t* qn) {
+  sb_t sb = { 0 };
+
+  sb_appendf(&sb, "%s", qn->name);
+  while (qn->next) {
+    sb_appendf(&sb, "::%s", qn->next->name);
+    qn = qn->next;
+  }
+
+  return arena_sprintf(a, "%.*s", SB_FMT(sb));
+}
+
 static inline void typechecker_destroy(typechecker_t* t) {
   arena_free(&t->arena);
   da_free(t->custom_types);
@@ -1781,7 +1856,7 @@ static inline type_t* get_or_create_func_type_of(typechecker_t* t, const type_t*
   return get_or_create_func_type_from_arr(t, ret_type, n_params, params.items);
 }
 
-static inline type_t* resolve_type(typechecker_t* t, const char* name, int depth) {
+static inline type_t* resolve_type(typechecker_t* t, ast_qn_t* name, int depth) {
   type_t* res = NULL;
 
   symbol_t* symbol = resolve_symbol(t->current_scope, name, SYMB_TYPE);
@@ -1867,18 +1942,53 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
       method_name = "add";
       break;
     case OP_MINUS:
+      interface_name = "Sub";
+      method_name = "sub";
+      break;
     case OP_MULT:
+      interface_name = "Mul";
+      method_name = "mul";
+      break;
     case OP_DIV:
+      interface_name = "Div";
+      method_name = "div";
+      break;
     case OP_REM:
+      interface_name = "Rem";
+      method_name = "rem";
+      break;
     case OP_EQ:
+      interface_name = "Eq";
+      method_name = "eq";
+      break;
     case OP_LEQ:
+      interface_name = "Cmp";
+      method_name = "leq";
+      break;
     case OP_GEQ:
+      interface_name = "Cmp";
+      method_name = "geq";
+      break;
     case OP_LT:
+      interface_name = "Cmp";
+      method_name = "lt";
+      break;
     case OP_GT:
+      interface_name = "Cmp";
+      method_name = "gt";
+      break;
     case OP_CALL:
+      interface_name = "Callable";
+      method_name = "call";
+      break;
     case OP_ASSIGN:
+      interface_name = "Copiable";
+      method_name = "copy";
+      break;
     case OP_MEMB:
-    case OP_SCOPE:
+      interface_name = "Accessible";
+      method_name = "access";
+      break;
     case OP_INVALID:
     default:
       UNREACHABLE("find_binop_impl");
@@ -1886,13 +1996,20 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
 
   if (!interface_name || !method_name) return NULL;
 
+  // TODO: unhardcode
+  ast_qn_t iface = { .name = interface_name };
+  ast_qn_t ops   = { .name = "ops", .next = &iface };
+  ast_qn_t core  = { .name = "core", .next = &ops };
+  symbol_t* iface_symb = resolve_symbol(owner->scope, &core, SYMB_TYPE);
+
   bool implements = false;
-  da_foreach(const char*, impl, &owner->impls) {
-    if (strcmp(*impl, interface_name) == 0) {
+  da_foreach(ast_qn_t*, impl, &owner->impls) {
+    if (iface_symb == resolve_symbol(owner->scope, *impl, SYMB_TYPE)) {
       implements = true;
       break;
     }
   }
+
   if (!implements) return NULL;
 
   symbol_t* method = NULL;
@@ -1971,9 +2088,34 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
     case EXPR_SYMBOL:
       symbol_t* s = resolve_symbol_any(t->current_scope, expr->as.symbol); 
       if (!s || !s->type) {
-        fdiagf(stderr, DIAG_ERROR, expr->loc, "Undeclared symbol `%s`.", expr->as.symbol);
+        fdiagf(stderr, DIAG_ERROR, expr->loc, "Undeclared symbol `%s`.", qn_to_str(&t->arena, expr->as.symbol));
         return false;
       }
+
+      if (s->storage == STO_INSTANCE) {
+        ast_qn_t* tmp = expr->as.symbol; 
+        if (!tmp->next) UNREACHABLE("typecheck_expr");
+
+        sb_t sb = { 0 };
+        sb_appendf(&sb, "%s", tmp->name);
+        while (tmp->next->next) {
+          sb_appendf(&sb, "::%s", tmp->name);
+          tmp = tmp->next;
+        }
+
+        fdiagf(
+          stderr,
+          DIAG_ERROR,
+          expr->loc, 
+          "Cannot access instance field `%s` statically through type `%.*s`. Try to instance an object (`obj: %.*s;`) and access the field from it (`obj.%s`).", 
+          s->name,
+          SB_FMT(sb),
+          SB_FMT(sb),
+          s->name
+        );
+        return false;
+      }
+
       expr->type = s->type;
       return true;
     case EXPR_STRING:
@@ -2011,7 +2153,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
     case EXPR_ACCESS: {
       if(!typecheck_expr(t, expr->as.access.owner)) return false;
 
-      symbol_t* s = resolve_symbol_local_any(expr->as.access.owner->type->scope, expr->as.access.field);
+      symbol_t* s = resolve_field(expr->as.access.owner->type->scope, expr->as.access.field);
       if (!s) {
         fdiagf(
           stderr,
@@ -2024,30 +2166,19 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         return false;
       }
 
-      if (expr->as.access.op == OP_SCOPE) {
-        // TODO: User should not be able to access field of structs.
-        // For example Vec2::x should generate a compiler error.
+      if (expr->as.access.owner->type->kind == TYPE_TYPE) {
+        fdiagf(
+          stderr,
+          DIAG_ERROR,
+          expr->as.access.owner->loc,
+          "Cannot access field `%s` of `%s`. "
+          "Maybe you wanted to access its scope? (try using `::` operator instead of `.`).",
+          expr->as.access.field,
+          type_to_str(&t->arena, expr->as.access.owner->type)
+        );
+        return false;
+      } 
 
-        // if (expr->as.access.owner->type->kind != TYPE_MODULE) {
-        //   fdiagf(stderr, DIAG_ERROR, expr->as.access.owner->loc, "Not a module.");
-        //   return false;
-        // }
-      } else if (expr->as.access.op == OP_MEMB) {
-        if (expr->as.access.owner->type->kind == TYPE_TYPE) {
-          fdiagf(
-            stderr,
-            DIAG_ERROR,
-            expr->as.access.owner->loc,
-            "Cannot access field `%s` of `%s`. "
-            "Maybe you wanted to access its scope? (try using `::` operator instead of `.`).",
-            expr->as.access.field,
-            type_to_str(&t->arena, expr->as.access.owner->type)
-          );
-          return false;
-        }
-      } else {
-        UNREACHABLE("typecheck_expr: EXPR_ACCESS");
-      }
       expr->type = s->type;
       return true;
     }
@@ -2152,7 +2283,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
 static inline bool resolve_type_decl(typechecker_t* t, ast_type_t* type) {
   type_t* res = resolve_type(t, type->name, type->array_depth);
   if(!res) {
-    fdiagf(stderr, DIAG_ERROR, type->loc, " Undefined type `%s`.", type->name);
+    fdiagf(stderr, DIAG_ERROR, type->loc, " Undefined type `%s`.", qn_to_str(&t->arena, type->name));
     return false;
   }
   type->resolved_type = res;
@@ -2407,7 +2538,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     da_foreach(ast_param_t*, f, &(*s)->fields) {
       if(!resolve_type_decl(t, (*f)->type)) return false;
 
-      symbol_t* sym = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, (*f)->name, (*f)->type->resolved_type);
+      symbol_t* sym = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_INSTANCE, (*f)->name, (*f)->type->resolved_type);
       if(!sym) {
         fdiagf(stderr, DIAG_FATAL, (*f)->loc, "Failed to create type");
         abort();
@@ -2448,7 +2579,11 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   }
 
   da_foreach(ast_impl_t*, impl, &root->impls) {
-    bool impl_self = strcmp((*impl)->interface->name, "Self") == 0;
+    bool impl_self = false;
+    {
+      if ((*impl)->interface->name && !(*impl)->interface->name->next)
+        impl_self = strcmp((*impl)->interface->name->name, "Self") == 0;
+    }
     if(!impl_self && !resolve_type_decl(t, (*impl)->interface)) return false;
     if(!resolve_type_decl(t, (*impl)->type)) return false;
 
@@ -2488,7 +2623,10 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     if (!impl_self) {
       da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
         // TODO: compare types, not just name
-        symbol_t* s = resolve_symbol_local(type->scope, m->name, SYMB_FUNC);
+
+        // TODO: fix horrifying hack
+        ast_qn_t tmp = (ast_qn_t){ .name = m->name };
+        symbol_t* s = resolve_symbol_local(type->scope, &tmp, SYMB_FUNC);
         if(!s) {
           fdiagf(stderr, DIAG_ERROR, (*impl)->loc, "Missing required method `%s` in `%s` interface implementation.", m->name, (*impl)->interface->name);
           return false;
@@ -2572,6 +2710,7 @@ static inline void codegen_load_var(program_t* p, symbol_t* symbol) {
       da_append(&p->code, INST_LOADG);
       da_append(&p->code, symbol->addr);
       break;
+    case STO_INSTANCE:
     default: 
       UNREACHABLE("codegen_load_var");
   }
@@ -2628,7 +2767,6 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           case OP_LT: da_append(&p->code, INST_LT); break;
           case OP_GT: da_append(&p->code, INST_GT); break;
           case OP_MEMB:
-          case OP_SCOPE:
           case OP_ASSIGN:
           case OP_CALL:
           case OP_INVALID:
@@ -2642,19 +2780,15 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
       case EXPR_ACCESS: {
         arena_t a = { 0 };
         // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
-        symbol_t* symbol = resolve_symbol_local(e->as.access.owner->type->scope, e->as.access.field, SYMB_VAR);
+        symbol_t* symbol = resolve_field(e->as.access.owner->type->scope, e->as.access.field);
         if (!symbol) {
           fdiagf(stderr, DIAG_ERROR, e->loc, "No symbol `%s` in `%s`.", e->as.symbol, type_to_str(&a, e->as.access.owner->type));
           arena_free(&a);
           return false;
         }
-        if (e->as.access.op == OP_SCOPE) {
-          codegen_load_var(p, symbol);
-        } else {
-          if(!codegen_expr(p, scope, e->as.access.owner)) return false;
-          da_append(&p->code, INST_LOADF);
-          da_append(&p->code, symbol->addr);
-        }
+        if(!codegen_expr(p, scope, e->as.access.owner)) return false;
+        da_append(&p->code, INST_LOADF);
+        da_append(&p->code, symbol->addr);
         break;
       }
       case EXPR_FUNCALL:
@@ -2678,7 +2812,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           if (callee->as.access.op == OP_MEMB)
             if(!codegen_expr(p, scope, owner)) return false;
 
-          symbol = resolve_symbol(owner->type->scope, callee->as.access.field, SYMB_FUNC);
+          symbol = resolve_field(owner->type->scope, callee->as.access.field);
           if (!symbol) {
             // TODO: remove this abomination
             arena_t temp = { 0 };
@@ -2686,10 +2820,8 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
               stderr,
               DIAG_ERROR,
               callee->loc,
-              "No %s `%s` in %s `%s`.",
-              callee->as.access.op == OP_MEMB ? "method" : "function",
+              "No method `%s` in type `%s`.",
               callee->as.access.field,
-              callee->as.access.op == OP_MEMB ? "type" : "module",
               type_to_str(&temp, owner->type)
             );
             return false;
@@ -2732,11 +2864,12 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
               da_append(&p->code, INST_STOREG);
               da_append(&p->code, symbol->addr);
               break;
+            case STO_INSTANCE:
             default: 
               UNREACHABLE("codegen_expr");
           }
         } else if (lhs->kind == EXPR_ACCESS && lhs->as.access.op == OP_MEMB) {
-          symbol_t* symbol = resolve_symbol_local(lhs->as.access.owner->type->scope, lhs->as.access.field, SYMB_VAR);
+          symbol_t* symbol = resolve_field(lhs->as.access.owner->type->scope, lhs->as.access.field);
           if (!symbol) {
             arena_t a;
             fdiagf(stderr, DIAG_ERROR, e->loc, "No symbol `%s` in `%s`.", lhs->as.access.field, type_to_str(&a, lhs->as.access.owner->type));

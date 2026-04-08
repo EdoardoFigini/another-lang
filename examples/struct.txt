@@ -10,8 +10,12 @@ Line: struct {
 
 extern print: (s: addr) -> i32;
 
-Add: interface {
-  add: (self: Self, other: Self) -> Self;
+core: mod {
+  ops: mod {
+    Add: interface {
+      add: (self: Self, other: Self) -> Self;
+    }
+  }
 }
 
 Stringify: interface {
@@ -34,10 +38,10 @@ export main: () -> none {
   line.p2.x = 0;
   line.p2.y = 0;
 
-  print(line.to_str().c_str());
+  print(Line::to_str(line).c_str());
 }
 
-impl Add: str {
+impl core::ops::Add: str {
   add: (self: Self, other: Self) -> Self {
     return self.concat(other);
   }
@@ -55,7 +59,7 @@ impl Stringify: i32 {
   extern to_str: (self: Self) -> str;
 }
 
-impl Add: Vec2 {
+impl core::ops::Add: Vec2 {
   add: (self: Self, other: Self) -> Self {
     res: Vec2;
 

@@ -106,6 +106,7 @@ static inline void parser_destroy(parser_t* p) {
 
 typedef enum {
   AST_ROOT = 1,
+  AST_QN,
   AST_EXPR,
   AST_STMT,
   AST_FUNC_DEF,
@@ -149,6 +150,7 @@ typedef enum {
   STO_LOCAL,
   STO_EXTERN,
   STO_EXPORT,
+  STO_INSTANCE,
 } symb_storage_t;
 
 typedef struct {
@@ -174,9 +176,15 @@ struct _scope {
 
 typedef struct _ast_expr_t ast_expr_t;
 
-typedef struct {
+typedef struct _ast_qn {
   AST_DEFAULT_FIELDS;
   const char* name;
+  struct _ast_qn* next;
+} ast_qn_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  ast_qn_t* name;
   int array_depth;
   type_t* resolved_type;
 } ast_type_t;
@@ -291,7 +299,6 @@ typedef enum {
   OP_LT      = '<',
   OP_GT      = '>',
   OP_MEMB    = '.',
-  OP_SCOPE   = TOK_COLCOL,
 } op_kind_t;
 
 enum _bp {
@@ -323,7 +330,7 @@ struct _ast_expr_t {
   type_t const* type;
   bool is_const;
   union {
-    const char* symbol;
+    ast_qn_t* symbol;
     const char* s;
     struct {
       lit_type_info_flags_t ti;
@@ -520,8 +527,9 @@ struct _type {
     } type;
   } as;
   scope_t* scope;
+  // TODO: make hashmap<ast_qn_t*, bool>
   struct {
-    const char** items;
+    ast_qn_t** items;
     size_t count;
     size_t capacity;
   } impls;
