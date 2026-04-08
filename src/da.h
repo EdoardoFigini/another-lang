@@ -92,6 +92,15 @@
 // ```
 #define da_foreach(Type, it, da) for (Type *it = (da)->items; it < (da)->items + (da)->count; ++it)
 
-#define da_at(da, idx) (da).items[(idx)]
+#define da_indexof(da, x) \
+  ( \
+    ASSERT((da)->count > 0), \
+    ASSERT((da)->items), \
+    ASSERT((x) >= (da)->items), \
+    ASSERT((x) <  (da)->items + (da)->count), \
+    (x) - (da)->items\
+  )
+
+#define da_at(da, idx) (da).items[(ASSERT(idx < (da).count), idx)]
 
 #endif

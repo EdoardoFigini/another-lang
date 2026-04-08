@@ -5,8 +5,6 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-#include <ffi.h>
-
 #include "sb.h"
 #include "da.h"
 #include "arena.h"

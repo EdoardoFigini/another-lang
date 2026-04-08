@@ -1,0 +1,79 @@
+Vec2: struct {
+  x: i32;
+  y: i32;
+}
+
+Line: struct {
+  p1: Vec2;
+  p2: Vec2;
+}
+
+extern print: (s: addr) -> i32;
+
+Add: interface {
+  add: (self: Self, other: Self) -> Self;
+}
+
+Stringify: interface {
+  to_str: (self: Self) -> str;
+}
+
+export main: () -> none {
+  a: Vec2;
+  a.x = 34;
+  a.y = 20;
+
+  b: Vec2;
+  b.x = 33;
+  b.y = 400;
+
+  print((a + b).to_str().c_str());
+
+  line: Line;
+  line.p1 = a;
+  line.p2.x = 0;
+  line.p2.y = 0;
+
+  print(line.to_str().c_str());
+}
+
+impl Add: str {
+  add: (self: Self, other: Self) -> Self {
+    return self.concat(other);
+  }
+}
+
+impl Self: str {
+  [[name="str__concat"]]
+  extern concat: (self: Self, other: Self) -> Self;
+  [[name="str__c_str"]]
+  extern c_str: (self: Self) -> addr;
+}
+
+impl Stringify: i32 {
+  [[name="i32__to_str"]]
+  extern to_str: (self: Self) -> str;
+}
+
+impl Add: Vec2 {
+  add: (self: Self, other: Self) -> Self {
+    res: Vec2;
+
+    res.x = self.x + other.x;
+    res.y = self.y + other.y;
+
+    return res;
+  }
+}
+
+impl Stringify: Vec2 {
+  to_str: (self: Self) -> str {
+    return "Vec2(" + self.x.to_str() + ", " + self.y.to_str() + ")";
+  }
+}
+
+impl Stringify: Line {
+  to_str: (self: Self) -> str {
+    return "Line(" + self.p1.to_str() + ", " + self.p2.to_str() + ")";
+  }
+}

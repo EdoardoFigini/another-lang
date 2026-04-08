@@ -30,6 +30,7 @@ const char* tok_keywords[] = {
   [KW_IMPL]      = "impl",
   [KW_INTERFACE] = "interface",
   [KW_MOD]       = "mod",
+  [KW_STRUCT]    = "struct",
 };
 
 typedef enum {
@@ -69,7 +70,7 @@ void sb_vdiagf(sb_t* sb, diag_lvl_t lvl, loc_t loc, const char* fmt, va_list arg
   n = vsnprintf(buf, n + 1, fmt, args);
 
   sb_n_append(sb, buf, n);
-  free(buf);
+  // free(buf);
 
   sb_appendf(sb, "\n");
   sb_appendf(sb, "%s:%zu:%zu", loc.path, loc.line, loc.col);
@@ -118,6 +119,7 @@ void tok_print(token_t tok) {
       case TOK_IMPL: printf("%-20s", "TOK_IMPL"); break;
       case TOK_INTERFACE: printf("%-20s", "TOK_INTERFACE"); break;
       case TOK_MOD: printf("%-20s", "TOK_MOD"); break;
+      case TOK_STRUCT: printf("%-20s", "TOK_STRUCT"); break;
       default: printf("%-20s", "<INVALID TOKEN>"); break;
     }
   }
@@ -148,6 +150,7 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_IMPL:
       case TOK_INTERFACE:
       case TOK_MOD:
+      case TOK_STRUCT:
         return tok_keywords[k];
       default: return "<INVALID TOKEN>";
     }
@@ -574,9 +577,11 @@ static inline void enter_scope_new(typechecker_t* t, const char* name) {
 
 static inline void enter_scope(typechecker_t* t, scope_t* s) {
   t->current_scope = s;
+  // fprintf(stderr, "[DEBUG] Entering scope %s\n", s->name);
 }
 
 static inline void exit_scope(typechecker_t* t) {
+  // fprintf(stderr, "[DEBUG] Exiting scope %s (entering %s)\n", t->current_scope->name, t->current_scope->parent->name);
   t->current_scope = t->current_scope->parent;
 }
 
@@ -602,6 +607,7 @@ static inline bool tok_is_specifier(parser_t* p) {
     case KW_IMPL:
     case KW_INTERFACE:
     case KW_MOD:
+    case KW_STRUCT:
     default: 
       return false;
   }
@@ -627,6 +633,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
       case KW_IMPL:
       case KW_INTERFACE:
       case KW_MOD:
+      case KW_STRUCT:
       default: return flags;
     }
 
@@ -1276,6 +1283,34 @@ static inline ast_iface_t* parse_iface(parser_t* p, loc_t loc, const char* name)
   return n;
 }
 
+static inline ast_struct_t* parse_struct(parser_t* p, loc_t loc, const char* name) {
+  if (!expect(p, TOK_STRUCT)) return NULL;
+  next(p);
+
+  ast_struct_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_STRUCT;
+  n->name = arena_strdup(&p->arena, name);
+  n->loc = loc;
+
+  if(!expect(p, '{')) return NULL;
+  next(p);
+
+  while(!tok_is(p, '}')) {
+    ast_param_t* field = parse_param(p);
+    if(!field) return NULL;
+
+    if(!expect(p, ';')) return NULL;
+    next(p);
+
+    da_append(&n->fields, field);
+  }
+
+  if(!expect(p, '}')) return NULL;
+  next(p);
+
+  return n;
+}
+
 static inline ast_root_t* parse(parser_t* p);
 
 static inline ast_mod_t* parse_mod(parser_t* p, loc_t loc, const char* name) {
@@ -1336,6 +1371,11 @@ static inline ast_root_t* parse(parser_t* p) {
         if (!def) return NULL;
 
         da_append(&n->func_defs, def);
+      } else if (tok_is(p, TOK_STRUCT)) {
+        ast_struct_t* structure = parse_struct(p, loc, name);
+        if(!structure) return NULL;
+
+        da_append(&n->structs, structure);
       } else if (tok_is(p, TOK_INTERFACE)) {
         ast_iface_t* interface = parse_iface(p, loc, name);
         if(!interface) return NULL;
@@ -1578,8 +1618,7 @@ static inline int type_equals(type_t a, type_t b) {
       return 1;
     case TYPE_STRUCT:
     case TYPE_MODULE:
-      TODO("type_equals: compare fields");
-      return 1;
+      return strcmp(a.name, b.name) == 0;
     case TYPE_FUNC:
       if (!type_equals(*a.as.func.ret, *b.as.func.ret)) return 0;
       if (a.as.func.params.count != b.as.func.params.count) return 0;
@@ -1590,6 +1629,8 @@ static inline int type_equals(type_t a, type_t b) {
       return same;
     case TYPE_INTERFACE:
       return strcmp(a.name, b.name) == 0;
+    case TYPE_TYPE:
+      return type_equals(*a.as.type.of, *b.as.type.of);
     case TYPE_ALIAS:
     case TYPES_COUNT:
     default:
@@ -1636,6 +1677,9 @@ static inline void render_type(sb_t* sb, const type_t* t) {
     case TYPE_INTERFACE:
       sb_appendf(sb, "interface %s", t->name);
       break;
+    case TYPE_TYPE:
+      sb_appendf(sb, "type %s", t->name);
+      break;
     case TYPES_COUNT:
     default: break;
   }
@@ -1666,12 +1710,19 @@ static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* nam
   type->name = name;
   type->size = size;
 
+  type_t* type_type = arena_alloc(&t->arena, sizeof(*type));
+  type_type->kind = TYPE_TYPE;
+  type_type->name = name;
+  type_type->size = 0;
+  type_type->as.type.of = type;
+
   if (name) {
-    make_symbol(&t->arena, t->current_scope, SYMB_TYPE, STO_LOCAL, name, type);
+    make_symbol(&t->arena, t->current_scope, SYMB_TYPE, STO_LOCAL, name, type_type);
     enter_scope_new(t, arena_sprintf(&t->arena, "type_%s", name));
     type->scope = t->current_scope;
     exit_scope(t);
   }
+  type_type->scope = type->scope;
   
   return type;
 }
@@ -1736,7 +1787,8 @@ static inline type_t* resolve_type(typechecker_t* t, const char* name, int depth
   symbol_t* symbol = resolve_symbol(t->current_scope, name, SYMB_TYPE);
   if (!symbol) return NULL;
 
-  res = symbol->type;
+  if (!symbol->type) return NULL;
+  res = symbol->type->as.type.of;
   if (!res) return NULL;
 
   while(depth-- > 0) {
@@ -1781,6 +1833,7 @@ static inline num_rank_t get_type_rank(const type_t* t) {
     case TYPE_FUNC:
     case TYPE_INTERFACE:
     case TYPE_NONE:
+    case TYPE_TYPE:
     case TYPES_COUNT:
     default:
       UNREACHABLE("get_type_rank - not a number");
@@ -1955,54 +2008,55 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
     case EXPR_UNOP:
       TODO("typecheck_expr: EXPR_UNOP");
       break;
-    case EXPR_ACCESS:
+    case EXPR_ACCESS: {
       if(!typecheck_expr(t, expr->as.access.owner)) return false;
 
-      if (expr->as.access.op == OP_SCOPE) {
-        if (expr->as.access.owner->type->kind != TYPE_MODULE) {
-          fdiagf(stderr, DIAG_ERROR, expr->as.access.owner->loc, "Not a module.");
-          return false;
-        }
+      symbol_t* s = resolve_symbol_local_any(expr->as.access.owner->type->scope, expr->as.access.field);
+      if (!s) {
+        fdiagf(
+          stderr,
+          DIAG_ERROR,
+          expr->loc,
+          "`%s` has no field named `%s`.",
+          type_to_str(&t->arena, expr->as.access.owner->type),
+          expr->as.access.field
+        );
+        return false;
+      }
 
-        symbol_t*s = resolve_symbol_any(expr->as.access.owner->type->scope, expr->as.access.field);
-        if (!s) {
-          fdiagf(
-            stderr,
-            DIAG_ERROR,
-            expr->loc,
-            "`%s` has no field named `%s`.",
-            type_to_str(&t->arena, expr->as.access.owner->type),
-            expr->as.access.field
-          );
-          return false;
-        }
-        expr->type = s->type;
-        return true;
+      if (expr->as.access.op == OP_SCOPE) {
+        // TODO: User should not be able to access field of structs.
+        // For example Vec2::x should generate a compiler error.
+
+        // if (expr->as.access.owner->type->kind != TYPE_MODULE) {
+        //   fdiagf(stderr, DIAG_ERROR, expr->as.access.owner->loc, "Not a module.");
+        //   return false;
+        // }
       } else if (expr->as.access.op == OP_MEMB) {
-        symbol_t* s = resolve_symbol_any(expr->as.access.owner->type->scope, expr->as.access.field);
-        if (!s) {
+        if (expr->as.access.owner->type->kind == TYPE_TYPE) {
           fdiagf(
             stderr,
             DIAG_ERROR,
-            expr->loc,
-            "`%s` has no field named `%s`.",
-            type_to_str(&t->arena, expr->as.access.owner->type),
-            expr->as.access.field
+            expr->as.access.owner->loc,
+            "Cannot access field `%s` of `%s`. "
+            "Maybe you wanted to access its scope? (try using `::` operator instead of `.`).",
+            expr->as.access.field,
+            type_to_str(&t->arena, expr->as.access.owner->type)
           );
           return false;
         }
-        expr->type = s->type;
-        return true;
       } else {
         UNREACHABLE("typecheck_expr: EXPR_ACCESS");
       }
+      expr->type = s->type;
       return true;
+    }
     case EXPR_FUNCALL:
       ast_expr_t* callee = expr->as.funcall.callee;
       if(!typecheck_expr(t, callee)) return false;
 
       if (callee->type->kind != TYPE_FUNC) {
-        fdiagf(stderr, DIAG_ERROR, callee->loc, "Attempting to call non-callable type `%s`", type_to_str(&t->arena, callee->type));
+        fdiagf(stderr, DIAG_ERROR, callee->loc, "Cannot call non-callable type `%s`", type_to_str(&t->arena, callee->type));
         return false;
       }
 
@@ -2013,7 +2067,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
             expr->loc,
             "Mismatched number of arguments in function call: expected %zu, got %zu.",
             callee->type->as.func.params.count,
-            expr->as.funcall.args.count
+            expr->as.funcall.args.count + (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB)
           );
           return false;
       }
@@ -2075,6 +2129,18 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         );
         return false;
       }
+
+      if(
+        expr->as.binop.lhs->kind != EXPR_ACCESS &&
+        expr->as.binop.lhs->kind != EXPR_SYMBOL
+      ) {
+        fdiagf(stderr, DIAG_ERROR, expr->as.binop.lhs->loc, "Assignement only possible for lvalues.");
+        return false;
+      }
+
+      // TODO: convert assignment of struct a = b to a.copy(b)
+      // ensure Copyable interface for struct
+
       expr->type = t->builtins.none;
       return true;
     default:
@@ -2319,6 +2385,7 @@ static inline void typechecker_init(typechecker_t* t) {
   enter_scope_new(t, "root");
 }
 
+// TODO: Make a function to check type->kind, otherwise aliases will fail checks
 static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   root->scope = t->current_scope;
 
@@ -2331,6 +2398,26 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     t->current_scope->parent = t->builtins.scope; 
     typecheck(t, (*mod)->root);
     t->current_scope = root->scope;
+  }
+
+  da_foreach(ast_struct_t*, s, &root->structs) {
+    type_t* type = make_type(t, TYPE_STRUCT, (*s)->name, (*s)->fields.count);
+
+    enter_scope(t, type->scope);
+    da_foreach(ast_param_t*, f, &(*s)->fields) {
+      if(!resolve_type_decl(t, (*f)->type)) return false;
+
+      symbol_t* sym = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, (*f)->name, (*f)->type->resolved_type);
+      if(!sym) {
+        fdiagf(stderr, DIAG_FATAL, (*f)->loc, "Failed to create type");
+        abort();
+      }
+      set_symbol_address(sym, da_indexof(&(*s)->fields, f));
+      (*f)->symbol = sym;
+
+      da_append(&type->as.structure.fields, (*f)->type->resolved_type);
+    }
+    exit_scope(t);
   }
 
   da_foreach(ast_func_def_t*, d, &root->func_defs)
@@ -2367,6 +2454,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
     type_t* type = (*impl)->type->resolved_type;
 
+    scope_t* saved_scope = t->current_scope;
     enter_scope(t, type->scope);
     
     type_t* self = make_type(t, TYPE_ALIAS, "Self", 0);
@@ -2395,7 +2483,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       }
     }
 
-    exit_scope(t);
+    t->current_scope = saved_scope;
 
     if (!impl_self) {
       da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
@@ -2414,10 +2502,11 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
   da_foreach(ast_impl_t*, impl, &root->impls) {
     type_t* type = (*impl)->type->resolved_type;
+    scope_t* saved_scope = t->current_scope;
     enter_scope(t, type->scope);
     da_foreach(ast_func_def_t*, method, &(*impl)->methods)
       if(!typecheck_func(t, *method)) return false;
-    exit_scope(t);
+    t->current_scope = saved_scope;
   }
 
   da_foreach(ast_func_def_t*, d, &root->func_defs) {
@@ -2471,7 +2560,6 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 }
 
 static inline void codegen_load_var(program_t* p, symbol_t* symbol) {
-
   switch (symbol->storage) {
     case STO_EXTERN:
       TODO("codegen_load_var - load extern symbol");
@@ -2556,10 +2644,17 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
         symbol_t* symbol = resolve_symbol_local(e->as.access.owner->type->scope, e->as.access.field, SYMB_VAR);
         if (!symbol) {
-          fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in `%s`.", e->as.symbol, type_to_str(&a, e->as.access.owner->type));
+          fdiagf(stderr, DIAG_ERROR, e->loc, "No symbol `%s` in `%s`.", e->as.symbol, type_to_str(&a, e->as.access.owner->type));
+          arena_free(&a);
           return false;
         }
-        codegen_load_var(p, symbol);
+        if (e->as.access.op == OP_SCOPE) {
+          codegen_load_var(p, symbol);
+        } else {
+          if(!codegen_expr(p, scope, e->as.access.owner)) return false;
+          da_append(&p->code, INST_LOADF);
+          da_append(&p->code, symbol->addr);
+        }
         break;
       }
       case EXPR_FUNCALL:
@@ -2613,14 +2708,16 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         break;
       case EXPR_SUBEXPR:
         return codegen_expr(p, scope, e->as.subexpr);
-      case EXPR_ASSIGNMENT:
+      case EXPR_ASSIGNMENT: {
         if(!codegen_expr(p, scope, e->as.assign.rhs)) return false;
 
-        if(e->as.assign.lhs->kind == EXPR_SYMBOL) {
+        ast_expr_t* lhs = e->as.assign.lhs;
+
+        if(lhs->kind == EXPR_SYMBOL) {
           // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
-          symbol_t* symbol = resolve_symbol(scope, e->as.assign.lhs->as.symbol, SYMB_VAR);
+          symbol_t* symbol = resolve_symbol(scope, lhs->as.symbol, SYMB_VAR);
           if (!symbol) {
-            fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in current scope.", e->as.symbol);
+            fdiagf(stderr, DIAG_ERROR, e->loc, "No symbol `%s` in current scope.", e->as.symbol);
             return false;
           }
           switch (symbol->storage) {
@@ -2638,16 +2735,45 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
             default: 
               UNREACHABLE("codegen_expr");
           }
+        } else if (lhs->kind == EXPR_ACCESS && lhs->as.access.op == OP_MEMB) {
+          symbol_t* symbol = resolve_symbol_local(lhs->as.access.owner->type->scope, lhs->as.access.field, SYMB_VAR);
+          if (!symbol) {
+            arena_t a;
+            fdiagf(stderr, DIAG_ERROR, e->loc, "No symbol `%s` in `%s`.", lhs->as.access.field, type_to_str(&a, lhs->as.access.owner->type));
+            arena_free(&a);
+            return false;
+          }
+          if(!codegen_expr(p, scope, e->as.assign.lhs->as.access.owner)) return false;
+          da_append(&p->code, INST_STOREF);
+          da_append(&p->code, symbol->addr);
         } else {
-          print_ast(stderr, (ast_node_t*)e->as.assign.lhs, 0);
-          TODO("codegen_expr - assignment: lhs not a symbol");
+          TODO("codegen_expr - assignment: unsupported lhs");
         }
         break;
+      }
       default:
         UNREACHABLE("codegen_expr");
   }
 
   return true;
+}
+
+static inline void codegen_struct_instantiate(program_t* p, type_t* s) {
+  da_append(&p->code, INST_MKOBJ);
+  da_append(&p->code, s->size);
+
+  for (size_t i = 0; i < s->as.structure.fields.count; i++) {
+    if (s->as.structure.fields.items[i]->kind == TYPE_STRUCT) {
+      da_append(&p->code, INST_DUP);
+
+      codegen_struct_instantiate(p, s->as.structure.fields.items[i]);
+
+      da_append(&p->code, INST_SWAP);
+
+      da_append(&p->code, INST_STOREF);
+      da_append(&p->code, i);
+    }
+  }
 }
 
 static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_stmt_t* s) {
@@ -2660,19 +2786,36 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
       da_append(&p->code, INST_RET);
       return true;
     }
-    case STMT_VAR_DEF:
+    case STMT_VAR_DEF: {
       if (f->loc_vars >= MAX_LOC_VARS) {
         fdiagf(stderr, DIAG_FATAL, s->loc, "Too many local variables in function %s", f->name);
         abort();
       }
+
       symbol_t* symb = s->as.var_def->symbol;
       set_symbol_address(symb, f->loc_vars++);
-      if (s->as.var_def->init) {
-        if(!codegen_expr(p, scope, s->as.var_def->init)) return false;
+      
+      // TODO: allocate all local variables at once at function call, function should
+      // be aware of its local vars after typecheck pass
+      if (s->as.var_def->type->resolved_type->kind == TYPE_STRUCT) {
+        codegen_struct_instantiate(p, s->as.var_def->type->resolved_type);
+
         da_append(&p->code, INST_STORE);
         da_append(&p->code, symb->addr);
       }
+
+      if (s->as.var_def->init) {
+        if (s->as.var_def->type->resolved_type->kind == TYPE_STRUCT) {
+          TODO("struct init/construct - new() method?");
+        } else {
+          if(!codegen_expr(p, scope, s->as.var_def->init)) return false;
+
+          da_append(&p->code, INST_STORE);
+          da_append(&p->code, symb->addr);
+        }
+      }
       return true;
+    }
     case STMT_IF: {
       size_t j_to_end_offset = 0; 
       size_t j_to_else_offset = 0;
@@ -2745,6 +2888,7 @@ static inline ffi_type* type_to_ffi_type(type_t t) {
     case TYPE_STRUCT:    return &ffi_type_uint32; // handle
     case TYPE_MODULE:    return NULL;
     case TYPE_INTERFACE: return NULL;
+    case TYPE_TYPE:      return NULL;
     case TYPE_ALIAS:     return type_to_ffi_type(*t.as.alias.target);
     case TYPE_FUNC:      return &ffi_type_pointer; 
     case TYPES_COUNT:
@@ -2935,6 +3079,10 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
       //   fprintf(stream, "  %-10s 0x%016lX\n", "PUSHL", ((uint64_t)p->code.items[++i] << 32) | p->code.items[++i]); break;
       case INST_POP:
         fprintf(stream, "  %-10s\n", "POP"); break;
+      case INST_DUP:
+        fprintf(stream, "  %-10s\n", "DUP"); break;
+      case INST_SWAP:
+        fprintf(stream, "  %-10s\n", "SWAP"); break;
       case INST_LOAD:
         fprintf(stream, "  %-10s 0x%08X\n", "LOAD", p->code.items[++i]); break;
       case INST_LOADG:
@@ -2947,10 +3095,14 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
         fprintf(stream, "\n");
         break;
       }
+      case INST_LOADF:
+        fprintf(stream, "  %-10s 0x%08X\n", "LOADF", p->code.items[++i]); break;
       case INST_STORE:
         fprintf(stream, "  %-10s 0x%08X\n", "STORE", p->code.items[++i]); break;
       case INST_STOREG:
         fprintf(stream, "  %-10s 0x%08X\n", "STOREG", p->code.items[++i]); break;
+      case INST_STOREF:
+        fprintf(stream, "  %-10s 0x%08X\n", "STOREF", p->code.items[++i]); break;
       case INST_JMP: {
         uint32_t op = p->code.items[++i];
         fprintf(stream, "  %-10s 0x%08X        \n", "JMP", op);
@@ -2992,12 +3144,6 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
         fprintf(stream, "\n");
         break;
       }
-      case INST_ICALL: {
-        uint32_t op = p->code.items[++i];
-        fprintf(stream, "  %-10s 0x%08X        \n", "ICALL", op);
-        // TODO: get name from struct when implemented
-        break;
-      }
       case INST_RET:
         fprintf(stream, "  %-10s\n", "RET"); break;
       case INST_ADD:
@@ -3033,6 +3179,8 @@ static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
        case INST_HALT:
         fprintf(stream, "  %-10s\n", "HALT"); break;
 
+      case INST_MKOBJ:
+        fprintf(stream, "  %-10s 0x%08X\n", "MKOBJ", p->code.items[++i]); break;
 
       case INST_COUNT:
       default:
@@ -3097,7 +3245,7 @@ static inline bool compile(program_t* program, const char* path, const sb_t* sou
   if(!codegen(program, root)) return false;
   fprintf(stdout, "%s%s\033[0m Codegen OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
-  print_symbol_table(stdout, root->scope);
+  // print_symbol_table(stdout, root->scope);
 
   print_disass(stdout, program, root->scope);
 

@@ -35,6 +35,7 @@ typedef enum {
   TOK_IMPL,
   TOK_INTERFACE,
   TOK_MOD,
+  TOK_STRUCT,
 } tok_kind_t;
 
 typedef enum {
@@ -48,6 +49,7 @@ typedef enum {
   KW_IMPL      = TOK_IMPL,
   KW_INTERFACE = TOK_INTERFACE,
   KW_MOD = TOK_MOD,
+  KW_STRUCT = TOK_STRUCT,
 } kw_kind_t;
 
 typedef enum {
@@ -116,6 +118,7 @@ typedef enum {
   AST_IMPL,
   AST_IFACE,
   AST_MOD,
+  AST_STRUCT,
 } ast_node_kind_t;
 
 #define AST_DEFAULT_FIELDS\
@@ -254,6 +257,16 @@ typedef struct {
     size_t capacity;
   } methods;
 } ast_iface_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  const char* name;
+  struct {
+    ast_param_t** items;
+    size_t count;
+    size_t capacity;
+  } fields;
+} ast_struct_t;
 
 typedef struct _ast_root ast_root_t;
 
@@ -417,6 +430,11 @@ struct _ast_root {
     size_t count;
     size_t capacity;
   } submods;
+  struct {
+    ast_struct_t** items;
+    size_t count;
+    size_t capacity;
+  } structs;
   scope_t* scope;
 };
 
@@ -450,6 +468,8 @@ typedef enum {
   TYPE_FUNC,
   TYPE_INTERFACE,
 
+  TYPE_TYPE,
+
   TYPES_COUNT,
 } type_kind_t;
 
@@ -466,8 +486,11 @@ struct _type {
   type_kind_t kind;
   union {
     struct {
-      void* __todo;
-      // TODO: fields
+      struct {
+        struct _type** items;
+        size_t count;
+        size_t capacity;
+      } fields;
     } structure;
     struct {
       struct _type* inner;
@@ -492,6 +515,9 @@ struct _type {
         size_t capacity;
       } methods;
     } interface;
+    struct {
+      struct _type* of;
+    } type;
   } as;
   scope_t* scope;
   struct {
@@ -598,19 +624,22 @@ typedef uint32_t instruction_t; enum {
   // INST_PUSHL, // long
   INST_POP,
   // INST_POPL,
+  INST_DUP,
+  INST_SWAP,
 
   INST_LOAD,
   INST_LOADG,
   INST_LOADC,
+  INST_LOADF,
   INST_STORE,
   INST_STOREG,
+  INST_STOREF,
 
   INST_JMP,
   INST_JNZ,
   INST_JZ,
   INST_CALL,
   INST_HOSTCALL,
-  INST_ICALL, // interface call
   INST_RET,
 
   INST_ADD,
@@ -629,6 +658,8 @@ typedef uint32_t instruction_t; enum {
   INST_GEQ,
   INST_LT,
   INST_GT,
+
+  INST_MKOBJ,
 
   INST_HALT,
 
@@ -687,6 +718,10 @@ typedef struct _obj {
       const char* data;
       size_t size;
     } str;
+    struct _obj_struct {
+      uint32_t *fields;
+      size_t n_fields;
+    } structure;
   } as;
 } obj_t;
 

@@ -25,7 +25,7 @@ vm_t* get_vm_instance() {
 
 obj_t* get_obj(obj_handle_t h) {
   const vm_t* vm = get_vm_instance();
-  return vm->active_task->obj_pool.items[h];
+  return da_at(vm->active_task->obj_pool, h);
 }
 
 #ifdef _MSC_VER
@@ -240,6 +240,18 @@ vm_exitcode_t exec(vm_t* vm) {
       TODO("INST_POP");
       if (vm->sp <= task->stack) return VM_STACK_UNDERFLOW;
       break;
+    case INST_DUP:
+      a = *(vm->sp - 1);
+      PUSH(vm, a);
+      vm->ip++;
+      break;
+    case INST_SWAP:
+      POP(vm, a);
+      POP(vm, b);
+      PUSH(vm, a);
+      PUSH(vm, b);
+      vm->ip++;
+      break;
     case INST_LOAD:
       operand = *(++vm->ip);
       PUSH(vm, CURR_FRAME(vm)->vars[operand]);
@@ -255,6 +267,15 @@ vm_exitcode_t exec(vm_t* vm) {
       PUSH(vm, task->consts.data[operand]); 
       vm->ip++;
       break;
+    case INST_LOADF: {
+      operand = *(++vm->ip);
+      obj_handle_t handle;
+      POP(vm, handle);
+      obj_t* obj = get_obj(handle);
+      PUSH(vm, obj->as.structure.fields[operand]);
+      vm->ip++;
+      break;
+    }
     case INST_STORE:
       operand = *(++vm->ip);
       POP(vm, CURR_FRAME(vm)->vars[operand]);
@@ -263,6 +284,15 @@ vm_exitcode_t exec(vm_t* vm) {
     case INST_STOREG:
       TODO("INST_STOREG");
       break;
+    case INST_STOREF: {
+      operand = *(++vm->ip);
+      obj_handle_t handle;
+      POP(vm, handle);
+      obj_t* obj = get_obj(handle);
+      POP(vm, obj->as.structure.fields[operand]);
+      vm->ip++;
+      break;
+    }
     case INST_JMP:
       operand = *(vm->ip + 1);
       vm->ip += (int32_t)operand;
@@ -344,9 +374,6 @@ vm_exitcode_t exec(vm_t* vm) {
       vm->ip++;
       break;
     }
-    case INST_ICALL:
-      TODO("INST_ICALL");
-      break;
     case INST_RET:
       vm->ip = CURR_FRAME(vm)->ret_addr;
       free(vm->active_task->call_stack.frames[--vm->active_task->call_stack.depth]);
@@ -415,6 +442,20 @@ vm_exitcode_t exec(vm_t* vm) {
       POP(vm, b);
       POP(vm, a);
       PUSH(vm, a > b);
+      vm->ip++;
+      break;
+    case INST_MKOBJ:
+      operand = *(++vm->ip);
+
+      obj_t* o = malloc(sizeof(*o));
+      o->kind = OBJ_STRUCT;
+      o->as.structure.fields = malloc(sizeof(*o->as.structure.fields) * operand);
+      o->as.structure.n_fields = operand;
+      o->refs = 1;
+
+      da_append(&vm->active_task->obj_pool, o);
+
+      PUSH(vm, vm->active_task->obj_pool.count - 1);
       vm->ip++;
       break;
     case INST_HALT:
