@@ -692,6 +692,14 @@ typedef struct {
     size_t count;
     size_t capacity;
   } globals;
+  struct _exports {
+    struct _export {
+      const char* name;
+      uint32_t addr;
+    }* items;
+    size_t count;
+    size_t capacity;
+  } exports;
   struct _externs {
     struct _extern{ 
       ffi_cif cif;
@@ -776,6 +784,11 @@ typedef struct _task {
     size_t count;
   } externs;
 
+  struct {
+    struct _export* data;
+    size_t count;
+  } exports;
+
   obj_pool_t obj_pool;
   
   // TODO: remove reference onc I add each needed field in task struct 
@@ -810,6 +823,7 @@ typedef enum {
   VM_STACK_UNDERFLOW,
   VM_CALL_STACK_OVERFLOW,
   VM_UNDEFINED_EXTERN,
+  VM_UNDEFINED_EXPORT,
 } vm_exitcode_t;
 
 #endif

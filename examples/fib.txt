@@ -1,6 +1,4 @@
-export main: () -> u32 {
-  return fib(9U);
-}
+extern print: (s: addr) -> i32;
 
 fib: (n : u32) -> u32 {
   if n < 2U {
@@ -8,4 +6,18 @@ fib: (n : u32) -> u32 {
   } else {
     return fib(n - 1U) + fib(n - 2U);
   }
+}
+
+export main: () -> none {
+  print(fib(9U).to_str().c_str());
+}
+
+impl Self: u32 {
+  [[name="i32__to_str"]]
+  extern to_str: (self: Self) -> str;
+}
+
+impl Self: str {
+  [[name="str__c_str"]]
+  extern c_str: (self: Self) -> addr;
 }

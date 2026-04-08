@@ -17,6 +17,6 @@ bool compile_from_cstr(program_t* program, const char* source);
 
 task_t* load_task(program_t*);
 void set_active_task(task_t*);
-vm_exitcode_t run(size_t, ...);
+vm_exitcode_t call(const char*, size_t, ...);
 
 #endif

@@ -181,6 +181,17 @@ task_t* load_task(program_t* p) {
     }
   }
 
+  // exports
+  {
+    t->exports.data = arena_alloc(&t->arena, sizeof(*t->exports.data) * p->exports.count);
+    t->exports.count = p->exports.count;
+
+    for (size_t i=0; i < p->exports.count; i++) {
+      t->exports.data[i].name = arena_strdup(&t->arena, p->exports.items[i].name);
+      t->exports.data[i].addr = p->exports.items[i].addr;
+    }
+  }
+
   // global vars
   {
     t->globals.data  = arena_alloc(&t->arena, sizeof(*t->globals.data) * p->globals.count);
@@ -476,16 +487,23 @@ void set_active_task(task_t* t) {
 }
 
 // TODO: handle non-uint32_t args
-// -> have bind() macro/function that populates the stack before run()
-vm_exitcode_t run(size_t n_args, ...) {
+// -> have bind() macro/function that populates the stack before call()
+vm_exitcode_t call(const char* fn, size_t n_args, ...) {
   va_list args;
 
   vm_t* vm = get_vm_instance();
 
   task_t* active = vm->active_task;
-  vm->ip = active->code + 1; // skip halt
+  vm->ip = active->code;
   vm->sp = active->stack;
   vm->halt = false;
+
+  bool found = false;
+  for (size_t i=0; !found && i < active->exports.count; i++) {
+    if ((found = strcmp(fn, active->exports.data[i].name) == 0))
+      vm->ip = active->code + active->exports.data[i].addr; 
+  }
+  if (!found) return VM_UNDEFINED_EXPORT;
 
   active->call_stack.frames[0] = malloc(sizeof(virtual_frame_t));
   active->call_stack.depth++;

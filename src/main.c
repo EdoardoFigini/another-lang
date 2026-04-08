@@ -29,7 +29,7 @@ int main(int argc, char** argv) {
 
   task_t* t = load_task(&prog);
   set_active_task(t);
-  return run(0);
+  return call("main", 0);
 }
 
 #define SB_IMPLEMENTATION

@@ -2107,7 +2107,8 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
           stderr,
           DIAG_ERROR,
           expr->loc, 
-          "Cannot access instance field `%s` statically through type `%.*s`. Try to instance an object (`obj: %.*s;`) and access the field from it (`obj.%s`).", 
+          "Cannot access instance field `%s` statically through type `%.*s`."
+          "Try to instance an object (`obj: %.*s;`) and access the field from it (`obj.%s`).", 
           s->name,
           SB_FMT(sb),
           SB_FMT(sb),
@@ -3094,6 +3095,11 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
 
     if(da_last(&p->code) != INST_RET)
       da_append(&p->code, INST_RET);
+
+    if (d->symbol->storage == STO_EXPORT) {
+      // leak
+      da_append(&p->exports, ((struct _export){ .name = strdup(d->symbol->name), .addr = d->symbol->addr }));
+    }
   }
 
   return true;
