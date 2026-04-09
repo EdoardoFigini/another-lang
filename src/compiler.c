@@ -1146,14 +1146,11 @@ static inline ast_var_def_t* parse_var_def(parser_t* p, loc_t loc, const char* n
   n->name = arena_strdup(&p->arena, name);
   n->loc = loc;
 
-  symb_storage_t sto = global ? STO_GLOBAL : STO_LOCAL;
-  if(flags & SPEC_EXTERN) sto = STO_EXTERN; 
-  if(flags & SPEC_EXPORT) sto = STO_EXPORT;
-
-  // TODO:  type inference
-  ast_type_t* type = parse_type(p);
-  if(!type) return NULL;
-  n->type = type;
+  if (!tok_is(p, '=')) {
+    ast_type_t* type = parse_type(p);
+    if(!type) return NULL;
+    n->type = type;
+  }
 
   if(tok_is(p, '=')) {
     if(!expect(p, '=')) return NULL;
@@ -2076,9 +2073,34 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
     case STMT_EXPR:
       if(!typecheck_expr(t, stmt->as.expression)) return false;
       break;
-    case STMT_VAR_DEF:
-      if(!resolve_type_decl(t, stmt->as.var_def->type)) return false;
-      stmt->as.var_def->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, stmt->as.var_def->name, stmt->as.var_def->type->resolved_type);
+    case STMT_VAR_DEF: {
+      const type_t* type = NULL;
+
+      if(stmt->as.var_def->init) {
+        if(!typecheck_expr(t, stmt->as.var_def->init)) return false;
+
+        if (!stmt->as.var_def->type) {
+          type = stmt->as.var_def->init->type;
+        } else {
+          if(!resolve_type_decl(t, stmt->as.var_def->type)) return false;
+          if(stmt->as.var_def->type->resolved_type != stmt->as.var_def->init->type) {
+            fdiagf(
+              stderr,
+              DIAG_ERROR,
+              stmt->loc,
+              "Incompatible types when initializing type `%s` using type `%s`.",
+              type_to_str(&t->arena, stmt->as.var_def->type->resolved_type),
+              type_to_str(&t->arena, stmt->as.var_def->init->type)
+            );
+            return false;
+          } 
+        }
+      } else {
+        if(!resolve_type_decl(t, stmt->as.var_def->type)) return false;
+        type = stmt->as.var_def->type->resolved_type;
+      }
+      
+      stmt->as.var_def->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, stmt->as.var_def->name, (type_t*)type);
 
       if( stmt->as.var_def->flags & SPEC_EXTERN ) {
         fdiagf(stderr, DIAG_ERROR, stmt->loc, "Cannot define an extern local variable.");
@@ -2089,7 +2111,6 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         return false;
       }
 
-      // TODO: type inference
       da_foreach(symbol_t*, symb, &t->current_scope->symbols) {
         if (
             *symb != stmt->as.var_def->symbol && 
@@ -2102,22 +2123,8 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         // NOTE: allow shadowing -> do not check in parent scope
         // TODO: maybe issue shadowing warning?
       }
-
-      if(stmt->as.var_def->init) {
-        if(!typecheck_expr(t, stmt->as.var_def->init)) return false;
-        if(stmt->as.var_def->type->resolved_type != stmt->as.var_def->init->type) {
-          fdiagf(
-            stderr,
-            DIAG_ERROR,
-            stmt->loc,
-            "Incompatible types when initializing type `%s` using type `%s`.",
-            type_to_str(&t->arena, stmt->as.var_def->type->resolved_type),
-            type_to_str(&t->arena, stmt->as.var_def->init->type)
-          );
-          return false;
-        }
-      }
       break;
+    }
     case STMT_IF:
       struct _if_else* if_else = &stmt->as.if_else;
       if(!typecheck_expr(t, if_else->cond)) return false;
@@ -2401,24 +2408,37 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     }
   }
 
-  // then check bodies
-
-  da_foreach(ast_impl_t*, impl, &root->impls) {
-    type_t* type = (*impl)->type->resolved_type;
-    scope_t* saved_scope = t->current_scope;
-    enter_scope(t, type->scope);
-    da_foreach(ast_func_def_t*, method, &(*impl)->methods)
-      if(!typecheck_func(t, *method)) return false;
-    t->current_scope = saved_scope;
-  }
-
-  da_foreach(ast_func_def_t*, d, &root->func_defs) {
-    if(!typecheck_func(t, *d)) return false;
-  }
-
   da_foreach(ast_var_def_t*, d, &root->var_defs) {
-    if(!resolve_type_decl(t, (*d)->type)) return false;
-    (*d)->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_GLOBAL, (*d)->name, (*d)->type->resolved_type);
+    const type_t* type = NULL;
+
+    if((*d)->init) {
+      if(!typecheck_expr(t, (*d)->init)) return false;
+      if(!(*d)->init->is_const) {
+        fdiagf(stderr, DIAG_ERROR, (*d)->init->loc, "Initializer is not a compile-time constant.");
+        return false;
+      }
+
+      if (!(*d)->type) {
+        type = (*d)->init->type;
+      } else {
+        if(!resolve_type_decl(t, (*d)->type)) return false;
+        if(!type_equals(*(*d)->type->resolved_type, *(*d)->init->type)) {
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            (*d)->init->loc,
+            "Incompatible types when initializing type `%s` using type `%s`.",
+            type_to_str(&t->arena, (*d)->type->resolved_type),
+            type_to_str(&t->arena, (*d)->init->type)
+          );
+          return false;
+        }
+      }
+    } else {
+      if(!resolve_type_decl(t, (*d)->type)) return false;
+      type = (*d)->type->resolved_type;
+    }
+    (*d)->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_GLOBAL, (*d)->name, (type_t*)type);
 
     if((*d)->init && ((*d)->flags & SPEC_EXTERN)) {
       fdiagf(stderr, DIAG_ERROR, (*d)->loc, "Cannot initialize an extern variable.");
@@ -2438,25 +2458,21 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       // TODO: maybe issue shadowing warning?
     }
 
-    if((*d)->init) {
-      if(!typecheck_expr(t, (*d)->init)) return false;
-      if(!(*d)->init->is_const) {
-        fdiagf(stderr, DIAG_ERROR, (*d)->init->loc, "Initializer is not a compile-time constant.");
-        return false;
-      }
+  }
 
-      if(!type_equals(*(*d)->type->resolved_type, *(*d)->init->type)) {
-        fdiagf(
-          stderr,
-          DIAG_ERROR,
-          (*d)->init->loc,
-          "Incompatible types when initializing type `%s` using type `%s`.",
-          type_to_str(&t->arena, (*d)->type->resolved_type),
-          type_to_str(&t->arena, (*d)->init->type)
-        );
-        return false;
-      }
-    }
+  // then check bodies
+
+  da_foreach(ast_impl_t*, impl, &root->impls) {
+    type_t* type = (*impl)->type->resolved_type;
+    scope_t* saved_scope = t->current_scope;
+    enter_scope(t, type->scope);
+    da_foreach(ast_func_def_t*, method, &(*impl)->methods)
+      if(!typecheck_func(t, *method)) return false;
+    t->current_scope = saved_scope;
+  }
+
+  da_foreach(ast_func_def_t*, d, &root->func_defs) {
+    if(!typecheck_func(t, *d)) return false;
   }
  
   return true;
@@ -2695,15 +2711,15 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
       
       // TODO: allocate all local variables at once at function call, function should
       // be aware of its local vars after typecheck pass
-      if (s->as.var_def->type->resolved_type->kind == TYPE_STRUCT) {
-        codegen_struct_instantiate(p, s->as.var_def->type->resolved_type);
+      if (s->as.var_def->symbol->type->kind == TYPE_STRUCT) {
+        codegen_struct_instantiate(p, s->as.var_def->symbol->type);
 
         da_append(&p->code, INST_STORE);
         da_append(&p->code, symb->addr);
       }
 
       if (s->as.var_def->init) {
-        if (s->as.var_def->type->resolved_type->kind == TYPE_STRUCT) {
+        if (s->as.var_def->symbol->type->kind == TYPE_STRUCT) {
           TODO("struct init/construct - new() method?");
         } else {
           if(!codegen_expr(p, scope, s->as.var_def->init)) return false;
