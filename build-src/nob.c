@@ -74,13 +74,13 @@ const char* tc_dbg[] = {
 // Flags per toolchain
 // Edit these to change compilation settings and parameters
 const_str_list_t tc_cflags_debug[] = {
-  [T_MSVC] = CSTR_LIST("/nologo", /*"/W4",*/ "/diagnostics:caret", "/D_CRT_SECURE_NO_WARNINGS", "/Od"),
+  [T_MSVC] = CSTR_LIST("/nologo", "/W2", "/diagnostics:caret", "/D_CRT_SECURE_NO_WARNINGS", "/Od"),
   [T_GNU]  = CSTR_LIST("-Wall", "-Wextra", "-Wswitch-enum", "-ggdb", "-O0"),
 };
 
 const_str_list_t tc_cflags_release[] = {
-  [T_MSVC] = CSTR_LIST("/nologo", "/D_CRT_SECURE_NO_WARNINGS", "/O2"),
-  [T_GNU]  = CSTR_LIST("-O3"),
+  [T_MSVC] = CSTR_LIST("/nologo", "/D_CRT_SECURE_NO_WARNINGS", "/O2", "/DNDEBUG"),
+  [T_GNU]  = CSTR_LIST("-O3", "-DNDEBUG"),
 };
 
 const_str_list_t tc_lflags_debug[] = {
@@ -367,7 +367,7 @@ int main(int argc, char **argv)
 
     for (; tc <= COUNT_TOOLCHAINS; tc++) {
       if (tc == COUNT_TOOLCHAINS) {
-        nob_log(NOB_ERROR, "Invalid toolchain `%s`, Defaulting to %s", *f_toolchain, tc_names[DEFAULT_TOOLCHAIN]);
+        nob_log(NOB_ERROR, "Invalid toolchain `%s`, Defaulting to %s.\n Available toolchains [%s]", *f_toolchain, tc_names[DEFAULT_TOOLCHAIN], supported_tcs());
         tc = DEFAULT_TOOLCHAIN;
         break;
       }
@@ -376,7 +376,7 @@ int main(int argc, char **argv)
 
     for (; bt <= COUNT_BUILD_TYPES; bt++) {
       if (bt == COUNT_BUILD_TYPES) {
-        nob_log(NOB_ERROR, "Invalid build type `%s`, Defaulting to %s", *f_toolchain, bt_names[BT_DEBUG]);
+        nob_log(NOB_ERROR, "Invalid build type `%s`, Defaulting to %s.\n Available build types [%s]", *f_type, bt_names[BT_DEBUG], supported_bts());
         bt = BT_DEBUG;
         break;
       }

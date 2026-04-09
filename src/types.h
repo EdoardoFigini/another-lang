@@ -811,6 +811,8 @@ typedef struct {
   task_t* active_task;
 
   void* host;
+
+  const int64_t max_stack;
 } vm_t;
 
 // TODO: allow users to define handlers for exit codes 

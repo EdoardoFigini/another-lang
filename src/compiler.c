@@ -16,6 +16,7 @@
 
 #include "types.h"
 #include "macros.h"
+#include "debug.h"
 
 #include "vm.h"
 
@@ -93,38 +94,6 @@ void fdiagf(FILE* stream, diag_lvl_t lvl, loc_t loc, const char* fmt, ...) {
 
   sb_free(&sb);
 }
-
-void tok_print(token_t tok) {
-  printf("%3zu:%3zu: ", tok.loc.line, tok.loc.col);
-  if(tok.kind < 256) printf("%-20c", tok.kind);
-  else {
-    switch(tok.kind) {
-      case TOK_EOF: printf("%-20s", "TOK_EOF"); break;
-      case TOK_IDENT: printf("%-20s", "TOK_IDENT"); break;
-      case TOK_ARROW: printf("%-20s", "TOK_ARROW"); break;
-      case TOK_COLCOL: printf("%-20s", "TOK_COLCOL"); break;
-      case TOK_EQEQ: printf("%-20s", "TOK_EQEQ"); break;
-      case TOK_GEQ: printf("%-20s", "TOK_GEQ"); break;
-      case TOK_LEQ: printf("%-20s", "TOK_LEQ"); break;
-      case TOK_INTLIT: printf("%-20s", "TOK_INTLIT"); break;
-      case TOK_REALLIT: printf("%-20s", "TOK_REALLIT"); break;
-      case TOK_STRLIT: printf("%-20s", "TOK_STRLIT"); break;
-      case TOK_RETURN: printf("%-20s", "TOK_RETURN"); break;
-      case TOK_EXTERN: printf("%-20s", "TOK_EXTERN"); break;
-      case TOK_EXPORT: printf("%-20s", "TOK_EXPORT"); break;
-      case TOK_CONST: printf("%-20s", "TOK_CONST"); break;
-      case TOK_IF: printf("%-20s", "TOK_IF"); break;
-      case TOK_ELSE: printf("%-20s", "TOK_ELSE"); break;
-      case TOK_WHILE: printf("%-20s", "TOK_WHILE"); break;
-      case TOK_IMPL: printf("%-20s", "TOK_IMPL"); break;
-      case TOK_INTERFACE: printf("%-20s", "TOK_INTERFACE"); break;
-      case TOK_MOD: printf("%-20s", "TOK_MOD"); break;
-      case TOK_STRUCT: printf("%-20s", "TOK_STRUCT"); break;
-      default: printf("%-20s", "<INVALID TOKEN>"); break;
-    }
-  }
-  fprintf(stderr, "%.*s\n", SLICE_FMT(tok.view));
-};
 
 const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
   if(k < 256) return arena_sprintf(arena, "`%c`", k);
@@ -500,8 +469,6 @@ static inline void next(parser_t* p) {
   p->current++;
 }
 
-static inline void print_type(FILE* stream, const type_t* t);
-static inline void render_type(sb_t* sb, const type_t* t);
 static inline const char* type_to_str(arena_t* a, const type_t* t);
 static inline const char* qn_to_str(arena_t* a, const ast_qn_t* qn); 
 
@@ -509,8 +476,6 @@ static inline void set_symbol_address(symbol_t* s, uint32_t addr) {
   s->addr = addr;
   s->addr_resolved = true;
 }
-
-static inline void print_symbol_table(FILE* stream, scope_t* root);
 
 static inline symbol_t* make_symbol(arena_t* arena, scope_t* scope, symb_kind_t kind, symb_storage_t storage, const char* name, type_t* type) {
   symbol_t* s = arena_alloc(arena, sizeof(*s));
@@ -1464,201 +1429,6 @@ static inline void parser_init(parser_t* p, const tokenizer_t* t) {
   p->current = 0;
 }
 
-static inline void print_ast(FILE* stream, ast_node_t* n, int level) {
-  switch(n->ast_kind) {
-    case AST_ROOT:
-      ast_root_t* root = (ast_root_t*)n;
-      fprintf(stream, "%*s%s\n", level, "","AST_ROOT");
-      fprintf(stream, "%*s%s\n", level + 2, "","DEFINITIONS:");
-      da_foreach(ast_func_def_t*, d, &root->func_defs) {
-        print_ast(stream, (ast_node_t*)*d, level + 4);
-      }
-      da_foreach(ast_var_def_t*, d, &root->var_defs) {
-        print_ast(stream, (ast_node_t*)*d, level + 4);
-      }
-      break;
-    case AST_QN:
-      ast_qn_t* qn = (ast_qn_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_QN");
-      fprintf(stream, "%*sName: %s\n", level, "", qn->name);
-      print_ast(stream, (ast_node_t*)qn->next, level + 2);
-    case AST_EXPR:
-      ast_expr_t* expr = (ast_expr_t*)n;
-      fprintf(stream, "%*s%s", level, "", "AST_EXPR");
-      switch(expr->kind) {
-        case EXPR_SYMBOL:
-          fprintf(stream, " (%s)\n", "EXPR_SYMBOL");
-          print_ast(stream, (ast_node_t*)expr->as.symbol, level + 2);
-          break;
-        case EXPR_STRING:
-          fprintf(stream, " (%s)\n", "EXPR_STRING");
-          fprintf(stream, "%*s%s\n", level + 2, "", expr->as.s);
-          break;
-        case EXPR_NUMBER:
-          fprintf(stream, " (%s)\n", "EXPR_NUMBER");
-          if (expr->as.number.ti & TI_REAL) {
-            fprintf(stream, "%*s%lf\n", level + 2, "", expr->as.number.r);
-          } else if (expr->as.number.ti & TI_UNSIGNED) {
-            fprintf(stream, "%*s%" PRIu64 " (unsigned)\n", level + 2, "", expr->as.number.u);
-          } else {
-            fprintf(stream, "%*s%" PRId64 "\n", level + 2, "", expr->as.number.i);
-          }
-          break;
-        case EXPR_BINOP:
-          fprintf(stream, " (%s)\n", "EXPR_BINOP");
-          fprintf(stream, "%*sop: %c\n", level + 2, "", expr->as.binop.op);
-          fprintf(stream, "%*slhs:\n", level + 2, "");
-          print_ast(stream, (ast_node_t*)expr->as.binop.lhs, level + 2);
-          fprintf(stream, "%*srhs:\n", level + 2, "");
-          print_ast(stream, (ast_node_t*)expr->as.binop.rhs, level + 2);
-          break;
-        case EXPR_UNOP:
-          fprintf(stream, " (%s)\n", "EXPR_UNOP");
-          TODO("print_ast (EXPR_UNOP)");
-          break;
-        case EXPR_ACCESS:
-          fprintf(stream, " (%s)\n", "EXPR_ACCESS");
-          fprintf(stream, "%*sobject:\n", level + 2, "");
-          print_ast(stream, (ast_node_t*)expr->as.access.owner, level + 2);
-          fprintf(stream, "%*sfield:\n", level + 2, "");
-          fprintf(stream, "%*s%s\n", level + 2, "", expr->as.access.field);
-          break;
-        case EXPR_FUNCALL:
-          fprintf(stream, " (%s)\n", "EXPR_FUNCALL");
-          fprintf(stream, "%*scallee:\n", level + 2, "");
-          print_ast(stream, (ast_node_t*)expr->as.funcall.callee, level + 2);
-          fprintf(stream, "%*sArgs:\n", level + 2, "");
-          da_foreach(ast_expr_t*, a, &expr->as.funcall.args) {
-            print_ast(stream, (ast_node_t*)*a, level + 2);
-          }
-          break;
-        case EXPR_SUBEXPR:
-          fprintf(stream, " (%s)\n", "EXPR_SUBEXPR");
-          print_ast(stream, (ast_node_t*)expr->as.subexpr, level + 2);
-          break;
-        case EXPR_ASSIGNMENT:
-          fprintf(stream, " (%s)\n", "EXPR_ASSIGNMENT");
-          fprintf(stream, "%*slhs:\n", level + 2, "");
-          print_ast(stream, (ast_node_t*)expr->as.assign.lhs, level + 2);
-          fprintf(stream, "%*srhs:\n", level + 2, "");
-          print_ast(stream, (ast_node_t*)expr->as.assign.rhs, level + 2);
-          break;
-        // default: break;
-      }
-      break;
-    case AST_STMT:
-      ast_stmt_t* stmt = (ast_stmt_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_STMT");
-      switch(stmt->kind) {
-        case STMT_EMPTY: break;
-        case STMT_RET:
-          print_ast(stream, (ast_node_t*)stmt->as.retval, level + 2);
-          break;
-        case STMT_EXPR:
-          print_ast(stream, (ast_node_t*)stmt->as.expression, level + 2);
-          break;
-        case STMT_VAR_DEF:
-          fprintf(stream, "%*s%s\n", level, "", "STMT_VAR_DEF");
-          print_ast(stream, (ast_node_t*)stmt->as.var_def, level + 2);
-          break;
-        case STMT_IF:
-          TODO("print_ast: STMT_IF");
-        default: break;
-      }
-      break;
-    case AST_VAR_DEF: {
-      ast_var_def_t* def = (ast_var_def_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_VAR_DEF");
-      fprintf(stream, "%*sName: %s\n", level + 2, "", def->name);
-      fprintf(stream, "%*sFlags: ", level + 2, "");
-      if(def->flags & SPEC_EXTERN) fprintf(stream, "extern ");
-      if(def->flags & SPEC_EXPORT) fprintf(stream, "export ");
-      if(def->flags & SPEC_CONST)  fprintf(stream, "const ");
-      fprintf(stream, "\n");
-      if(def->init)
-        print_ast(stream, (ast_node_t*)def->init, level + 2);
-      break;
-    }
-    case AST_FUNC_DEF: {
-      ast_func_def_t* def = (ast_func_def_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_FUNC_DEF");
-      fprintf(stream, "%*sName: %s\n", level + 2, "", def->name);
-      fprintf(stream, "%*sFlags: ", level + 2, "");
-      if(def->flags & SPEC_EXTERN) fprintf(stream, "extern ");
-      if(def->flags & SPEC_EXPORT) fprintf(stream, "export ");
-      if(def->flags & SPEC_CONST)  fprintf(stream, "const ");
-      fprintf(stream, "\n");
-      print_ast(stream, (ast_node_t*)def->sig, level + 2);
-      if(def->body)
-        print_ast(stream, (ast_node_t*)def->body, level + 2);
-      break;
-    }
-    case AST_TYPE:
-      fprintf(stream, "%*s%s\n", level, "", "AST_TYPE");
-      fprintf(stream, "%*sName:", level + 2, "");
-      print_ast(stream, (ast_node_t*)((ast_type_t*)n)->name, level + 2);
-      break;
-    case AST_BODY:
-      fprintf(stream, "%*s%s\n", level, "", "AST_BODY");
-      da_foreach(ast_stmt_t*, stmt, &((ast_body_t*)n)->stmts) {
-        print_ast(stream, (ast_node_t*)*stmt, level + 2);
-      }
-      break;
-    case AST_PARAM:
-      ast_param_t* param = (ast_param_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_PARAM");
-      fprintf(stream, "%*sName: %s\n", level + 2, "", param->name);
-      fprintf(stream, "%*sType:\n", level + 2, "");
-      print_ast(stream, (ast_node_t*)param->type, level + 2);
-      break;
-    case AST_SIG:
-      ast_sig_t* sig = (ast_sig_t*)n;
-      fprintf(stream, "%*s%s\n", level, "", "AST_SIG");
-      fprintf(stream, "%*sParams:\n", level + 2, "");
-      da_foreach(ast_param_t*, p, &sig->params) {
-        print_ast(stream, (ast_node_t*)*p, level + 2);
-      }
-      fprintf(stream, "%*sRet type:\n", level + 2, "");
-      print_ast(stream, (ast_node_t*)sig->ret, level + 2);
-      break;
-    case AST_IMPL:
-      TODO("print_ast: AST_IMPL");
-    default:
-      UNREACHABLE("print_ast %d", n->ast_kind);
-  }
-}
-
-static inline void print_symbol_table_entries(FILE* stream, scope_t* scope) {
-  if(!scope) return;
-  da_foreach(symbol_t*, s, &scope->symbols) {
-    fprintf(stream, "%-30s %-30s ", (*s)->name, scope->name);
-    switch((*s)->storage) {
-      case STO_LOCAL:
-        fprintf(stream, "%-10s ", "scope"); break;
-      case STO_GLOBAL:
-        fprintf(stream, "%-10s ", "global"); break;
-      case STO_EXTERN:
-        fprintf(stream, "%-10s ", "extern"); break;
-      case STO_EXPORT:
-        fprintf(stream, "%-10s ", "export"); break;
-      case STO_INSTANCE:
-        fprintf(stream, "%-10s ", "instance"); break;
-      default: break;
-    }
-    fprintf(stream, "0x%08X ", (*s)->addr);
-    print_type(stream, (*s)->type);
-    fprintf(stream, "\n");
-  }
-  print_symbol_table_entries(stream, scope->parent);
-}
-
-static inline void print_symbol_table(FILE* stream, scope_t* scope) {
-  if(!scope) return;
-  fprintf(stream, "%s symbol Table:\n", scope->name);
-  fprintf(stream, "%-30s %-30s %-10s %-10s %s\n", "name", "scope", "storage", "addr", "type");
-  print_symbol_table_entries(stream, scope);
-}
-
 static inline int type_equals(type_t a, type_t b) {
   while (a.kind == TYPE_ALIAS) a = *a.as.alias.target;
   while (b.kind == TYPE_ALIAS) b = *b.as.alias.target;
@@ -1701,7 +1471,7 @@ static inline int type_equals(type_t a, type_t b) {
   }
 }
 
-static inline void render_type(sb_t* sb, const type_t* t) {
+void render_type(sb_t* sb, const type_t* t) {
   if(!t) UNREACHABLE("render_type: null type*");
   switch(t->kind) {
     case TYPE_NONE:
@@ -1754,12 +1524,6 @@ static inline const char* type_to_str(arena_t* a, const type_t* t) {
   render_type(&sb, t);
   sb_appendz(&sb, "");
   return arena_sprintf(a, "%.*s", SB_FMT(sb));
-}
-
-static inline void print_type(FILE* stream, const type_t* t) {
-  sb_t sb = { 0 };
-  render_type(&sb, t);
-  fprintf(stream, "%.*s", SB_FMT(sb));
 }
 
 static inline const char* qn_to_str(arena_t* a, const ast_qn_t* qn) {
@@ -3156,178 +2920,6 @@ static inline int codegen(program_t* p, ast_root_t* root) {
   return true;
 }
 
-static inline void print_data(FILE* stream, constant_t c) {
-  switch(c.kind) {
-    case DK_NUMBER:
-      if (c.as.number.ti & TI_LONG) {
-        if (c.as.number.ti & TI_REAL) {
-          fprintf(stream, "%lf", c.as.number.r);
-        } else if (c.as.number.ti & TI_UNSIGNED) {
-          fprintf(stream, "%" PRIu64, c.as.number.u);
-        } else {
-          fprintf(stream, "%" PRId64, c.as.number.i);
-        }
-      } else {
-        if (c.as.number.ti & TI_REAL) {
-          fprintf(stream, "%f", (float)c.as.number.r);
-        } else if (c.as.number.ti & TI_UNSIGNED) {
-          fprintf(stream, "%u", (uint32_t)c.as.number.u);
-        } else {
-          fprintf(stream, "%d", (int32_t)c.as.number.i);
-        }
-      }
-      break;
-    case DK_STR:
-      char* cursor = (char*)c.as.s;
-      fprintf(stream, "\"");
-      while(*cursor) {
-        switch(*cursor) {
-          case '\a': fprintf(stream, "\\a"); break;
-          case '\b': fprintf(stream, "\\b"); break;
-          case '\f': fprintf(stream, "\\f"); break;
-          case '\n': fprintf(stream, "\\n"); break;
-          case '\t': fprintf(stream, "\\t"); break;
-          case '\r': fprintf(stream, "\\r"); break;
-          case '\v': fprintf(stream, "\\v"); break;
-          default:
-            fprintf(stream, "%c", *cursor);
-            break;
-        }
-        cursor++;
-      }
-      fprintf(stream, "\"");
-      break;
-    default:
-      UNREACHABLE("print_data");
-  }
-}
-
-static inline void print_disass(FILE* stream, program_t* p, scope_t* root) {
-  for (size_t i = 0; i < p->code.count; i++) {
-    da_foreach(symbol_t*, s, &root->symbols) {
-      if(i == (*s)->addr && (*s)->kind == SYMB_FUNC && (*s)->storage != STO_EXTERN)
-        fprintf(stream, "function <%s>:\n", (*s)->name);
-    }
-    fprintf(stream, "  0x%08" PRIx64, i);
-    switch(p->code.items[i]) {
-      case INST_NOP:
-        fprintf(stream, "  %-10s\n", "NOP"); break;
-      case INST_PUSH:
-        fprintf(stream, "  %-10s 0x%08X\n", "PUSH", p->code.items[++i]); break;
-      // case INST_PUSHL:
-      //   fprintf(stream, "  %-10s 0x%016lX\n", "PUSHL", ((uint64_t)p->code.items[++i] << 32) | p->code.items[++i]); break;
-      case INST_POP:
-        fprintf(stream, "  %-10s\n", "POP"); break;
-      case INST_DUP:
-        fprintf(stream, "  %-10s\n", "DUP"); break;
-      case INST_SWAP:
-        fprintf(stream, "  %-10s\n", "SWAP"); break;
-      case INST_LOAD:
-        fprintf(stream, "  %-10s 0x%08X\n", "LOAD", p->code.items[++i]); break;
-      case INST_LOADG:
-        fprintf(stream, "  %-10s 0x%08X\n", "LOADG", p->code.items[++i]); break;
-      case INST_LOADC: {
-        uint32_t op = p->code.items[++i];
-        fprintf(stream, "  %-10s 0x%08X        ", "LOADC", op);
-        fprintf(stream, "    ->    ");
-        print_data(stream, p->constants.items[op]);
-        fprintf(stream, "\n");
-        break;
-      }
-      case INST_LOADF:
-        fprintf(stream, "  %-10s 0x%08X\n", "LOADF", p->code.items[++i]); break;
-      case INST_STORE:
-        fprintf(stream, "  %-10s 0x%08X\n", "STORE", p->code.items[++i]); break;
-      case INST_STOREG:
-        fprintf(stream, "  %-10s 0x%08X\n", "STOREG", p->code.items[++i]); break;
-      case INST_STOREF:
-        fprintf(stream, "  %-10s 0x%08X\n", "STOREF", p->code.items[++i]); break;
-      case INST_JMP: {
-        uint32_t op = p->code.items[++i];
-        fprintf(stream, "  %-10s 0x%08X        \n", "JMP", op);
-        break;
-      }
-      case INST_JNZ: {
-        uint32_t op = p->code.items[++i];
-        fprintf(stream, "  %-10s 0x%08X        \n", "JNZ", op);
-        break;
-      }
-      case INST_JZ: {
-        uint32_t op = p->code.items[++i];
-        fprintf(stream, "  %-10s 0x%08X        \n", "JZ", op);
-        break;
-      }
-      case INST_CALL: {
-        uint32_t op = p->code.items[++i];
-        fprintf(stream, "  %-10s 0x%08X        ", "CALL", op);
-        da_foreach(symbol_t*, s, &root->symbols) {
-          if(op == (*s)->addr && (*s)->kind == SYMB_FUNC && (*s)->storage != STO_EXTERN) {
-            fprintf(stream, "    ->    ");
-            fprintf(stream, "<%s>", (*s)->name);
-          }
-          break;
-        }
-        fprintf(stream, "\n");
-        break;
-      }
-      case INST_HOSTCALL: {
-        uint32_t op = p->code.items[++i];
-        fprintf(stream, "  %-10s 0x%08X        ", "HOSTCALL", op);
-        da_foreach(symbol_t*, s, &root->symbols) {
-          if(op == (*s)->addr && (*s)->kind == SYMB_FUNC && (*s)->storage == STO_EXTERN) {
-            fprintf(stream, "    ->    ");
-            fprintf(stream, "<extern::%s>", (*s)->name);
-          }
-          break;
-        }
-        fprintf(stream, "\n");
-        break;
-      }
-      case INST_RET:
-        fprintf(stream, "  %-10s\n", "RET"); break;
-      case INST_ADD:
-        fprintf(stream, "  %-10s\n", "ADD"); break;
-      case INST_SUB:
-        fprintf(stream, "  %-10s\n", "SUB"); break;
-      case INST_MULT:
-        fprintf(stream, "  %-10s\n", "MULT"); break;
-      case INST_DIVI:
-        fprintf(stream, "  %-10s\n", "DIVI"); break;
-      case INST_DIVU:
-        fprintf(stream, "  %-10s\n", "DIVU"); break;
-      case INST_REM:
-        fprintf(stream, "  %-10s\n", "REM"); break;
-      case INST_ADDF:
-        fprintf(stream, "  %-10s\n", "ADDF"); break;
-      case INST_SUBF:
-        fprintf(stream, "  %-10s\n", "SUBF"); break;
-      case INST_MULTF:
-        fprintf(stream, "  %-10s\n", "MULTF"); break;
-      case INST_DIVF:
-        fprintf(stream, "  %-10s\n", "DIVF"); break;
-       case INST_EQ:
-        fprintf(stream, "  %-10s\n", "EQ"); break;
-       case INST_LEQ:
-        fprintf(stream, "  %-10s\n", "LEQ"); break;
-       case INST_GEQ:
-        fprintf(stream, "  %-10s\n", "GEQ"); break;
-       case INST_LT:
-        fprintf(stream, "  %-10s\n", "LT"); break;
-       case INST_GT:
-        fprintf(stream, "  %-10s\n", "GT"); break;
-       case INST_HALT:
-        fprintf(stream, "  %-10s\n", "HALT"); break;
-
-      case INST_MKOBJ:
-        fprintf(stream, "  %-10s 0x%08X\n", "MKOBJ", p->code.items[++i]); break;
-
-      case INST_COUNT:
-      default:
-        fprintf(stream, "  %-10s\n", "<INVALID>"); break;
-    }
-  }
-}
-
 static inline void add_method_to_interface(type_t* interface, interface_method_t method) {
   da_append(&interface->as.interface.methods, method);
 }
@@ -3367,7 +2959,7 @@ static inline bool compile(program_t* program, const char* path, const sb_t* sou
   fprintf(stdout, "%s%s\033[0m Tokenization OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
   // da_foreach(token_t, t, &tok.tokens) {
-  //   tok_print(*t);
+  //   __dbg_print_tok(stdout, *t);
   // }
 
   parser_init(&parser, &tok);
@@ -3375,7 +2967,7 @@ static inline bool compile(program_t* program, const char* path, const sb_t* sou
   if(!root) return false;
   fprintf(stdout, "%s%s\033[0m Parsing OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
-  // print_ast(stdout, (ast_node_t*)root, 0);
+  // __dbg_print_ast(stdout, (ast_node_t*)root, 0);
 
   typechecker_init(&tc);
   if(!typecheck(&tc, root)) return false;
@@ -3384,9 +2976,9 @@ static inline bool compile(program_t* program, const char* path, const sb_t* sou
   if(!codegen(program, root)) return false;
   fprintf(stdout, "%s%s\033[0m Codegen OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
-  // print_symbol_table(stdout, root->scope);
+  // __dbg_print_symbol_table(stdout, root->scope);
 
-  print_disass(stdout, program, root->scope);
+  __dbg_print_disass(stdout, program, root->scope);
 
   tok_destroy(&tok);
   parser_destroy(&parser);

@@ -12,11 +12,14 @@
 
 #include "macros.h"
 #include "types.h"
+#include "debug.h"
 
 #include "vm.h"
 
+#define MAX_STACK 0x1000 
+
 // TODO: add platform dependent mutex to vm_t
-static vm_t __vm;
+static vm_t __vm = { .max_stack = MAX_STACK };
 
 vm_t* get_vm_instance() {
   // TODO: make thread safe (should block)
@@ -33,8 +36,6 @@ obj_t* get_obj(obj_handle_t h) {
 #else
 #define EXPORT
 #endif
-
-#define MAX_STACK 0x1000 
 
 // BUILTIN FUNCTION
 
@@ -208,14 +209,6 @@ task_t* load_task(program_t* p) {
 
 #define CURR_FRAME(vm) \
   (vm)->active_task->call_stack.frames[(vm)->active_task->call_stack.depth - 1]
-
-static inline void __dbg_print_stack(FILE* stream, vm_t* vm) {
-  fprintf(stream, "+------------+\n");
-  for(int i = MIN(MAX_STACK, (int)(vm->sp - vm->active_task->stack)) - 1; i >= 0; i--) {
-    fprintf(stream, "| 0x%08X |\n", vm->active_task->stack[i]);
-  }
-  fprintf(stream, "+------------+\n\n");
-}
 
 #define POP(vm, v) \
   do { \
