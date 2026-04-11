@@ -82,7 +82,7 @@ void sb_vdiagf(sb_t* sb, diag_lvl_t lvl, loc_t loc, const char* fmt, va_list arg
   sb_appendf(sb, "%*s | %*s^", 6, "", loc.col - 1, "");
 }
 
-void fdiagf(FILE* stream, diag_lvl_t lvl, loc_t loc, const char* fmt, ...) {
+FMT_PRINTF(4, 5) void fdiagf(FILE* stream, diag_lvl_t lvl, loc_t loc, const char* fmt, ...) {
   va_list args;
   sb_t sb = { 0 };
 
@@ -290,7 +290,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
   char* p = (char*)t->source.data;
   while(*p && ((size_t)(p - t->source.data) < t->source.size)) {
     // skip comments
-    if(*p == '#') while(*p && *p++ != '\n');
+    if(*p == '#') while(*++p && *p != '\n');
 
     if(*p == '\n') {
       line_view    = slice_sub(src_rem_view, 0, slice_index_of(src_rem_view, '\n'));
