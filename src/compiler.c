@@ -491,6 +491,35 @@ static inline symbol_t* make_method(arena_t* arena, const type_t* owner, const c
   return make_symbol(arena, owner->scope, SYMB_FUNC, storage, name, (type_t*)type);
 }
 
+#define make_qn(arena, ...) _make_qn((arena), sizeof((const char*[]){ __VA_ARGS__ })/sizeof(const char*), __VA_ARGS__)
+static inline ast_qn_t* _make_qn(arena_t* a, size_t n, ...) {
+  va_list args;
+
+  struct {
+    const char** items;
+    size_t count;
+    size_t capacity;
+  } names = { 0 };
+
+  va_start(args, n);
+  for (size_t i=0; i < n; i++) {
+    const char* name = arena_strdup(a, va_arg(args, const char*));
+    da_append(&names, name);
+  }
+  va_end(args);
+
+  ast_qn_t* next = NULL;
+  ast_qn_t* qn = NULL;
+  for (size_t i = 0; i < n; i++) {
+    qn = arena_alloc(a, sizeof(*qn));
+    qn->name = da_at(names, n - i - 1);
+    qn->next = next;
+    next = qn;
+  }
+
+  return qn;
+}
+
 static inline symbol_t* resolve_symbol_local_any(scope_t* scope, ast_qn_t* name) { 
   if (!scope) return NULL;
   if (!name) return NULL;
@@ -683,6 +712,8 @@ static inline ast_qn_t* parse_qualified_name(parser_t* p) {
   next(p);
   
   ast_qn_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_QN;
+  n->loc = get_tok(p).loc;
   n->name = arena_strdup(&p->arena, tok.as.s);
 
   if (tok_is(p, TOK_COLCOL)) {
@@ -708,7 +739,7 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
 
     ast_qn_t* name = parse_qualified_name(p);
     if(!name) return NULL;
-    n->as.symbol = name;
+    n->as.symbol.name = name;
 
   } else if (tok_is(p, TOK_STRLIT)) {
     n->kind = EXPR_STRING;
@@ -1483,13 +1514,10 @@ void render_type(sb_t* sb, const type_t* t) {
     case TYPE_STR:
     case TYPE_ADDR:
     case TYPE_ALIAS:
-      sb_appendf(sb, "%s", t->name);
-      break;
     case TYPE_STRUCT:
-      sb_appendf(sb, "struct %s", t->name);
-      break;
     case TYPE_MODULE:
-      sb_appendf(sb, "module %s", t->name);
+    case TYPE_INTERFACE:
+      sb_appendf(sb, "%s", t->name);
       break;
     case TYPE_ARRAY:
       render_type(sb, t->as.array.inner);
@@ -1504,9 +1532,6 @@ void render_type(sb_t* sb, const type_t* t) {
       sb_appendf(sb, ") -> ");
       render_type(sb, t->as.func.ret);
       break;
-    case TYPE_INTERFACE:
-      sb_appendf(sb, "interface %s", t->name);
-      break;
     case TYPE_TYPE:
       sb_appendf(sb, "type %s", t->name);
       break;
@@ -1520,7 +1545,9 @@ static inline const char* type_to_str(arena_t* a, const type_t* t) {
 
   render_type(&sb, t);
   sb_appendz(&sb, "");
-  return arena_sprintf(a, "%.*s", SB_FMT(sb));
+  const char* str = arena_sprintf(a, "%.*s", SB_FMT(sb));
+  sb_free(&sb);
+  return str;
 }
 
 static inline const char* qn_to_str(arena_t* a, const ast_qn_t* qn) {
@@ -1532,7 +1559,9 @@ static inline const char* qn_to_str(arena_t* a, const ast_qn_t* qn) {
     qn = qn->next;
   }
 
-  return arena_sprintf(a, "%.*s", SB_FMT(sb));
+  const char* str = arena_sprintf(a, "%.*s", SB_FMT(sb));
+  sb_free(&sb);
+  return str;
 }
 
 static inline void typechecker_destroy(typechecker_t* t) {
@@ -1739,29 +1768,22 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
       method_name = "gt";
       break;
     case OP_CALL:
-      interface_name = "Callable";
-      method_name = "call";
-      break;
-    case OP_ASSIGN:
-      interface_name = "Copiable";
-      method_name = "copy";
-      break;
     case OP_MEMB:
-      interface_name = "Accessible";
-      method_name = "access";
-      break;
+    case OP_ASSIGN:
     case OP_INVALID:
     default:
       UNREACHABLE("find_binop_impl");
   }
 
+  while (owner->kind == TYPE_ALIAS) owner = owner->as.alias.target;
+  while (other->kind == TYPE_ALIAS) other = other->as.alias.target;
+
   if (!interface_name || !method_name) return NULL;
 
+  arena_t a = { 0 };
   // TODO: unhardcode
-  ast_qn_t iface = { .name = interface_name };
-  ast_qn_t ops   = { .name = "ops", .next = &iface };
-  ast_qn_t core  = { .name = "core", .next = &ops };
-  symbol_t* iface_symb = resolve_symbol(owner->scope, &core, SYMB_TYPE);
+  ast_qn_t* iface      = make_qn(&a, "core", "ops", interface_name);
+  symbol_t* iface_symb = resolve_symbol(owner->scope, iface, SYMB_TYPE);
 
   bool implements = false;
   da_foreach(ast_qn_t*, impl, &owner->impls) {
@@ -1784,6 +1806,8 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
     )
       method = *s;
   }
+
+  arena_free(&a);
 
   return method;
 }
@@ -1820,7 +1844,6 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
   }
 
   type_t* ret = impl->type->as.func.ret;
-  if (strcmp(ret->name, "Self") == 0) ret = ret->as.alias.target;
 
   ast_expr_t* lhs = e->as.binop.lhs;
   ast_expr_t* rhs = e->as.binop.rhs;
@@ -1837,6 +1860,7 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
   e->as.funcall.callee->as.access.field = impl->name;
   e->as.funcall.callee->as.access.owner = lhs;
   e->as.funcall.callee->as.access.op = OP_MEMB;
+  e->as.funcall.callee->as.access.field_symbol = impl;
 
   e->type = ret;
 
@@ -1847,14 +1871,14 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
   expr->is_const = false;
   switch(expr->kind) {
     case EXPR_SYMBOL:
-      symbol_t* s = resolve_symbol_any(t->current_scope, expr->as.symbol); 
+      symbol_t* s = resolve_symbol_any(t->current_scope, expr->as.symbol.name); 
       if (!s || !s->type) {
-        fdiagf(stderr, DIAG_ERROR, expr->loc, "Undeclared symbol `%s`.", qn_to_str(&t->arena, expr->as.symbol));
+        fdiagf(stderr, DIAG_ERROR, expr->loc, "Undeclared symbol `%s`.", qn_to_str(&t->arena, expr->as.symbol.name));
         return false;
       }
 
       if (s->storage == STO_INSTANCE) {
-        ast_qn_t* tmp = expr->as.symbol; 
+        ast_qn_t* tmp = expr->as.symbol.name; 
         if (!tmp->next) UNREACHABLE("typecheck_expr");
 
         sb_t sb = { 0 };
@@ -1878,6 +1902,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         return false;
       }
 
+      expr->as.symbol.resolved_symbol = s;
       expr->type = s->type;
       return true;
     case EXPR_STRING:
@@ -1941,6 +1966,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         return false;
       } 
 
+      expr->as.access.field_symbol = s;
       expr->type = s->type;
       return true;
     }
@@ -1948,25 +1974,62 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       ast_expr_t* callee = expr->as.funcall.callee;
       if(!typecheck_expr(t, callee)) return false;
 
+      size_t n_args = expr->as.funcall.args.count;
+      size_t n_hidden_args = 0;
+
+      if (callee->type->kind == TYPE_TYPE) {
+        symbol_t* init = resolve_field(callee->type->scope, "init");
+        if (!init) {
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            expr->loc,
+            "No method `init` defined for `%s`.",
+            type_to_str(&t->arena, callee->type)
+          );
+          return false;
+        }
+
+        // TODO: make ast arena contained in the tree itself, avoid allocating nodes in different
+        // arenas
+        ast_expr_t* n = arena_alloc(&t->arena, sizeof(*n));
+        n->ast_kind = AST_EXPR;
+        n->loc = callee->loc;
+        n->kind = EXPR_SYMBOL;
+        n->as.symbol.resolved_symbol = init;
+        n->type = init->type; 
+
+        expr->as.funcall.callee = n;
+        expr->as.funcall.constructor = true;
+
+        callee = n;
+
+        // fake self obtained by MKOBJ instruction
+        n_hidden_args = 1;
+      } else if (callee->kind == EXPR_ACCESS) {
+        // fake self obtained by member access
+        n_hidden_args = 1;
+      }
+
       if (callee->type->kind != TYPE_FUNC) {
         fdiagf(stderr, DIAG_ERROR, callee->loc, "Cannot call non-callable type `%s`", type_to_str(&t->arena, callee->type));
         return false;
       }
 
-      if (expr->as.funcall.args.count + (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB) != callee->type->as.func.params.count) {
+      if (n_args + n_hidden_args != callee->type->as.func.params.count) {
           fdiagf(
-            stderr, 
+            stderr,
             DIAG_ERROR,
             expr->loc,
             "Mismatched number of arguments in function call: expected %zu, got %zu.",
             callee->type->as.func.params.count,
-            expr->as.funcall.args.count + (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB)
+            n_args + n_hidden_args
           );
           return false;
       }
 
-      // NOTE: should never happen
-      if (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB) {
+      if (callee->kind == EXPR_ACCESS) {
+        // NOTE: should never happen
         if(!type_equals(*callee->as.access.owner->type, **callee->type->as.func.params.items)) {
           fdiagf(
             stderr,
@@ -1980,11 +2043,11 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         }
       }
 
-      for(size_t i = 0; i < expr->as.funcall.args.count; i++) {
+      for(size_t i = 0; i < n_args; i++) {
         ast_expr_t* arg = da_at(expr->as.funcall.args, i);
         if(!typecheck_expr(t, arg)) return false;
         type_t const* a = arg->type;
-        type_t const* b = da_at(callee->type->as.func.params, i + (callee->kind == EXPR_ACCESS && callee->as.access.op == OP_MEMB));
+        type_t const* b = da_at(callee->type->as.func.params, i + n_hidden_args);
         if (!type_equals(*a, *b)) {
           // TODO: find way to retrieve argument name for better diagnostics
           fdiagf(
@@ -2078,12 +2141,11 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
 
       if(stmt->as.var_def->init) {
         if(!typecheck_expr(t, stmt->as.var_def->init)) return false;
+        type = stmt->as.var_def->init->type;
 
-        if (!stmt->as.var_def->type) {
-          type = stmt->as.var_def->init->type;
-        } else {
+        if (stmt->as.var_def->type) {
           if(!resolve_type_decl(t, stmt->as.var_def->type)) return false;
-          if(stmt->as.var_def->type->resolved_type != stmt->as.var_def->init->type) {
+          if(!type_equals(*stmt->as.var_def->type->resolved_type, *stmt->as.var_def->init->type)) {
             fdiagf(
               stderr,
               DIAG_ERROR,
@@ -2099,7 +2161,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         if(!resolve_type_decl(t, stmt->as.var_def->type)) return false;
         type = stmt->as.var_def->type->resolved_type;
       }
-      
+      assert(type); 
       stmt->as.var_def->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, stmt->as.var_def->name, (type_t*)type);
 
       if( stmt->as.var_def->flags & SPEC_EXTERN ) {
@@ -2200,8 +2262,7 @@ static inline bool resolve_func_def(typechecker_t* t, ast_func_def_t* def) {
   da_foreach(ast_param_t*, p, &def->sig->params) {
     if(!resolve_type_decl(t, (*p)->type)) return false;
     symbol_t* param_sym = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, (*p)->name, (*p)->type->resolved_type);
-    param_sym->addr_resolved = true;
-    param_sym->addr = params.count;
+    set_symbol_address(param_sym, params.count);
 
     da_append(&params, (*p)->type->resolved_type);
   }
@@ -2288,6 +2349,10 @@ static inline void typechecker_init(typechecker_t* t) {
   enter_scope_new(t, "root");
 }
 
+// TODO: Typecheck should create a new tree different from AST, makes no sense
+// to add type-related fields inside the AST nodes (expr->type, type->resolved_type,
+// symbols, etc.). This will also avoid having to construct AST nodes after parsing
+// for stuff like operator overloading.
 // TODO: Make a function to check type->kind, otherwise aliases will fail checks
 static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   root->scope = t->current_scope;
@@ -2375,7 +2440,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
           if(strcmp(m->name, (*method)->name) == 0) { found = true; break;}
         }
         if(!found) {
-          fdiagf(stderr, DIAG_ERROR, (*method)->loc, "Undeclared method `%s` in `%s` interface.", (*method)->name, (*impl)->interface->name);
+          fdiagf(stderr, DIAG_ERROR, (*method)->loc, "Undeclared method `%s` in `%s` interface.", (*method)->name, qn_to_str(&t->arena, (*impl)->interface->name));
           return false;
         }
       }
@@ -2385,8 +2450,15 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
           (*method)->symbol->type->as.func.params.count < 1 || 
           !type_equals(*(*method)->symbol->type->as.func.params.items[0], *self)
       ) {
-        fdiagf(stderr, DIAG_ERROR, (*method)->loc, "Method `%s` requires `Self` first argument.", (*method)->name);
+        fdiagf(stderr, DIAG_ERROR, (*method)->sig->loc, "Method `%s` requires `Self` aka `%s` first argument.", (*method)->name, type_to_str(&t->arena, type));
         return false;
+      }
+
+      if (strcmp((*method)->name, "init") == 0) {
+        if (!type_equals(*(*method)->symbol->type->as.func.ret, *self)) {
+          fdiagf(stderr, DIAG_ERROR, (*method)->sig->ret->loc, "Method `%s` requires `Self` aka `%s` return type.", (*method)->name, type_to_str(&t->arena, type));
+          return false;
+        }
       }
     }
 
@@ -2396,11 +2468,9 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
         // TODO: compare types, not just name
 
-        // TODO: fix horrifying hack
-        ast_qn_t tmp = (ast_qn_t){ .name = m->name };
-        symbol_t* s = resolve_symbol_local(type->scope, &tmp, SYMB_FUNC);
-        if(!s) {
-          fdiagf(stderr, DIAG_ERROR, (*impl)->loc, "Missing required method `%s` in `%s` interface implementation.", m->name, (*impl)->interface->name);
+        symbol_t* s = resolve_field(type->scope, m->name);
+        if(!s || s->kind != SYMB_FUNC) {
+          fdiagf(stderr, DIAG_ERROR, (*impl)->loc, "Missing required method `%s` in `%s` interface implementation.", m->name, qn_to_str(&t->arena, (*impl)->interface->name));
           return false;
         }
       }
@@ -2417,10 +2487,9 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
         fdiagf(stderr, DIAG_ERROR, (*d)->init->loc, "Initializer is not a compile-time constant.");
         return false;
       }
+      type = (*d)->init->type;
 
-      if (!(*d)->type) {
-        type = (*d)->init->type;
-      } else {
+      if ((*d)->type) {
         if(!resolve_type_decl(t, (*d)->type)) return false;
         if(!type_equals(*(*d)->type->resolved_type, *(*d)->init->type)) {
           fdiagf(
@@ -2438,6 +2507,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       if(!resolve_type_decl(t, (*d)->type)) return false;
       type = (*d)->type->resolved_type;
     }
+    assert(type);
     (*d)->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_GLOBAL, (*d)->name, (type_t*)type);
 
     if((*d)->init && ((*d)->flags & SPEC_EXTERN)) {
@@ -2503,13 +2573,7 @@ static inline void codegen_load_var(program_t* p, symbol_t* symbol) {
 static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
   switch(e->kind) {
       case EXPR_SYMBOL: {
-        // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
-        symbol_t* symbol = resolve_symbol(scope, e->as.symbol, SYMB_VAR);
-        if (!symbol) {
-          fdiagf(stderr, DIAG_ERROR, e->loc, "No variable `%s` in current scope.", e->as.symbol);
-          return false;
-        }
-        codegen_load_var(p, symbol);
+        codegen_load_var(p, e->as.symbol.resolved_symbol);
         break;
       }
       case EXPR_STRING:
@@ -2559,14 +2623,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         TODO("codegen_expr (UNOP)");
         break;
       case EXPR_ACCESS: {
-        arena_t a = { 0 };
-        // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
-        symbol_t* symbol = resolve_field(e->as.access.owner->type->scope, e->as.access.field);
-        if (!symbol) {
-          fdiagf(stderr, DIAG_ERROR, e->loc, "No symbol `%s` in `%s`.", e->as.symbol, type_to_str(&a, e->as.access.owner->type));
-          arena_free(&a);
-          return false;
-        }
+        symbol_t* symbol = e->as.access.field_symbol;
         if(!codegen_expr(p, scope, e->as.access.owner)) return false;
         da_append(&p->code, INST_LOADF);
         da_append(&p->code, symbol->addr);
@@ -2580,35 +2637,21 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         ast_expr_t* callee = e->as.funcall.callee;
 
         symbol_t* symbol = NULL;
-        if(callee->kind == EXPR_SYMBOL) {
-          // TODO: resolve symbol once in typechecker
-          symbol = resolve_symbol(scope, callee->as.symbol, SYMB_FUNC);
-          if (!symbol) {
-            fdiagf(stderr, DIAG_ERROR, callee->loc, "No function `%s` in current scope.", callee->as.symbol);
-            return false;
-          }
+        if (callee->kind == EXPR_SYMBOL) {
+          symbol = callee->as.symbol.resolved_symbol;
         } else if (callee->kind == EXPR_ACCESS) {
           ast_expr_t* owner = callee->as.access.owner;
 
-          if (callee->as.access.op == OP_MEMB)
-            if(!codegen_expr(p, scope, owner)) return false;
+          if(!codegen_expr(p, scope, owner)) return false;
 
-          symbol = resolve_field(owner->type->scope, callee->as.access.field);
-          if (!symbol) {
-            // TODO: remove this abomination
-            arena_t temp = { 0 };
-            fdiagf(
-              stderr,
-              DIAG_ERROR,
-              callee->loc,
-              "No method `%s` in type `%s`.",
-              callee->as.access.field,
-              type_to_str(&temp, owner->type)
-            );
-            return false;
-          }
+          symbol = callee->as.access.field_symbol;
         } else {
           TODO("codegen_expr: EXPR_FUNCALL - callee not a symbol");
+        }
+
+        if (e->as.funcall.constructor) {
+          da_append(&p->code, INST_MKOBJ);
+          da_append(&p->code, symbol->type->size);
         }
 
         da_append(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
@@ -2616,7 +2659,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           da_append(&p->code, symbol->addr);
         else {
           da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count }));
-          da_append(&p->code, 0);
+          da_append(&p->code, 0xBAADF00D);
         }
         break;
       case EXPR_SUBEXPR:
@@ -2627,12 +2670,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         ast_expr_t* lhs = e->as.assign.lhs;
 
         if(lhs->kind == EXPR_SYMBOL) {
-          // TODO: optimize -> resolve symbol only once in typechecker, store symbol_t in expr
-          symbol_t* symbol = resolve_symbol(scope, lhs->as.symbol, SYMB_VAR);
-          if (!symbol) {
-            fdiagf(stderr, DIAG_ERROR, e->loc, "No symbol `%s` in current scope.", e->as.symbol);
-            return false;
-          }
+          symbol_t* symbol = lhs->as.symbol.resolved_symbol;
           switch (symbol->storage) {
             case STO_EXTERN:
               TODO("codegen_expr - store extern symbol");
@@ -2650,13 +2688,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
               UNREACHABLE("codegen_expr");
           }
         } else if (lhs->kind == EXPR_ACCESS && lhs->as.access.op == OP_MEMB) {
-          symbol_t* symbol = resolve_field(lhs->as.access.owner->type->scope, lhs->as.access.field);
-          if (!symbol) {
-            arena_t a;
-            fdiagf(stderr, DIAG_ERROR, e->loc, "No symbol `%s` in `%s`.", lhs->as.access.field, type_to_str(&a, lhs->as.access.owner->type));
-            arena_free(&a);
-            return false;
-          }
+          symbol_t* symbol = lhs->as.access.field_symbol;
           if(!codegen_expr(p, scope, e->as.assign.lhs->as.access.owner)) return false;
           da_append(&p->code, INST_STOREF);
           da_append(&p->code, symbol->addr);
@@ -2696,7 +2728,6 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
     case STMT_EXPR: return codegen_expr(p, scope, s->as.expression);
     case STMT_RET: {
       codegen_expr(p, scope, s->as.retval);
-      // TODO: function epilog -> destroy frame, clean stack
       da_append(&p->code, INST_RET);
       return true;
     }
@@ -2708,25 +2739,12 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
 
       symbol_t* symb = s->as.var_def->symbol;
       set_symbol_address(symb, f->loc_vars++);
-      
-      // TODO: allocate all local variables at once at function call, function should
-      // be aware of its local vars after typecheck pass
-      if (s->as.var_def->symbol->type->kind == TYPE_STRUCT) {
-        codegen_struct_instantiate(p, s->as.var_def->symbol->type);
+
+      if (s->as.var_def->init) {
+        if(!codegen_expr(p, scope, s->as.var_def->init)) return false;
 
         da_append(&p->code, INST_STORE);
         da_append(&p->code, symb->addr);
-      }
-
-      if (s->as.var_def->init) {
-        if (s->as.var_def->symbol->type->kind == TYPE_STRUCT) {
-          TODO("struct init/construct - new() method?");
-        } else {
-          if(!codegen_expr(p, scope, s->as.var_def->init)) return false;
-
-          da_append(&p->code, INST_STORE);
-          da_append(&p->code, symb->addr);
-        }
       }
       return true;
     }

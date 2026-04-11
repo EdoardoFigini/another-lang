@@ -38,6 +38,7 @@ int main(int argc, char** argv) {
     case VM_OK:                   sb_appendf(&sb, "OK");                   break;
     case VM_NEXT:                 sb_appendf(&sb, "NEXT");                 break;
     case VM_INVALID_OPCODE:       sb_appendf(&sb, "INVALID_OPCODE");       break;
+    case VM_INVALID_HANDLE:       sb_appendf(&sb, "INVALID_HANDLE");       break;
     case VM_NO_MORE_INSTRUCTIONS: sb_appendf(&sb, "NO_MORE_INSTRUCTIONS"); break;
     case VM_STACK_OVERFLOW:       sb_appendf(&sb, "STACK_OVERFLOW");       break;
     case VM_STACK_UNDERFLOW:      sb_appendf(&sb, "STACK_UNDERFLOW");      break;

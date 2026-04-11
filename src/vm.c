@@ -17,6 +17,7 @@
 #include "vm.h"
 
 #define MAX_STACK 0x1000 
+#define HANDLE_INVALID ((obj_handle_t)-1)
 
 // TODO: add platform dependent mutex to vm_t
 static vm_t __vm = { .max_stack = MAX_STACK };
@@ -28,6 +29,7 @@ vm_t* get_vm_instance() {
 
 obj_t* get_obj(obj_handle_t h) {
   const vm_t* vm = get_vm_instance();
+  if (h == HANDLE_INVALID) return NULL;
   return da_at(vm->active_task->obj_pool, h);
 }
 
@@ -275,6 +277,7 @@ vm_exitcode_t exec(vm_t* vm) {
       operand = *(++vm->ip);
       obj_handle_t handle;
       POP(vm, handle);
+      if (handle == HANDLE_INVALID) return VM_INVALID_HANDLE;
       obj_t* obj = get_obj(handle);
       PUSH(vm, obj->as.structure.fields[operand]);
       vm->ip++;
@@ -292,6 +295,7 @@ vm_exitcode_t exec(vm_t* vm) {
       operand = *(++vm->ip);
       obj_handle_t handle;
       POP(vm, handle);
+      if (handle == HANDLE_INVALID) return VM_INVALID_HANDLE;
       obj_t* obj = get_obj(handle);
       POP(vm, obj->as.structure.fields[operand]);
       vm->ip++;
@@ -321,6 +325,7 @@ vm_exitcode_t exec(vm_t* vm) {
       operand = *(++vm->ip);
       if (vm->active_task->call_stack.depth >= MAX_CALL_STACK) return VM_CALL_STACK_OVERFLOW;
       vm->active_task->call_stack.frames[vm->active_task->call_stack.depth++] = malloc(sizeof(virtual_frame_t));
+      memset(CURR_FRAME(vm)->vars, 0xFF, MAX_LOC_VARS * sizeof(*CURR_FRAME(vm)->vars));
       CURR_FRAME(vm)->ret_addr = vm->ip + 1;
       vm->ip = vm->active_task->code + operand;
       break;
@@ -499,6 +504,7 @@ vm_exitcode_t call(const char* fn, size_t n_args, ...) {
   if (!found) return VM_UNDEFINED_EXPORT;
 
   active->call_stack.frames[0] = malloc(sizeof(virtual_frame_t));
+  memset(active->call_stack.frames[0]->vars, 0xFF, MAX_LOC_VARS * sizeof(*active->call_stack.frames[0]->vars));
   active->call_stack.depth++;
   active->call_stack.frames[0]->ret_addr = active->code;
 

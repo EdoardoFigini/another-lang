@@ -330,7 +330,10 @@ struct _ast_expr_t {
   type_t const* type;
   bool is_const;
   union {
-    ast_qn_t* symbol;
+    struct {
+      ast_qn_t* name;
+      symbol_t* resolved_symbol;
+    } symbol;
     const char* s;
     struct {
       lit_type_info_flags_t ti;
@@ -353,6 +356,7 @@ struct _ast_expr_t {
       ast_expr_t* owner;
       const char* field;
       op_kind_t op;
+      symbol_t* field_symbol;
     } access;
     struct { 
       ast_expr_t* callee;
@@ -361,6 +365,7 @@ struct _ast_expr_t {
         size_t count;
         size_t capacity;
       } args;
+      bool constructor;
     } funcall;
     struct {
       ast_expr_t* lhs;
@@ -820,6 +825,7 @@ typedef enum {
   VM_OK,
   VM_NEXT,
   VM_INVALID_OPCODE,
+  VM_INVALID_HANDLE,
   VM_NO_MORE_INSTRUCTIONS,
   VM_STACK_OVERFLOW,
   VM_STACK_UNDERFLOW,

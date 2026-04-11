@@ -50,6 +50,7 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
   (void)n;
   (void)level;
 #else
+  if (!n) return;
   switch(n->ast_kind) {
     case AST_ROOT:
       ast_root_t* root = (ast_root_t*)n;
@@ -74,7 +75,7 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
       switch(expr->kind) {
         case EXPR_SYMBOL:
           fprintf(stream, " (%s)\n", "EXPR_SYMBOL");
-          __dbg_print_ast(stream, (ast_node_t*)expr->as.symbol, level + 2);
+          __dbg_print_ast(stream, (ast_node_t*)expr->as.symbol.name, level + 2);
           break;
         case EXPR_STRING:
           fprintf(stream, " (%s)\n", "EXPR_STRING");
@@ -129,7 +130,7 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
           fprintf(stream, "%*srhs:\n", level + 2, "");
           __dbg_print_ast(stream, (ast_node_t*)expr->as.assign.rhs, level + 2);
           break;
-        // default: break;
+        default: break;
       }
       break;
     case AST_STMT:
@@ -246,7 +247,7 @@ static inline void __dbg_print_symbol_table_entries(FILE* stream, scope_t* scope
         fprintf(stream, "%-10s ", "instance"); break;
       default: break;
     }
-    fprintf(stream, "0x%08X ", (*s)->addr);
+    fprintf(stream, "0x%08X %s ", (*s)->addr, (*s)->addr_resolved ? "    " : "(NR)");
     __dbg_print_type(stream, (*s)->type);
     fprintf(stream, "\n");
   }
@@ -261,7 +262,7 @@ void __dbg_print_symbol_table(FILE* stream, scope_t* scope) {
 #else
   if(!scope) return;
   fprintf(stream, "%s symbol Table:\n", scope->name);
-  fprintf(stream, "%-30s %-30s %-10s %-10s %s\n", "name", "scope", "storage", "addr", "type");
+  fprintf(stream, "%-30s %-30s %-10s %-15s %s\n", "name", "scope", "storage", "addr", "type");
   __dbg_print_symbol_table_entries(stream, scope);
 #endif
 }
