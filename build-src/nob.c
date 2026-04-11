@@ -181,6 +181,7 @@ const char* tc_dbg_args_flag[] = {
 typedef struct {
   Procs procs;
   Nob_File_Paths objs;
+  size_t jobs; 
   bool gen_compile_commands;
   struct {
     const char** items;
@@ -281,7 +282,7 @@ bool compile_tu(Nob_Walk_Entry entry) {
       nob_da_append(&wd->compile_commands, nob_temp_sprintf(SV_Fmt, SV_Arg(nob_sb_to_sv(sb))));
     }
 
-    if (!cmd_run(&cmd, .async = &wd->procs)) return false;
+    if (!cmd_run(&cmd, .async = &wd->procs, .max_procs = wd->jobs)) return false;
   }
 
   return true;
@@ -351,6 +352,11 @@ int main(int argc, char **argv)
       false,
       "Launch executable in debugger after compilation."
     );
+    bool *f_jobs = flag_size(
+      "j",
+      1,
+      "Number of concurrent jobs."
+    );
 
     const char* exe = argv[0];
 
@@ -401,7 +407,11 @@ int main(int argc, char **argv)
 
     uint64_t start = nob_nanos_since_unspecified_epoch();
 
-    walk_data_t wd = { .gen_compile_commands = *f_compile_commands };
+    walk_data_t wd = {
+      .gen_compile_commands = *f_compile_commands,
+      .jobs = *f_jobs
+    };
+
     if(!nob_walk_dir(SRC_FOLDER, compile_tu, .data = &wd)) return 1;
     if(wd.gen_compile_commands) {
       Nob_String_Builder compile_commands_sb = { 0 };
