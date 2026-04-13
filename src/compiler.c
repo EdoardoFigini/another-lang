@@ -2267,6 +2267,8 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
   switch(stmt->kind) {
     case STMT_EMPTY: break;
     case STMT_RET:
+      if (!stmt->as.retval && type_equals(*ret_type, *t->builtins.none)) break;
+
       if(!typecheck_expr(t, stmt->as.retval)) return false;
       if(!type_equals(*stmt->as.retval->type, *ret_type)) {
         fdiagf(
@@ -2913,7 +2915,7 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
     case STMT_EMPTY: return true;
     case STMT_EXPR: return codegen_expr(p, scope, s->as.expression);
     case STMT_RET: {
-      codegen_expr(p, scope, s->as.retval);
+      if (s->as.retval) codegen_expr(p, scope, s->as.retval);
       da_append(&p->code, INST_RET);
       return true;
     }
