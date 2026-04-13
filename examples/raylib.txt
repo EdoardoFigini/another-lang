@@ -1,6 +1,6 @@
 Raylib: mod {
 
-  # Raylib bindings module
+  // Raylib bindings module
 
   Colors: mod {
     const RED   : u32 = 0xFF0000FFU;

@@ -290,7 +290,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
   char* p = (char*)t->source.data;
   while(*p && ((size_t)(p - t->source.data) < t->source.size)) {
     // skip comments
-    if(*p == '#') while(*++p && *p != '\n');
+    if(*p == '/' && *(p + 1) == '/') while(*++p && *p != '\n');
 
     if(*p == '\n') {
       line_view    = slice_sub(src_rem_view, 0, slice_index_of(src_rem_view, '\n'));
