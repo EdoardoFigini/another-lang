@@ -1,0 +1,132 @@
+extern print: (s: addr) -> i32;
+
+core: mod {
+  ops: mod {
+    Add: interface {
+      add: (self: Self, other: Self) -> Self;
+    }
+
+    Countable: interface {
+      count: (self: Self) -> u32;
+    }
+  }
+}
+
+Node: struct {
+  item: i32;
+  next: Node;
+}
+
+List: struct {
+  head: Node;
+  tail: Node;
+  _count: u32;
+}
+
+export main: () -> none {
+  l := List();
+
+  i := 10;
+  while i > 0 {
+    l.insert(i);
+    i = i - 1;
+  }
+  i = 11;
+  while i <= 20 {
+    l.append(i);
+    i = i + 1;
+  }
+
+  print((l.to_str() + " - count: " + (#l).to_str() + "\n").c_str());
+}
+
+impl Self: List {
+  init : (self: Self) -> Self {
+    self._count = 0U;
+    return self;
+  }
+
+  insert: (self: Self, n: i32) -> none {
+    tmp := self.head;
+
+    self.head = Node(n);
+    self.head.next = tmp;
+
+    if self._count == 0U {
+      self.tail = self.head;
+    }
+
+    self._count = self._count + 1U;
+  }
+
+  append: (self: Self, n: i32) -> none {
+    if self._count == 0U {
+      self.insert(n);
+      return;
+    }
+
+    self.tail.next = Node(n);
+    self.tail = self.tail.next; 
+
+    self._count = self._count + 1U;
+  }
+
+  to_str: (self: Self) -> str {
+    if (self._count == 0U) { return "List()"; }
+    s := "List(" + self.head.to_str();
+    i := 1U;
+    n := self.head.next;
+    while (i < self._count) {
+      s = s + ", " + n.to_str();
+
+      n = n.next;
+      i = i + 1U;
+    }
+    return s + ")";
+  }
+}
+
+impl core::ops::Countable: List {
+  count: (self: Self) -> u32 {
+    return self._count;
+  }
+}
+
+impl Self: Node {
+  init : (self: Self, n: i32) -> Self {
+    self.item = n;
+    return self;
+  }
+
+  to_str: (self: Self) -> str {
+    return self.item.to_str();
+  }
+}
+
+impl Self: str {
+  [[name="str__c_str"]]
+  extern c_str: (self: Self) -> addr;
+  [[name="str__concat"]]
+  extern concat: (self: Self, other: Self) -> str;
+}
+
+impl core::ops::Add: str {
+  add: (self: Self, other: Self) -> Self {
+    return self.concat(other);
+  }
+}
+
+impl Self: i32 {
+  [[name="i32__to_str"]]
+  extern to_str: (self: Self) -> str;
+}
+
+impl Self: u32 {
+  [[name="u32__to_str"]]
+  extern to_str: (self: Self) -> str;
+}
+
+impl Self: f32 {
+  [[name="f32__to_str"]]
+  extern to_str: (self: Self) -> str;
+}

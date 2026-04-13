@@ -9,7 +9,7 @@ Raylib: mod {
     const WHITE : u32 = 0xFFFFFFFFU;
   }
 
-  hello: str ="Hello Raylib!";
+  hello := "Hello Raylib!";
 
   impl Self: str {
     [[name="str__c_str"]]
