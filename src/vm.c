@@ -91,6 +91,34 @@ EXPORT obj_handle_t i32__to_str(int32_t self) {
   return vm->active_task->obj_pool.count - 1;
 }
 
+EXPORT obj_handle_t u32__to_str(uint32_t self) {
+  vm_t* vm = get_vm_instance();
+
+  obj_t* o = malloc(sizeof(*o));
+  o->kind = OBJ_STR;
+  o->as.str.data = arena_sprintf(&vm->active_task->arena, "%u", self);
+  o->as.str.size = strlen(o->as.str.data);
+  o->refs = 1;
+
+  da_append(&vm->active_task->obj_pool, o);
+
+  return vm->active_task->obj_pool.count - 1;
+}
+
+EXPORT obj_handle_t f32__to_str(float self) {
+  vm_t* vm = get_vm_instance();
+
+  obj_t* o = malloc(sizeof(*o));
+  o->kind = OBJ_STR;
+  o->as.str.data = arena_sprintf(&vm->active_task->arena, "%f", self);
+  o->as.str.size = strlen(o->as.str.data);
+  o->refs = 1;
+
+  da_append(&vm->active_task->obj_pool, o);
+
+  return vm->active_task->obj_pool.count - 1;
+}
+
 //////////////////////////////
 
 static inline bool is_ffi_arg_32(ffi_type* t) {
