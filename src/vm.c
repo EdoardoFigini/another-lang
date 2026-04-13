@@ -453,6 +453,11 @@ vm_exitcode_t exec(vm_t* vm) {
       PUSH(vm, a > b);
       vm->ip++;
       break;
+    case INST_LNOT:
+      POP(vm, a);
+      PUSH(vm, !a);
+      vm->ip++;
+      break;
     case INST_MKOBJ:
       operand = *(++vm->ip);
 

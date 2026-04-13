@@ -299,6 +299,8 @@ typedef enum {
   OP_LT      = '<',
   OP_GT      = '>',
   OP_MEMB    = '.',
+  OP_NUMOF   = '#',
+  OP_NOT     = '!',
 } op_kind_t;
 
 enum _bp {
@@ -308,6 +310,7 @@ enum _bp {
   BP_REL,
   BP_ADD,
   BP_MULT,
+  BP_UNARY,
   BP_CALL,
   BP_ACCESS,
 };
@@ -671,6 +674,7 @@ typedef uint32_t instruction_t; enum {
   INST_GEQ,
   INST_LT,
   INST_GT,
+  INST_LNOT,
 
   INST_MKOBJ,
 

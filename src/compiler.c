@@ -323,6 +323,8 @@ static inline int tok_tokenize(tokenizer_t* t) {
       case '*':
       case '/':
       case '%':
+      case '#':
+      case '!':
         tok = (token_t){ .kind = *p, .view = { .data = p, .size = 1 } }; 
         break;
       case '>':
@@ -704,6 +706,8 @@ const enum _bp expr_bp_table[] = {
   [OP_CALL]    = BP_CALL,
   [OP_ASSIGN]  = BP_ASSIGN,
   [OP_MEMB]    = BP_ACCESS,
+  [OP_NUMOF]   = BP_UNARY,
+  [OP_NOT]     = BP_UNARY,
 };
 
 static inline ast_qn_t* parse_qualified_name(parser_t* p) {
@@ -728,6 +732,12 @@ static inline ast_qn_t* parse_qualified_name(parser_t* p) {
 }
 
 static inline ast_expr_t* parse_expr(parser_t* p, int bp);
+
+static inline bool tok_is_unop(parser_t* p) {
+  return tok_is(p, (tok_kind_t)OP_NUMOF) || 
+         tok_is(p, (tok_kind_t)OP_NOT)   ||
+         tok_is(p, (tok_kind_t)OP_MINUS);
+}
 
 static inline ast_expr_t* parse_primary_expr(parser_t* p) {
   ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
@@ -782,6 +792,17 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
 
     if(!expect(p, ')')) return NULL;
     next(p);
+  } else if (tok_is_unop(p)) {
+    n->kind = EXPR_UNOP;
+
+    n->as.unop.op = (op_kind_t)get_tok(p).kind;
+    next(p);
+
+    ast_expr_t* operand = parse_expr(p, BP_UNARY);
+    if(!operand) return NULL;
+    n->as.unop.operand = operand;
+
+    __dbg_print_ast(stderr, (ast_node_t *)n, 0);
   }
 
   return n;
@@ -820,6 +841,8 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
         kind = EXPR_ACCESS;
         break;
       case OP_INVALID:
+      case OP_NUMOF:
+      case OP_NOT:
       default:
         return lhs;
     }
@@ -848,8 +871,6 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
         lhs = n;
         break;
       }
-      case EXPR_UNOP:
-        TODO("parse_expr: EXPR_UNOP");
       case EXPR_ACCESS: {
         if (!expect(p, TOK_IDENT)) return NULL;
 
@@ -909,6 +930,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
         lhs = n;
         break;
       }
+      case EXPR_UNOP:
       case EXPR_SYMBOL:
       case EXPR_STRING:
       case EXPR_NUMBER:
@@ -1668,7 +1690,8 @@ static inline bool is_op_cmp(op_kind_t op) {
           op == OP_LEQ ||
           op == OP_GEQ ||
           op == OP_LT  ||
-          op == OP_GT;
+          op == OP_GT  ||
+          op == OP_NOT;
 }
 
 static inline bool is_op_arithmetic(op_kind_t op) {
@@ -1770,6 +1793,8 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
     case OP_CALL:
     case OP_MEMB:
     case OP_ASSIGN:
+    case OP_NUMOF:
+    case OP_NOT:
     case OP_INVALID:
     default:
       UNREACHABLE("find_binop_impl");
@@ -1812,6 +1837,75 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
   return method;
 }
 
+static inline symbol_t* find_unop_impl(const type_t* owner, op_kind_t op) {
+  const char* interface_name = NULL;
+  const char* method_name = NULL;
+  switch (op) {
+    case OP_NUMOF:
+      interface_name = "Countable";
+      method_name = "count";
+      break;
+    case OP_NOT:
+      interface_name = "Negate";
+      method_name = "not";
+      break;
+    case OP_MINUS:
+      interface_name = "Negate";
+      method_name = "minus";
+      break;
+    case OP_PLUS:
+    case OP_MULT:
+    case OP_DIV:
+    case OP_REM:
+    case OP_EQ:
+    case OP_LEQ:
+    case OP_GEQ:
+    case OP_LT:
+    case OP_GT:
+    case OP_CALL:
+    case OP_MEMB:
+    case OP_ASSIGN:
+    case OP_INVALID:
+    default:
+      UNREACHABLE("find_unnop_impl: %c - 0x%X", op, op);
+  }
+
+  while (owner->kind == TYPE_ALIAS) owner = owner->as.alias.target;
+
+  if (!interface_name || !method_name) return NULL;
+
+  arena_t a = { 0 };
+  // TODO: unhardcode
+  ast_qn_t* iface      = make_qn(&a, "core", "ops", interface_name);
+  symbol_t* iface_symb = resolve_symbol(owner->scope, iface, SYMB_TYPE);
+
+  bool implements = false;
+  da_foreach(ast_qn_t*, impl, &owner->impls) {
+    if (iface_symb == resolve_symbol(owner->scope, *impl, SYMB_TYPE)) {
+      implements = true;
+      break;
+    }
+  }
+
+  if (!implements) return NULL;
+
+  symbol_t* method = NULL;
+  da_foreach(symbol_t*, s, &owner->scope->symbols) {
+    if(
+        (*s)->kind == SYMB_FUNC &&
+        strcmp((*s)->name, method_name) == 0 && 
+        (*s)->type->as.func.params.count == 1 &&
+        type_equals(*(*s)->type->as.func.params.items[0], *owner)
+    )
+      method = *s;
+  }
+
+  arena_free(&a);
+
+  return method;
+
+}
+
 static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
   type_t const* left  = e->as.binop.lhs->type;
   type_t const* right = e->as.binop.rhs->type;
@@ -1844,6 +1938,7 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
   }
 
   type_t* ret = impl->type->as.func.ret;
+  if (strcmp(ret->name, "Self") == 0) ret = ret->as.alias.target;
 
   ast_expr_t* lhs = e->as.binop.lhs;
   ast_expr_t* rhs = e->as.binop.rhs;
@@ -1859,6 +1954,56 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
   e->as.funcall.callee->kind = EXPR_ACCESS;
   e->as.funcall.callee->as.access.field = impl->name;
   e->as.funcall.callee->as.access.owner = lhs;
+  e->as.funcall.callee->as.access.op = OP_MEMB;
+  e->as.funcall.callee->as.access.field_symbol = impl;
+
+  e->type = ret;
+
+  return true;
+}
+
+static inline bool resolve_type_unop(typechecker_t* t, ast_expr_t* e) {
+  ast_expr_t* operand = e->as.unop.operand;
+  op_kind_t op = e->as.unop.op;
+
+  if (is_op_cmp(op)) {
+    if (type_equals(*operand->type, *t->builtins.boolean)) {
+      e->type = t->builtins.boolean; 
+      return true;
+    }
+  } else if (is_op_arithmetic(op)) {
+    if (is_numeric(operand->type)) {
+      e->type = find_common_type(t->builtins.i32, operand->type);
+      return true;
+    }
+  }
+ 
+  symbol_t* impl = find_unop_impl(operand->type, op);
+  if (!impl) {
+    fdiagf(
+      stderr,
+      DIAG_ERROR,
+      e->loc,
+      "`%s` does not implement interface method for %s operator.",
+      type_to_str(&t->arena, operand->type),
+      tok_kind_str(&t->arena, (tok_kind_t)op)
+    );
+    return false;
+  }
+
+  type_t* ret = impl->type->as.func.ret;
+  if (strcmp(ret->name, "Self") == 0) ret = ret->as.alias.target;
+
+  e->kind = EXPR_FUNCALL;
+  e->as.funcall.args.items = NULL;
+  e->as.funcall.args.count = 0;
+  e->as.funcall.args.capacity = 0;
+  // crafting a new ast node on separate arena. bad idea?
+  e->as.funcall.callee = arena_alloc(&t->arena, sizeof(ast_expr_t));
+  e->as.funcall.callee->ast_kind = AST_EXPR;
+  e->as.funcall.callee->kind = EXPR_ACCESS;
+  e->as.funcall.callee->as.access.field = impl->name;
+  e->as.funcall.callee->as.access.owner = operand;
   e->as.funcall.callee->as.access.op = OP_MEMB;
   e->as.funcall.callee->as.access.field_symbol = impl;
 
@@ -1935,7 +2080,9 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       // TODO: constant folding to mark as constant
       return resolve_type_binop(t, expr);
     case EXPR_UNOP:
-      TODO("typecheck_expr: EXPR_UNOP");
+      if(!typecheck_expr(t, expr->as.unop.operand)) return false;
+
+      return resolve_type_unop(t, expr);
       break;
     case EXPR_ACCESS: {
       if(!typecheck_expr(t, expr->as.access.owner)) return false;
@@ -2074,7 +2221,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       if(!typecheck_expr(t, expr->as.binop.lhs)) return false;
       if(!typecheck_expr(t, expr->as.binop.rhs)) return false;
 
-      if(expr->as.binop.lhs->type != expr->as.binop.rhs->type) {
+      if(!type_equals(*expr->as.binop.lhs->type, *expr->as.binop.rhs->type)) {
         fdiagf(
           stderr,
           DIAG_ERROR,
@@ -2162,6 +2309,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         type = stmt->as.var_def->type->resolved_type;
       }
       assert(type); 
+      if (strcmp(type->name, "Self") == 0) type = type->as.alias.target;
       stmt->as.var_def->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, stmt->as.var_def->name, (type_t*)type);
 
       if( stmt->as.var_def->flags & SPEC_EXTERN ) {
@@ -2421,9 +2569,16 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       if ((*impl)->interface->name && !(*impl)->interface->name->next)
         impl_self = strcmp((*impl)->interface->name->name, "Self") == 0;
     }
-    if(!impl_self && !resolve_type_decl(t, (*impl)->interface)) return false;
-    if(!resolve_type_decl(t, (*impl)->type)) return false;
 
+    if(!impl_self) {
+      if (!resolve_type_decl(t, (*impl)->interface)) return false;
+      if ((*impl)->interface->resolved_type->kind != TYPE_INTERFACE) {
+        fdiagf(stderr, DIAG_ERROR, (*impl)->interface->loc, "`%s` is not an interface", qn_to_str(&t->arena, (*impl)->interface->name));
+        return false;
+      }
+    }
+
+    if(!resolve_type_decl(t, (*impl)->type)) return false;
     type_t* type = (*impl)->type->resolved_type;
 
     scope_t* saved_scope = t->current_scope;
@@ -2615,12 +2770,43 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           case OP_ASSIGN:
           case OP_CALL:
           case OP_INVALID:
+          case OP_NUMOF:
+          case OP_NOT:
           default:
             UNREACHABLE("codegen expr: Invalid binary operation: %d", e->as.binop.op);
         }
         break;
       case EXPR_UNOP:
-        TODO("codegen_expr (UNOP)");
+        // TODO: handle operator length, signdess and type (when implementing type checker)
+        codegen_expr(p, scope, e->as.unop.operand);
+        //TODO: implicit cast if either type is different from the result
+
+        switch(e->as.unop.op){
+          case OP_NOT: da_append(&p->code, INST_LNOT); break;
+          case OP_MINUS: {
+            da_append(&p->code, INST_PUSH);
+            da_append(&p->code, 0);
+            da_append(&p->code, INST_SWAP);
+            da_append(&p->code, INST_SUB);
+            break;
+          }
+          case OP_NUMOF:
+          case OP_PLUS:
+          case OP_MULT:
+          case OP_DIV:
+          case OP_REM:
+          case OP_EQ:
+          case OP_LEQ:
+          case OP_GEQ:
+          case OP_LT:
+          case OP_GT:
+          case OP_MEMB:
+          case OP_ASSIGN:
+          case OP_CALL:
+          case OP_INVALID:
+          default:
+            UNREACHABLE("codegen expr: Invalid binary operation: %d", e->as.unop.op);
+        }
         break;
       case EXPR_ACCESS: {
         symbol_t* symbol = e->as.access.field_symbol;

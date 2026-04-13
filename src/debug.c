@@ -101,7 +101,9 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
           break;
         case EXPR_UNOP:
           fprintf(stream, " (%s)\n", "EXPR_UNOP");
-          TODO("__dbg_print_ast (EXPR_UNOP)");
+          fprintf(stream, "%*sop: %c\n", level + 2, "", expr->as.unop.op);
+          fprintf(stream, "%*soperand:\n", level + 2, "");
+          __dbg_print_ast(stream, (ast_node_t*)expr->as.unop.operand, level + 2);
           break;
         case EXPR_ACCESS:
           fprintf(stream, " (%s)\n", "EXPR_ACCESS");
@@ -436,6 +438,8 @@ void __dbg_print_disass(FILE* stream, program_t* p, scope_t* root) {
         fprintf(stream, "  %-10s\n", "LT"); break;
        case INST_GT:
         fprintf(stream, "  %-10s\n", "GT"); break;
+       case INST_LNOT:
+        fprintf(stream, "  %-10s\n", "LNOT"); break;
        case INST_HALT:
         fprintf(stream, "  %-10s\n", "HALT"); break;
 
