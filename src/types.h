@@ -750,13 +750,19 @@ typedef struct _obj {
   } as;
 } obj_t;
 
+typedef uint32_t obj_handle_t;
+
+typedef struct _handle_node {
+  obj_handle_t handle;
+  struct _handle_node *next;
+} handle_node_t;
+
 typedef struct {
-  obj_t** items;
+  obj_t* items;
+  handle_node_t* freelist;
   size_t count;
   size_t capacity;
 } obj_pool_t;
-
-typedef uint32_t obj_handle_t;
 
 typedef struct {
   uint32_t vars[MAX_LOC_VARS];

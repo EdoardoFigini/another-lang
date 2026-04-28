@@ -27,10 +27,135 @@ vm_t* get_vm_instance() {
   return &__vm;
 }
 
+task_t* get_active_task() {
+  vm_t* vm = get_vm_instance();
+  task_t* active = vm->active_task;
+  if (!active) {
+    fprintf(stderr, "\033[41;1m[FATAL]\033[0m No active task!\n"); 
+    abort();
+  }
+  return active;
+}
+
+void set_active_task(task_t* t) {
+  if (!t) {
+    fprintf(stderr, "\033[31;1m[ERROR]\033[0m No task provided\n"); 
+    return;
+  }
+  get_vm_instance()->active_task = t;
+}
+
 obj_t* get_obj(obj_handle_t h) {
   const vm_t* vm = get_vm_instance();
   if (h == HANDLE_INVALID) return NULL;
-  return da_at(vm->active_task->obj_pool, h);
+  return &da_at(vm->active_task->obj_pool, h);
+}
+
+static inline obj_handle_t make_obj_str(obj_pool_t* pool, const char* s) {
+  obj_handle_t ret = HANDLE_INVALID;
+  if (pool->freelist) {
+    struct _handle_node* tmp = (pool->freelist = pool->freelist->next); 
+    ret = tmp->handle;
+    free(tmp);
+  } else {
+    ret = pool->count;
+    da_append(pool, (obj_t){ 0 });
+  }
+
+  da_at(*pool, ret).kind = OBJ_STR;
+  da_at(*pool, ret).as.str.data = strdup(s);
+  da_at(*pool, ret).as.str.size = strlen(s);
+  da_at(*pool, ret).refs = 0;
+
+  return ret;
+}
+
+FMT_PRINTF(2, 3) static inline obj_handle_t make_obj_strf(obj_pool_t* pool, const char* fmt, ...) {
+  va_list args;
+
+  obj_handle_t ret = HANDLE_INVALID;
+  if (pool->freelist) {
+    struct _handle_node* tmp = (pool->freelist = pool->freelist->next); 
+    ret = tmp->handle;
+    free(tmp);
+  } else {
+    ret = pool->count;
+    da_append(pool, (obj_t){ 0 });
+  }
+
+  va_start(args, fmt);
+  int len = 0;
+  char* s = NULL;
+  len = vsnprintf(s, len    , fmt, args);
+  s = malloc(len + 1);
+  len = vsnprintf(s, len + 1, fmt, args);
+  va_end(args);
+
+  da_at(*pool, ret).kind = OBJ_STR;
+  da_at(*pool, ret).as.str.data = s;
+  da_at(*pool, ret).as.str.size = len;
+  da_at(*pool, ret).refs = 0;
+
+  return ret;
+}
+
+static inline obj_handle_t make_obj_struct(obj_pool_t* pool, size_t size) {
+  obj_handle_t ret = HANDLE_INVALID;
+  if (pool->freelist) {
+    struct _handle_node* tmp = (pool->freelist = pool->freelist->next); 
+    ret = tmp->handle;
+    free(tmp);
+  } else {
+    ret = pool->count;
+    da_append(pool, (obj_t){ 0 });
+  }
+
+  da_at(*pool, ret).kind = OBJ_STRUCT;
+  da_at(*pool, ret).as.structure.fields = malloc(sizeof(uint32_t) * size);
+  da_at(*pool, ret).as.structure.n_fields = size;
+  da_at(*pool, ret).refs = 0;
+
+  return ret;
+}
+
+static inline void release_obj(obj_handle_t handle);
+
+static inline void destroy_obj(obj_handle_t handle) {
+  if (handle == HANDLE_INVALID) return;
+
+  obj_pool_t* pool = &get_active_task()->obj_pool;
+
+  obj_t* obj = &da_at(*pool, handle);
+  switch(obj->kind) {
+    case OBJ_STR:
+      free((void*)obj->as.str.data);
+      break;
+    case OBJ_STRUCT:
+      for (size_t i = 0; i < obj->as.structure.n_fields; i++)
+        release_obj(obj->as.structure.fields[i]); 
+      free(da_at(*pool, handle).as.structure.fields);
+      break;
+    default:
+      UNREACHABLE("destroy - unknown obj kind");
+  }
+  memset(obj, 0, sizeof(obj_t));
+
+  struct _handle_node* node = malloc(sizeof(*node));
+  node->handle = handle;
+  node->next = pool->freelist;
+  pool->freelist = node; 
+}
+
+static inline void release_obj(obj_handle_t handle) {
+  if (handle == HANDLE_INVALID) return;
+  obj_pool_t pool = get_active_task()->obj_pool;
+  if (--da_at(pool, handle).refs <= 0) destroy_obj(handle);
+}
+
+static inline obj_handle_t acquire_obj(obj_handle_t handle) {
+  if (handle != HANDLE_INVALID)
+    ++da_at(get_active_task()->obj_pool, handle).refs;
+  return handle;
 }
 
 #ifdef _MSC_VER
@@ -52,71 +177,55 @@ EXPORT int str_cmp(const char* a, const char* b) {
 // BUILTIN METHODS
 
 EXPORT const char* str__c_str(obj_handle_t self) {
+  acquire_obj(self);
   // TODO: duplicate data
-  return get_obj(self)->as.str.data; 
+  const char* ret = get_obj(self)->as.str.data; 
+  release_obj(self);
+
+  return ret;
 }
 
 EXPORT int str__length(obj_handle_t self) {
-  return (int)get_obj(self)->as.str.size; 
+  acquire_obj(self);
+  int ret = (int)get_obj(self)->as.str.size;
+  release_obj(self);
+
+  return ret;
 }
 
 EXPORT obj_handle_t str__concat(obj_handle_t self, obj_handle_t other) {
-  obj_t* str = get_obj(self);
-  obj_t* str_other = get_obj(other);
+  obj_t* str_self  = get_obj(acquire_obj(self));
+  obj_t* str_other = get_obj(acquire_obj(other));
 
-  vm_t* vm = get_vm_instance();
+  obj_handle_t h = make_obj_strf(
+      &get_active_task()->obj_pool,
+      "%.*s%.*s",
+      (int)str_self->as.str.size,  str_self->as.str.data,
+      (int)str_other->as.str.size, str_other->as.str.data
+  );
 
-  obj_t* o = malloc(sizeof(*o));
-  o->kind = OBJ_STR;
-  o->as.str.data = arena_sprintf(&vm->active_task->arena, "%s%s", str->as.str.data, str_other->as.str.data);
-  o->as.str.size = strlen(o->as.str.data);
-  o->refs = 1;
+  release_obj(self);
+  release_obj(other);
 
-  da_append(&vm->active_task->obj_pool, o);
-
-  return vm->active_task->obj_pool.count - 1;
+  return acquire_obj(h); // stack acquires on return
 }
 
 EXPORT obj_handle_t i32__to_str(int32_t self) {
-  vm_t* vm = get_vm_instance();
+  obj_handle_t h = make_obj_strf(&get_active_task()->obj_pool, "%d", self);
 
-  obj_t* o = malloc(sizeof(*o));
-  o->kind = OBJ_STR;
-  o->as.str.data = arena_sprintf(&vm->active_task->arena, "%d", self);
-  o->as.str.size = strlen(o->as.str.data);
-  o->refs = 1;
-
-  da_append(&vm->active_task->obj_pool, o);
-
-  return vm->active_task->obj_pool.count - 1;
+  return acquire_obj(h); // stack acquires on return
 }
 
 EXPORT obj_handle_t u32__to_str(uint32_t self) {
-  vm_t* vm = get_vm_instance();
+  obj_handle_t h = make_obj_strf(&get_active_task()->obj_pool, "%u", self);
 
-  obj_t* o = malloc(sizeof(*o));
-  o->kind = OBJ_STR;
-  o->as.str.data = arena_sprintf(&vm->active_task->arena, "%u", self);
-  o->as.str.size = strlen(o->as.str.data);
-  o->refs = 1;
-
-  da_append(&vm->active_task->obj_pool, o);
-
-  return vm->active_task->obj_pool.count - 1;
+  return acquire_obj(h); // stack acquires on return
 }
 
 EXPORT obj_handle_t f32__to_str(float self) {
-  vm_t* vm = get_vm_instance();
+  obj_handle_t h = make_obj_strf(&get_active_task()->obj_pool, "%f", self);
 
-  obj_t* o = malloc(sizeof(*o));
-  o->kind = OBJ_STR;
-  o->as.str.data = arena_sprintf(&vm->active_task->arena, "%f", self);
-  o->as.str.size = strlen(o->as.str.data);
-  o->refs = 1;
-
-  da_append(&vm->active_task->obj_pool, o);
-
-  return vm->active_task->obj_pool.count - 1;
+  return acquire_obj(h); // stack acquires on return
 }
 
 //////////////////////////////
@@ -173,17 +282,10 @@ task_t* load_task(program_t* p) {
       constant_t* c = &p->constants.items[i];
       switch(c->kind) {
         case DK_STR:
-          obj_t* o = malloc(sizeof(*o));
-          o->kind = OBJ_STR;
-          o->as.str.data = arena_strdup(&t->arena, c->as.s);
-          o->as.str.size = strlen(c->as.s);
-          o->refs = 1;
-
+          obj_handle_t h = make_obj_str(&t->obj_pool, c->as.s);
+          ++da_at(t->obj_pool, h).refs;
+          t->consts.data[i] = h;
           free((void*)c->as.s);
-
-          t->consts.data[i] = t->obj_pool.count;
-
-          da_append(&t->obj_pool, o);
           break;
         case DK_NUMBER:
           TODO("load_task - numeric constants");
@@ -308,6 +410,7 @@ vm_exitcode_t exec(vm_t* vm) {
       if (handle == HANDLE_INVALID) return VM_INVALID_HANDLE;
       obj_t* obj = get_obj(handle);
       PUSH(vm, obj->as.structure.fields[operand]);
+      // release_obj(handle);
       vm->ip++;
       break;
     }
@@ -326,6 +429,7 @@ vm_exitcode_t exec(vm_t* vm) {
       if (handle == HANDLE_INVALID) return VM_INVALID_HANDLE;
       obj_t* obj = get_obj(handle);
       POP(vm, obj->as.structure.fields[operand]);
+      // release_obj(handle);
       vm->ip++;
       break;
     }
@@ -488,16 +592,8 @@ vm_exitcode_t exec(vm_t* vm) {
       break;
     case INST_MKOBJ:
       operand = *(++vm->ip);
-
-      obj_t* o = malloc(sizeof(*o));
-      o->kind = OBJ_STRUCT;
-      o->as.structure.fields = malloc(sizeof(*o->as.structure.fields) * operand);
-      o->as.structure.n_fields = operand;
-      o->refs = 1;
-
-      da_append(&vm->active_task->obj_pool, o);
-
-      PUSH(vm, vm->active_task->obj_pool.count - 1);
+      obj_handle_t h = make_obj_struct(&get_active_task()->obj_pool, operand);
+      PUSH(vm, acquire_obj(h));
       vm->ip++;
       break;
     case INST_HALT:
@@ -510,11 +606,6 @@ vm_exitcode_t exec(vm_t* vm) {
       return VM_INVALID_OPCODE;
   }
   return VM_NEXT;
-}
-
-void set_active_task(task_t* t) {
-  assert(t);
-  get_vm_instance()->active_task = t;
 }
 
 // TODO: handle non-uint32_t args
