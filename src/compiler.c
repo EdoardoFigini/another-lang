@@ -32,6 +32,7 @@ const char* tok_keywords[] = {
   [KW_INTERFACE] = "interface",
   [KW_MOD]       = "mod",
   [KW_STRUCT]    = "struct",
+  [KW_TYPE]      = "type",
 };
 
 typedef enum {
@@ -120,6 +121,7 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_INTERFACE:
       case TOK_MOD:
       case TOK_STRUCT:
+      case TOK_TYPE:
         return tok_keywords[k];
       default: return "<INVALID TOKEN>";
     }
@@ -651,6 +653,7 @@ static inline bool tok_is_specifier(parser_t* p) {
     case KW_INTERFACE:
     case KW_MOD:
     case KW_STRUCT:
+    case KW_TYPE:
     default: 
       return false;
   }
@@ -677,6 +680,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
       case KW_INTERFACE:
       case KW_MOD:
       case KW_STRUCT:
+      case KW_TYPE:
       default: return flags;
     }
 
@@ -1446,6 +1450,25 @@ static inline ast_struct_t* parse_struct(parser_t* p, loc_t loc, const char* nam
   return n;
 }
 
+static inline ast_typedef_t* parse_typedef(parser_t* p, loc_t loc, const char* name) {
+  if (!expect(p, TOK_TYPE)) return NULL;
+  next(p);
+
+  ast_typedef_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_TYPEDEF;
+  n->name = arena_strdup(&p->arena, name);
+  n->loc = loc;
+
+  ast_type_t* type = parse_type(p);
+  if(!type) return NULL;
+  n->alias = type;
+
+  if (!expect(p, ';')) return NULL;
+  next(p);
+
+  return n;
+}
+
 static inline ast_root_t* parse(parser_t* p);
 
 static inline ast_mod_t* parse_mod(parser_t* p, loc_t loc, const char* name) {
@@ -1521,6 +1544,11 @@ static inline ast_root_t* parse(parser_t* p) {
         if(!submod) return NULL;
 
         da_append(&n->submods, submod);
+      } else if (tok_is(p, TOK_TYPE)) {
+        ast_typedef_t* type_alias = parse_typedef(p, loc, name);
+        if (!type_alias) return NULL;
+
+        da_append(&n->typedefs, type_alias);
       } else {
         ast_var_def_t* def = parse_var_def(p, loc, name, flags, true, attributes);
         if (!def) return NULL;
@@ -2597,10 +2625,23 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     t->current_scope = root->scope;
   }
 
+  // Add names to symbol table before resolving aliases
   da_foreach(ast_struct_t*, s, &root->structs) {
-    type_t* type = make_type(t, TYPE_STRUCT, (*s)->name, (*s)->fields.count);
+    (*s)->self_type = make_type(t, TYPE_STRUCT, (*s)->name, (*s)->fields.count);
+  }
 
-    enter_scope(t, type->scope);
+  da_foreach(ast_typedef_t*, td, &root->typedefs) {
+    if (!resolve_type_decl(t, (*td)->alias)) return false;
+
+    type_t* alias = (*td)->alias->resolved_type;
+    type_t* type = make_type(t, TYPE_ALIAS, (*td)->name, alias->size);
+    type->scope = alias->scope;
+    type->as.alias.target = alias;
+  }
+
+  // Typecheck struct fields after resolving type aliases
+  da_foreach(ast_struct_t*, s, &root->structs) {
+    enter_scope(t, (*s)->self_type->scope);
     da_foreach(ast_param_t*, f, &(*s)->fields) {
       if(!resolve_type_decl(t, (*f)->type)) return false;
 
@@ -2612,7 +2653,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       set_symbol_address(sym, da_indexof(&(*s)->fields, f));
       (*f)->symbol = sym;
 
-      da_append(&type->as.structure.fields, (*f)->type->resolved_type);
+      da_append(&(*s)->self_type->as.structure.fields, (*f)->type->resolved_type);
     }
     exit_scope(t);
   }
@@ -2686,6 +2727,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     t->current_scope = saved_scope;
 
     if (!impl_self) {
+      while (type->kind == TYPE_ALIAS) type = type->as.alias.target;
       da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
         // TODO: compare types, not just name
 

@@ -36,6 +36,7 @@ typedef enum {
   TOK_INTERFACE,
   TOK_MOD,
   TOK_STRUCT,
+  TOK_TYPE,
 } tok_kind_t;
 
 typedef enum {
@@ -50,6 +51,7 @@ typedef enum {
   KW_INTERFACE = TOK_INTERFACE,
   KW_MOD = TOK_MOD,
   KW_STRUCT = TOK_STRUCT,
+  KW_TYPE = TOK_TYPE,
 } kw_kind_t;
 
 typedef enum {
@@ -120,6 +122,7 @@ typedef enum {
   AST_IFACE,
   AST_MOD,
   AST_STRUCT,
+  AST_TYPEDEF,
 } ast_node_kind_t;
 
 #define AST_DEFAULT_FIELDS\
@@ -274,7 +277,14 @@ typedef struct {
     size_t count;
     size_t capacity;
   } fields;
+  type_t* self_type;
 } ast_struct_t;
+
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  const char* name;
+  ast_type_t* alias;
+} ast_typedef_t;
 
 typedef struct _ast_root ast_root_t;
 
@@ -370,7 +380,6 @@ struct _ast_expr_t {
         size_t count;
         size_t capacity;
       } args;
-      bool constructor;
     } funcall;
     struct {
       ast_expr_t* lhs;
@@ -464,6 +473,11 @@ struct _ast_root {
     size_t count;
     size_t capacity;
   } structs;
+  struct {
+    ast_typedef_t** items;
+    size_t count;
+    size_t capacity;
+  } typedefs;
   scope_t* scope;
 };
 
