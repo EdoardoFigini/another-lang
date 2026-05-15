@@ -23,9 +23,9 @@ Stringify: interface {
 }
 
 export main: () -> none {
-  a := Vec2(34, 20);
+  a := Vec2::new(34, 20);
 
-  b := Vec2(0,0);
+  b := Vec2 {};
   b.x = 33;
   b.y = 400;
 
@@ -33,7 +33,7 @@ export main: () -> none {
 
   print(res.to_str().c_str());
 
-  line := Line(a, Vec2(0,0));
+  line := Line::new(a, Vec2{ x=0, y=0 });
   line.p2.x = 6;
   line.p2.y = 7;
 
@@ -60,7 +60,7 @@ impl Stringify: i32 {
 
 impl core::ops::Add: Vec2 {
   add: (self: Self, other: Self) -> Self {
-    return Vec2(
+    return Vec2::new(
       self.x + other.x,
       self.y + other.y
     );
@@ -74,11 +74,8 @@ impl Stringify: Vec2 {
 }
 
 impl Self: Vec2 {
-  init: (self: Self, x: i32, y: i32) -> Self {
-    self.x = x;
-    self.y = y;
-
-    return self;
+  new: (x: i32, y: i32) -> Self {
+    return Self { x= x, y= y };
   }
 
   copy: (self: Self, other: Self) -> none {
@@ -94,10 +91,7 @@ impl Stringify: Line {
 }
 
 impl Self: Line {
-  init: (self: Self, p1: Vec2, p2: Vec2) -> Self {
-    self.p1 = p1;
-    self.p2 = p2;
-
-    return self;
+  new: (p1: Vec2, p2: Vec2) -> Self {
+    return Self { p1 = p1, p2 = p2 };
   }
 }

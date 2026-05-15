@@ -132,6 +132,14 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
           fprintf(stream, "%*srhs:\n", level + 2, "");
           __dbg_print_ast(stream, (ast_node_t*)expr->as.assign.rhs, level + 2);
           break;
+        case EXPR_MKOBJ:
+          fprintf(stream, " (%s)\n", "EXPR_MKOBJ");
+          fprintf(stream, "%*sfields:\n", level + 2, "");
+          da_foreach(struct _mkobj_field, f, &expr->as.mkobj.fields) {
+            fprintf(stream, "%*s%s:\n", level + 2, "", f->field);
+            __dbg_print_ast(stream, (ast_node_t*)f->value, level + 2);
+          }
+          break;
         default: break;
       }
       break;

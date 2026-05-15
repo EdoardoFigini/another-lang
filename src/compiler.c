@@ -704,6 +704,7 @@ const enum _bp expr_bp_table[] = {
   [OP_DIV]     = BP_MULT,
   [OP_REM]     = BP_MULT,
   [OP_CALL]    = BP_CALL,
+  [OP_MKOBJ]   = BP_CALL,
   [OP_ASSIGN]  = BP_ASSIGN,
   [OP_MEMB]    = BP_ACCESS,
   [OP_NUMOF]   = BP_UNARY,
@@ -801,8 +802,20 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
     ast_expr_t* operand = parse_expr(p, BP_UNARY);
     if(!operand) return NULL;
     n->as.unop.operand = operand;
-
-    __dbg_print_ast(stderr, (ast_node_t *)n, 0);
+  } else {
+    // fdiagf(
+    //   stderr,
+    //   DIAG_ERROR,
+    //   n->loc,
+    //   "Expected %s, %s",
+    //   tok_kind_str(&p->arena, TOK_IDENT),
+    //   tok_kind_str(&p->arena, TOK_STRLIT),
+    //   tok_kind_str(&p->arena, TOK_INTLIT),
+    //   tok_kind_str(&p->arena, TOK_REALLIT),
+    //   '(',
+    //   '#',
+    // );
+    return NULL;
   }
 
   return n;
@@ -833,6 +846,9 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
         break;
       case OP_CALL: 
         kind = EXPR_FUNCALL;
+        break;
+      case OP_MKOBJ: 
+        kind = EXPR_MKOBJ;
         break;
       case OP_ASSIGN:
         kind = EXPR_ASSIGNMENT;
@@ -926,6 +942,49 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
         n->kind = kind;
         n->as.assign.lhs = lhs;
         n->as.assign.rhs = rhs;
+
+        lhs = n;
+        break;
+      }
+      case EXPR_MKOBJ: {
+        ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
+        n->ast_kind = AST_EXPR;
+        n->loc = loc;
+        n->kind = kind;
+
+        if (!tok_is(p, '}')) {
+          if(!expect(p, TOK_IDENT)) return NULL;
+          const char* field = arena_strdup(&p->arena, get_tok(p).as.s);
+          next(p);
+
+          if(!expect(p, '=')) return NULL;
+          next(p);
+
+          ast_expr_t* value = parse_expr(p, 0);
+          if(!value) return NULL;
+          da_append(&n->as.mkobj.fields, ((struct _mkobj_field){ .field = field, .value = value }));
+
+          while(tok_is(p, ',')) {
+            if(!expect(p, ',')) return NULL;
+            next(p);
+
+            if(!expect(p, TOK_IDENT)) return NULL;
+            field = arena_strdup(&p->arena, get_tok(p).as.s);
+            next(p);
+
+            if(!expect(p, '=')) return NULL;
+            next(p);
+
+            value = parse_expr(p, 0);
+            if(!value) return NULL;
+            da_append(&n->as.mkobj.fields, ((struct _mkobj_field){ .field = field, .value = value }));
+          }
+        }
+
+        if(!expect(p, '}')) return NULL;
+        next(p);
+
+        n->as.mkobj.type = lhs;
 
         lhs = n;
         break;
@@ -1791,6 +1850,7 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
       method_name = "gt";
       break;
     case OP_CALL:
+    case OP_MKOBJ:
     case OP_MEMB:
     case OP_ASSIGN:
     case OP_NUMOF:
@@ -1865,6 +1925,7 @@ static inline symbol_t* find_unop_impl(const type_t* owner, op_kind_t op) {
     case OP_CALL:
     case OP_MEMB:
     case OP_ASSIGN:
+    case OP_MKOBJ:
     case OP_INVALID:
     default:
       UNREACHABLE("find_unnop_impl: %c - 0x%X", op, op);
@@ -2013,6 +2074,8 @@ static inline bool resolve_type_unop(typechecker_t* t, ast_expr_t* e) {
 }
 
 static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
+  if (!expr) return false;
+
   expr->is_const = false;
   switch(expr->kind) {
     case EXPR_SYMBOL:
@@ -2124,36 +2187,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       size_t n_args = expr->as.funcall.args.count;
       size_t n_hidden_args = 0;
 
-      if (callee->type->kind == TYPE_TYPE) {
-        symbol_t* init = resolve_field(callee->type->scope, "init");
-        if (!init) {
-          fdiagf(
-            stderr,
-            DIAG_ERROR,
-            expr->loc,
-            "No method `init` defined for `%s`.",
-            type_to_str(&t->arena, callee->type)
-          );
-          return false;
-        }
-
-        // TODO: make ast arena contained in the tree itself, avoid allocating nodes in different
-        // arenas
-        ast_expr_t* n = arena_alloc(&t->arena, sizeof(*n));
-        n->ast_kind = AST_EXPR;
-        n->loc = callee->loc;
-        n->kind = EXPR_SYMBOL;
-        n->as.symbol.resolved_symbol = init;
-        n->type = init->type; 
-
-        expr->as.funcall.callee = n;
-        expr->as.funcall.constructor = true;
-
-        callee = n;
-
-        // fake self obtained by MKOBJ instruction
-        n_hidden_args = 1;
-      } else if (callee->kind == EXPR_ACCESS) {
+      if (callee->kind == EXPR_ACCESS) {
         // fake self obtained by member access
         n_hidden_args = 1;
       }
@@ -2241,10 +2275,55 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         return false;
       }
 
-      // TODO: convert assignment of struct a = b to a.copy(b)
-      // ensure Copyable interface for struct
-
       expr->type = t->builtins.none;
+      return true;
+    case EXPR_MKOBJ:
+      ast_expr_t* type = expr->as.mkobj.type;
+      if(!typecheck_expr(t, type)) return false;
+
+      size_t n_fields = expr->as.mkobj.fields.count;
+
+      if (type->type->kind != TYPE_TYPE) {
+        fdiagf(stderr, DIAG_ERROR, type->loc, "Unrecognized type `%s`.", type_to_str(&t->arena, type->type));
+        return false;
+      }
+
+      for(size_t i = 0; i < n_fields; i++) {
+        struct _mkobj_field *f = &da_at(expr->as.mkobj.fields, i);
+        if(!typecheck_expr(t, f->value)) return false;
+
+        symbol_t* s = resolve_field(type->type->as.type.of->scope, f->field);
+        if (!s) {
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            expr->loc,
+            "`%s` has no field named `%s`.",
+            type_to_str(&t->arena, type->type),
+            f->field
+          );
+          return false;
+        }
+        f->symbol =  s;
+
+        type_t const* a = f->value->type;
+        type_t const* b = s->type; 
+
+        if (!type_equals(*a, *b)) {
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            f->value->loc,
+            "Incompatible types when initializing field `%s` of type `%s` using type `%s`.", 
+            f->field,
+            type_to_str(&t->arena, b),
+            type_to_str(&t->arena, a)
+          );
+          return false;
+        }
+      }
+
+      expr->type = type->type->as.type.of; 
       return true;
     default:
       UNREACHABLE("typecheck_expr");
@@ -2311,7 +2390,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         type = stmt->as.var_def->type->resolved_type;
       }
       assert(type); 
-      if (strcmp(type->name, "Self") == 0) type = type->as.alias.target;
+      if (type->name && strcmp(type->name, "Self") == 0) type = type->as.alias.target;
       stmt->as.var_def->symbol = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, stmt->as.var_def->name, (type_t*)type);
 
       if( stmt->as.var_def->flags & SPEC_EXTERN ) {
@@ -2602,21 +2681,6 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
         }
       }
       if(!resolve_func_def(t, *method)) return false;
-
-      if(
-          (*method)->symbol->type->as.func.params.count < 1 || 
-          !type_equals(*(*method)->symbol->type->as.func.params.items[0], *self)
-      ) {
-        fdiagf(stderr, DIAG_ERROR, (*method)->sig->loc, "Method `%s` requires `Self` aka `%s` first argument.", (*method)->name, type_to_str(&t->arena, type));
-        return false;
-      }
-
-      if (strcmp((*method)->name, "init") == 0) {
-        if (!type_equals(*(*method)->symbol->type->as.func.ret, *self)) {
-          fdiagf(stderr, DIAG_ERROR, (*method)->sig->ret->loc, "Method `%s` requires `Self` aka `%s` return type.", (*method)->name, type_to_str(&t->arena, type));
-          return false;
-        }
-      }
     }
 
     t->current_scope = saved_scope;
@@ -2771,6 +2835,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           case OP_MEMB:
           case OP_ASSIGN:
           case OP_CALL:
+          case OP_MKOBJ:
           case OP_INVALID:
           case OP_NUMOF:
           case OP_NOT:
@@ -2805,6 +2870,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           case OP_MEMB:
           case OP_ASSIGN:
           case OP_CALL:
+          case OP_MKOBJ:
           case OP_INVALID:
           default:
             UNREACHABLE("codegen expr: Invalid binary operation: %d", e->as.unop.op);
@@ -2835,11 +2901,6 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           symbol = callee->as.access.field_symbol;
         } else {
           TODO("codegen_expr: EXPR_FUNCALL - callee not a symbol");
-        }
-
-        if (e->as.funcall.constructor) {
-          da_append(&p->code, INST_MKOBJ);
-          da_append(&p->code, symbol->type->size);
         }
 
         da_append(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
@@ -2885,29 +2946,27 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         }
         break;
       }
+      case EXPR_MKOBJ: {
+        da_append(&p->code, INST_MKOBJ);
+        da_append(&p->code, e->as.mkobj.type->type->size);
+
+        da_foreach(struct _mkobj_field, f, &e->as.mkobj.fields) {
+          da_append(&p->code, INST_DUP);
+
+          if(!codegen_expr(p, scope, f->value)) return false;
+
+          da_append(&p->code, INST_SWAP); // maybe better to swap the pop logic in VM
+          da_append(&p->code, INST_STOREF);
+          da_append(&p->code, f->symbol->addr);
+        }
+
+        break;
+      }
       default:
         UNREACHABLE("codegen_expr");
   }
 
   return true;
-}
-
-static inline void codegen_struct_instantiate(program_t* p, type_t* s) {
-  da_append(&p->code, INST_MKOBJ);
-  da_append(&p->code, s->size);
-
-  for (size_t i = 0; i < s->as.structure.fields.count; i++) {
-    if (s->as.structure.fields.items[i]->kind == TYPE_STRUCT) {
-      da_append(&p->code, INST_DUP);
-
-      codegen_struct_instantiate(p, s->as.structure.fields.items[i]);
-
-      da_append(&p->code, INST_SWAP);
-
-      da_append(&p->code, INST_STOREF);
-      da_append(&p->code, i);
-    }
-  }
 }
 
 static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_stmt_t* s) {
@@ -3116,6 +3175,7 @@ static inline int codegen(program_t* p, ast_root_t* root) {
         case EXPR_FUNCALL:
         case EXPR_SUBEXPR:
         case EXPR_ASSIGNMENT:
+        case EXPR_MKOBJ:
         default:
           UNREACHABLE("codegen - var initialization (messed up typechecker?)");
       }

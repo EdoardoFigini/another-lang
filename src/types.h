@@ -301,6 +301,7 @@ typedef enum {
   OP_MEMB    = '.',
   OP_NUMOF   = '#',
   OP_NOT     = '!',
+  OP_MKOBJ   = '{',
 } op_kind_t;
 
 enum _bp {
@@ -325,6 +326,7 @@ typedef enum {
   EXPR_FUNCALL,
   EXPR_SUBEXPR,
   EXPR_ASSIGNMENT,
+  EXPR_MKOBJ,
 } ast_expr_kind_t;
 
 struct _ast_expr_t {
@@ -374,6 +376,18 @@ struct _ast_expr_t {
       ast_expr_t* lhs;
       ast_expr_t* rhs;
     } assign;
+    struct {
+      ast_expr_t* type;
+      struct {
+        struct _mkobj_field {
+          const char* field;
+          ast_expr_t* value;
+          symbol_t* symbol;
+        }* items;
+        size_t count;
+        size_t capacity;
+      } fields;
+    } mkobj;
     ast_expr_t* subexpr;
   } as;
 };
