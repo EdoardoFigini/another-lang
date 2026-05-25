@@ -3,9 +3,11 @@ Vec2: struct {
   y: i32;
 }
 
+Point: type Vec2;
+
 Line: struct {
-  p1: Vec2;
-  p2: Vec2;
+  p1: Point;
+  p2: Point;
 }
 
 extern print: (s: addr) -> i32;
@@ -23,9 +25,9 @@ Stringify: interface {
 }
 
 export main: () -> none {
-  a := Vec2::new(34, 20);
+  a := Vec2::make(34, 20);
 
-  b := Vec2 {};
+  b := new Vec2{};
   b.x = 33;
   b.y = 400;
 
@@ -33,7 +35,7 @@ export main: () -> none {
 
   print(res.to_str().c_str());
 
-  line := Line::new(a, Vec2{ x=0, y=0 });
+  line := Line::make(a, new Point{ x=0, y=0 });
   line.p2.x = 6;
   line.p2.y = 7;
 
@@ -60,7 +62,7 @@ impl Stringify: i32 {
 
 impl core::ops::Add: Vec2 {
   add: (self: Self, other: Self) -> Self {
-    return Vec2::new(
+    return Vec2::make(
       self.x + other.x,
       self.y + other.y
     );
@@ -74,8 +76,8 @@ impl Stringify: Vec2 {
 }
 
 impl Self: Vec2 {
-  new: (x: i32, y: i32) -> Self {
-    return Self { x= x, y= y };
+  make: (x: i32, y: i32) -> Self {
+    return new Self { x= x, y= y };
   }
 
   copy: (self: Self, other: Self) -> none {
@@ -91,7 +93,7 @@ impl Stringify: Line {
 }
 
 impl Self: Line {
-  new: (p1: Vec2, p2: Vec2) -> Self {
-    return Self { p1 = p1, p2 = p2 };
+  make: (p1: Vec2, p2: Vec2) -> Self {
+    return new Self { p1 = p1, p2 = p2 };
   }
 }

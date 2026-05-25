@@ -37,6 +37,7 @@ typedef enum {
   TOK_MOD,
   TOK_STRUCT,
   TOK_TYPE,
+  TOK_NEW,
 } tok_kind_t;
 
 typedef enum {
@@ -52,6 +53,7 @@ typedef enum {
   KW_MOD = TOK_MOD,
   KW_STRUCT = TOK_STRUCT,
   KW_TYPE = TOK_TYPE,
+  KW_NEW = TOK_NEW,
 } kw_kind_t;
 
 typedef enum {
@@ -311,7 +313,7 @@ typedef enum {
   OP_MEMB    = '.',
   OP_NUMOF   = '#',
   OP_NOT     = '!',
-  OP_MKOBJ   = '{',
+  OP_INDEX   = '[',
 } op_kind_t;
 
 enum _bp {
@@ -337,6 +339,8 @@ typedef enum {
   EXPR_SUBEXPR,
   EXPR_ASSIGNMENT,
   EXPR_MKOBJ,
+  EXPR_MKARR,
+  EXPR_INDEX,
 } ast_expr_kind_t;
 
 struct _ast_expr_t {
@@ -397,6 +401,18 @@ struct _ast_expr_t {
         size_t capacity;
       } fields;
     } mkobj;
+    struct {
+      struct {
+        ast_expr_t** items;
+        size_t count;
+        size_t capacity;
+      } elems;
+      ast_expr_t* repeat;
+    } mkarr;
+    struct {
+      ast_expr_t* expr;
+      ast_expr_t* idx;
+    } index;
     ast_expr_t* subexpr;
   } as;
 };
@@ -671,14 +687,16 @@ typedef uint32_t instruction_t; enum {
   INST_DUP,
   INST_SWAP,
 
-  INST_LOAD,
-  INST_LOADG,
-  INST_LOADC,
-  INST_LOADF,
-  INST_STORE,
-  INST_STOREG,
-  INST_STOREF,
-
+  INST_LOAD,   // load local var
+  INST_LOADG,  // load global var
+  INST_LOADC,  // load constant
+  INST_LOADF,  // load field
+  INST_LOADI,  // load item
+  INST_STORE,  // store local var
+  INST_STOREG, // store global var
+  INST_STOREF, // store field
+  INST_STOREI, // store item
+ 
   INST_JMP,
   INST_JNZ,
   INST_JZ,
@@ -870,6 +888,7 @@ typedef enum {
   VM_CALL_STACK_OVERFLOW,
   VM_UNDEFINED_EXTERN,
   VM_UNDEFINED_EXPORT,
+  VM_OUT_OF_RANGE,
 } vm_exitcode_t;
 
 #endif

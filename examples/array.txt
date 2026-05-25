@@ -1,0 +1,43 @@
+extern print: (s: addr) -> i32;
+
+core: mod {
+  ops: mod {
+    Add: interface {
+      add: (self: Self, other: Self) -> Self;
+    }
+  }
+}
+
+Stringify: interface {
+  to_str: (self: Self) -> str;
+}
+
+impl Stringify: i32 {
+  [[name="i32__to_str"]]
+  extern to_str: (self: Self) -> str;
+}
+
+impl core::ops::Add: str {
+  add: (self: Self, other: Self) -> Self {
+    return self.concat(other);
+  }
+}
+
+impl Self: str {
+  [[name="str__concat"]]
+  extern concat: (self: Self, other: Self) -> Self;
+  [[name="str__c_str"]]
+  extern c_str: (self: Self) -> addr;
+}
+
+// ==================== 
+
+export main: () -> none {
+  xs := [0; 5u]; // Rust style repeat
+  xs[2] = -1;
+  i := 0;
+  while (i < 5) {
+    print(xs[i].to_str().c_str());
+    i = i + 1;
+  }
+}

@@ -33,6 +33,7 @@ const char* tok_keywords[] = {
   [KW_MOD]       = "mod",
   [KW_STRUCT]    = "struct",
   [KW_TYPE]      = "type",
+  [KW_NEW]       = "new",
 };
 
 typedef enum {
@@ -122,6 +123,7 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_MOD:
       case TOK_STRUCT:
       case TOK_TYPE:
+      case TOK_NEW:
         return tok_keywords[k];
       default: return "<INVALID TOKEN>";
     }
@@ -654,6 +656,7 @@ static inline bool tok_is_specifier(parser_t* p) {
     case KW_MOD:
     case KW_STRUCT:
     case KW_TYPE:
+    case KW_NEW:
     default: 
       return false;
   }
@@ -681,6 +684,7 @@ static inline spec_flags_t parse_specifiers(parser_t* p) {
       case KW_MOD:
       case KW_STRUCT:
       case KW_TYPE:
+      case KW_NEW:
       default: return flags;
     }
 
@@ -708,9 +712,9 @@ const enum _bp expr_bp_table[] = {
   [OP_DIV]     = BP_MULT,
   [OP_REM]     = BP_MULT,
   [OP_CALL]    = BP_CALL,
-  [OP_MKOBJ]   = BP_CALL,
   [OP_ASSIGN]  = BP_ASSIGN,
   [OP_MEMB]    = BP_ACCESS,
+  [OP_INDEX]   = BP_ACCESS,
   [OP_NUMOF]   = BP_UNARY,
   [OP_NOT]     = BP_UNARY,
 };
@@ -737,6 +741,7 @@ static inline ast_qn_t* parse_qualified_name(parser_t* p) {
 }
 
 static inline ast_expr_t* parse_expr(parser_t* p, int bp);
+static inline ast_type_t* parse_type(parser_t* p);
 
 static inline bool tok_is_unop(parser_t* p) {
   return tok_is(p, (tok_kind_t)OP_NUMOF) || 
@@ -806,19 +811,88 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
     ast_expr_t* operand = parse_expr(p, BP_UNARY);
     if(!operand) return NULL;
     n->as.unop.operand = operand;
+  } else if (tok_is(p, '[')) {
+    n->kind = EXPR_MKARR;
+
+    if(!expect(p, '[')) return NULL;
+    next(p);
+
+    ast_expr_t* elem = parse_expr(p, 0);
+    if (!elem) return NULL;
+    da_append(&n->as.mkarr.elems, elem);
+
+    if (tok_is(p, ';')) {
+      if(!expect(p, ';')) return NULL;
+      next(p);
+
+      elem = parse_expr(p, 0);
+      if (!elem) return NULL;
+      n->as.mkarr.repeat = elem;
+    } else {
+      while (tok_is(p, ',')) {
+        if(!expect(p, ',')) return NULL;
+        next(p);
+
+        elem = parse_expr(p, 0);
+        if (!elem) return NULL;
+        da_append(&n->as.mkarr.elems, elem);
+      }
+    }
+
+    if(!expect(p, ']')) return NULL;
+    next(p);
+  } else if (tok_is(p, TOK_NEW)) {
+    n->kind = EXPR_MKOBJ;
+
+    if (!expect(p, TOK_NEW)) return NULL;
+    next(p);
+
+    ast_expr_t* type = parse_expr(p, 0);
+    if(!type) return NULL;
+    n->as.mkobj.type = type;
+
+    if (!expect(p, '{')) return NULL;
+    next(p);
+
+    if (!tok_is(p, '}')) {
+      if(!expect(p, TOK_IDENT)) return NULL;
+      const char* field = arena_strdup(&p->arena, get_tok(p).as.s);
+      next(p);
+
+      if(!expect(p, '=')) return NULL;
+      next(p);
+
+      ast_expr_t* value = parse_expr(p, 0);
+      if(!value) return NULL;
+      da_append(&n->as.mkobj.fields, ((struct _mkobj_field){ .field = field, .value = value }));
+
+      while(tok_is(p, ',')) {
+        if(!expect(p, ',')) return NULL;
+        next(p);
+
+        if(!expect(p, TOK_IDENT)) return NULL;
+        field = arena_strdup(&p->arena, get_tok(p).as.s);
+        next(p);
+
+        if(!expect(p, '=')) return NULL;
+        next(p);
+
+        value = parse_expr(p, 0);
+        if(!value) return NULL;
+        da_append(&n->as.mkobj.fields, ((struct _mkobj_field){ .field = field, .value = value }));
+      }
+    }
+
+    if(!expect(p, '}')) return NULL;
+    next(p);
   } else {
-    // fdiagf(
-    //   stderr,
-    //   DIAG_ERROR,
-    //   n->loc,
-    //   "Expected %s, %s",
-    //   tok_kind_str(&p->arena, TOK_IDENT),
-    //   tok_kind_str(&p->arena, TOK_STRLIT),
-    //   tok_kind_str(&p->arena, TOK_INTLIT),
-    //   tok_kind_str(&p->arena, TOK_REALLIT),
-    //   '(',
-    //   '#',
-    // );
+    fdiagf(
+      stderr,
+      DIAG_ERROR,
+      n->loc,
+      "Unexpected token %s.",
+      tok_kind_str(&p->arena, get_tok(p).kind)
+    );
     return NULL;
   }
 
@@ -851,14 +925,14 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
       case OP_CALL: 
         kind = EXPR_FUNCALL;
         break;
-      case OP_MKOBJ: 
-        kind = EXPR_MKOBJ;
-        break;
       case OP_ASSIGN:
         kind = EXPR_ASSIGNMENT;
         break;
       case OP_MEMB: 
         kind = EXPR_ACCESS;
+        break;
+      case OP_INDEX: 
+        kind = EXPR_INDEX;
         break;
       case OP_INVALID:
       case OP_NUMOF:
@@ -950,46 +1024,20 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
         lhs = n;
         break;
       }
-      case EXPR_MKOBJ: {
+      case EXPR_INDEX: {
         ast_expr_t *n = arena_alloc(&p->arena, sizeof(*n));
         n->ast_kind = AST_EXPR;
         n->loc = loc;
         n->kind = kind;
 
-        if (!tok_is(p, '}')) {
-          if(!expect(p, TOK_IDENT)) return NULL;
-          const char* field = arena_strdup(&p->arena, get_tok(p).as.s);
-          next(p);
+        ast_expr_t* idx = parse_expr(p, 0);
+        if(!idx) return NULL;
+        n->as.index.idx = idx;
+        n->as.index.expr = lhs;
 
-          if(!expect(p, '=')) return NULL;
-          next(p);
-
-          ast_expr_t* value = parse_expr(p, 0);
-          if(!value) return NULL;
-          da_append(&n->as.mkobj.fields, ((struct _mkobj_field){ .field = field, .value = value }));
-
-          while(tok_is(p, ',')) {
-            if(!expect(p, ',')) return NULL;
-            next(p);
-
-            if(!expect(p, TOK_IDENT)) return NULL;
-            field = arena_strdup(&p->arena, get_tok(p).as.s);
-            next(p);
-
-            if(!expect(p, '=')) return NULL;
-            next(p);
-
-            value = parse_expr(p, 0);
-            if(!value) return NULL;
-            da_append(&n->as.mkobj.fields, ((struct _mkobj_field){ .field = field, .value = value }));
-          }
-        }
-
-        if(!expect(p, '}')) return NULL;
+        if (!expect(p, ']')) return NULL;
         next(p);
-
-        n->as.mkobj.type = lhs;
-
+        
         lhs = n;
         break;
       }
@@ -998,6 +1046,8 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
       case EXPR_STRING:
       case EXPR_NUMBER:
       case EXPR_SUBEXPR:
+      case EXPR_MKOBJ:
+      case EXPR_MKARR:
       default:
         UNREACHABLE("parse_expr");
     }
@@ -1583,9 +1633,10 @@ static inline int type_equals(type_t a, type_t b) {
     case TYPE_BOOL:
     case TYPE_CHAR:
     case TYPE_STR:
-    case TYPE_ARRAY:
     case TYPE_ADDR:
       return 1;
+    case TYPE_ARRAY:
+      return type_equals(*a.as.array.inner, *b.as.array.inner);
     case TYPE_STRUCT:
     case TYPE_MODULE:
       return strcmp(a.name, b.name) == 0;
@@ -1608,6 +1659,12 @@ static inline int type_equals(type_t a, type_t b) {
   }
 }
 
+static bool type_is_of_kind(const type_t* type, type_kind_t kind) {
+  // TODO: what if checking alias? -> early return
+  while (type->kind == TYPE_ALIAS) type = type->as.alias.target;
+  return type->kind == kind;
+}
+
 void render_type(sb_t* sb, const type_t* t) {
   if(!t) UNREACHABLE("render_type: null type*");
   switch(t->kind) {
@@ -1622,7 +1679,6 @@ void render_type(sb_t* sb, const type_t* t) {
     case TYPE_CHAR:
     case TYPE_STR:
     case TYPE_ADDR:
-    case TYPE_ALIAS:
     case TYPE_STRUCT:
     case TYPE_MODULE:
     case TYPE_INTERFACE:
@@ -1643,6 +1699,12 @@ void render_type(sb_t* sb, const type_t* t) {
       break;
     case TYPE_TYPE:
       sb_appendf(sb, "type %s", t->name);
+      break;
+    case TYPE_ALIAS:
+      sb_appendf(sb, "%s", t->name);
+      // sb_appendf(sb, " (", t->name);
+      // render_type(sb, t->as.alias.target);
+      // sb_appendf(sb, ")", t->name);
       break;
     case TYPES_COUNT:
     default: break;
@@ -1704,7 +1766,7 @@ static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* nam
 static inline type_t* get_or_create_array_of(typechecker_t* t, const type_t* type) {
   // OPTIMIZE
   da_foreach(type_t*, typ, &t->custom_types) {
-    if ((*typ)->kind == TYPE_ARRAY && type_equals(*(*typ)->as.array.inner, *type)) return *typ;
+    if (type_is_of_kind(*typ, TYPE_ARRAY) && type_equals(*(*typ)->as.array.inner, *type)) return *typ;
   }
 
   type_t* typ = make_type(t, TYPE_ARRAY, NULL, 1);
@@ -1878,12 +1940,12 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
       method_name = "gt";
       break;
     case OP_CALL:
-    case OP_MKOBJ:
     case OP_MEMB:
     case OP_ASSIGN:
     case OP_NUMOF:
     case OP_NOT:
     case OP_INVALID:
+    case OP_INDEX:
     default:
       UNREACHABLE("find_binop_impl");
   }
@@ -1953,8 +2015,8 @@ static inline symbol_t* find_unop_impl(const type_t* owner, op_kind_t op) {
     case OP_CALL:
     case OP_MEMB:
     case OP_ASSIGN:
-    case OP_MKOBJ:
     case OP_INVALID:
+    case OP_INDEX:
     default:
       UNREACHABLE("find_unnop_impl: %c - 0x%X", op, op);
   }
@@ -2191,7 +2253,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         return false;
       }
 
-      if (expr->as.access.owner->type->kind == TYPE_TYPE) {
+      if (type_is_of_kind(expr->as.access.owner->type, TYPE_TYPE)) {
         fdiagf(
           stderr,
           DIAG_ERROR,
@@ -2220,7 +2282,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         n_hidden_args = 1;
       }
 
-      if (callee->type->kind != TYPE_FUNC) {
+      if (!type_is_of_kind(callee->type, TYPE_FUNC)) {
         fdiagf(stderr, DIAG_ERROR, callee->loc, "Cannot call non-callable type `%s`", type_to_str(&t->arena, callee->type));
         return false;
       }
@@ -2280,26 +2342,27 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       expr->is_const = expr->as.subexpr->is_const;
       return true; 
     case EXPR_ASSIGNMENT:
-      if(!typecheck_expr(t, expr->as.binop.lhs)) return false;
-      if(!typecheck_expr(t, expr->as.binop.rhs)) return false;
+      if(!typecheck_expr(t, expr->as.assign.lhs)) return false;
+      if(!typecheck_expr(t, expr->as.assign.rhs)) return false;
 
-      if(!type_equals(*expr->as.binop.lhs->type, *expr->as.binop.rhs->type)) {
+      if(!type_equals(*expr->as.assign.lhs->type, *expr->as.assign.rhs->type)) {
         fdiagf(
           stderr,
           DIAG_ERROR,
-          expr->as.binop.rhs->loc,
+          expr->as.assign.rhs->loc,
           "Incompatible types when assigning expression of type `%s` to variable of type `%s`.",
-          type_to_str(&t->arena, expr->as.binop.rhs->type),
-          type_to_str(&t->arena, expr->as.binop.lhs->type )
+          type_to_str(&t->arena, expr->as.assign.rhs->type),
+          type_to_str(&t->arena, expr->as.assign.lhs->type )
         );
         return false;
       }
 
       if(
-        expr->as.binop.lhs->kind != EXPR_ACCESS &&
-        expr->as.binop.lhs->kind != EXPR_SYMBOL
+        expr->as.assign.lhs->kind != EXPR_ACCESS &&
+        expr->as.assign.lhs->kind != EXPR_INDEX  &&
+        expr->as.assign.lhs->kind != EXPR_SYMBOL
       ) {
-        fdiagf(stderr, DIAG_ERROR, expr->as.binop.lhs->loc, "Assignement only possible for lvalues.");
+        fdiagf(stderr, DIAG_ERROR, expr->as.assign.lhs->loc, "Assignement only possible for lvalues.");
         return false;
       }
 
@@ -2311,7 +2374,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
 
       size_t n_fields = expr->as.mkobj.fields.count;
 
-      if (type->type->kind != TYPE_TYPE) {
+      if (!type_is_of_kind(type->type, TYPE_TYPE)) {
         fdiagf(stderr, DIAG_ERROR, type->loc, "Unrecognized type `%s`.", type_to_str(&t->arena, type->type));
         return false;
       }
@@ -2352,6 +2415,93 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       }
 
       expr->type = type->type->as.type.of; 
+      return true;
+    case EXPR_MKARR:
+      const type_t* inner_type = NULL;
+
+      if (expr->as.mkarr.repeat) {
+        if(!typecheck_expr(t, da_at(expr->as.mkarr.elems, 0))) return NULL;
+        inner_type = da_at(expr->as.mkarr.elems, 0)->type;
+
+        if(!typecheck_expr(t, expr->as.mkarr.repeat)) return false;
+
+        if(!expr->as.mkarr.repeat->is_const) {
+          fdiagf(stderr, DIAG_ERROR, expr->as.mkarr.repeat->loc, "Repeat is not a compile-time constant.");
+          return false;
+        }
+
+        if(
+          !type_equals(*expr->as.mkarr.repeat->type, *t->builtins.u32) &&
+          !type_equals(*expr->as.mkarr.repeat->type, *t->builtins.u64)
+        ) {
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            expr->as.mkarr.repeat->loc,
+            "Mismatched type: expected `%s` or `%s`, got `%s`.",
+            type_to_str(&t->arena, t->builtins.u32),
+            type_to_str(&t->arena, t->builtins.u64),
+            type_to_str(&t->arena, expr->as.mkarr.repeat->type)
+          );
+          return false;
+        }
+      } else {
+        da_foreach(ast_expr_t*, e, &expr->as.mkarr.elems) {
+          if (!typecheck_expr(t, *e)) return NULL;
+          if (inner_type == NULL) inner_type = (*e)->type;
+          else {
+            if (!type_equals(*(*e)->type, *inner_type)) {
+              fdiagf(
+                stderr,
+                DIAG_ERROR,
+                (*e)->loc,
+                "Mismatched type: expected `%s`, got `%s`.",
+                type_to_str(&t->arena, inner_type),
+                type_to_str(&t->arena, (*e)->type)
+              );
+            }
+          }
+        }
+      }
+      expr->type = get_or_create_array_of(t, inner_type);
+      return true;
+    case EXPR_INDEX:
+      if (!typecheck_expr(t, expr->as.index.expr)) return NULL;
+      // TODO: Indexable interface 
+      if (!type_is_of_kind(expr->as.index.expr->type, TYPE_ARRAY)) {
+        fdiagf(
+          stderr,
+          DIAG_ERROR,
+          expr->as.index.expr->loc,
+          "Cannot index into value of type `%s`.",
+          type_to_str(&t->arena, expr->as.index.expr->type)
+        );
+        return false;
+      }
+
+      if (!typecheck_expr(t, expr->as.index.idx)) return NULL;
+      // TODO: Range type
+      if(
+        !type_equals(*expr->as.index.idx->type, *t->builtins.u32) &&
+        !type_equals(*expr->as.index.idx->type, *t->builtins.u64) &&
+        !type_equals(*expr->as.index.idx->type, *t->builtins.i32) &&
+        !type_equals(*expr->as.index.idx->type, *t->builtins.i64)
+      ) {
+        fdiagf(
+          stderr,
+          DIAG_ERROR,
+          expr->as.index.idx->loc,
+          "Mismatched type when indexing array-like object: expected `%s`, `%s`, `%s` or `%s`, got `%s`.",
+          type_to_str(&t->arena, t->builtins.u32),
+          type_to_str(&t->arena, t->builtins.u64),
+          type_to_str(&t->arena, t->builtins.i32),
+          type_to_str(&t->arena, t->builtins.i64),
+          type_to_str(&t->arena, expr->as.index.idx->type)
+        );
+        return false;
+      }
+  
+      expr->type = expr->as.index.expr->type->as.array.inner;
       return true;
     default:
       UNREACHABLE("typecheck_expr");
@@ -2694,7 +2844,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
     if(!impl_self) {
       if (!resolve_type_decl(t, (*impl)->interface)) return false;
-      if ((*impl)->interface->resolved_type->kind != TYPE_INTERFACE) {
+      if (!type_is_of_kind((*impl)->interface->resolved_type, TYPE_INTERFACE)) {
         fdiagf(stderr, DIAG_ERROR, (*impl)->interface->loc, "`%s` is not an interface", qn_to_str(&t->arena, (*impl)->interface->name));
         return false;
       }
@@ -2702,6 +2852,13 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
     if(!resolve_type_decl(t, (*impl)->type)) return false;
     type_t* type = (*impl)->type->resolved_type;
+
+    // TODO: Temporary. I'll come back to this when I implement GENERICS
+    // (Rust style blanket implementations impl <iface>: T[] {...})
+    if (type_is_of_kind(type, TYPE_ARRAY)) {
+      fdiagf(stderr, DIAG_ERROR, (*impl)->type->loc, "Cannot define implementations for raw array type `%s`. Consider wrapping it in an alias.", type_to_str(&t->arena, type));
+      return false;
+    }
 
     scope_t* saved_scope = t->current_scope;
     enter_scope(t, type->scope);
@@ -2877,10 +3034,10 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           case OP_MEMB:
           case OP_ASSIGN:
           case OP_CALL:
-          case OP_MKOBJ:
           case OP_INVALID:
           case OP_NUMOF:
           case OP_NOT:
+          case OP_INDEX:
           default:
             UNREACHABLE("codegen expr: Invalid binary operation: %d", e->as.binop.op);
         }
@@ -2912,8 +3069,8 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           case OP_MEMB:
           case OP_ASSIGN:
           case OP_CALL:
-          case OP_MKOBJ:
           case OP_INVALID:
+          case OP_INDEX:
           default:
             UNREACHABLE("codegen expr: Invalid binary operation: %d", e->as.unop.op);
         }
@@ -2978,11 +3135,15 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
             default: 
               UNREACHABLE("codegen_expr");
           }
-        } else if (lhs->kind == EXPR_ACCESS && lhs->as.access.op == OP_MEMB) {
+        } else if (lhs->kind == EXPR_ACCESS) {
           symbol_t* symbol = lhs->as.access.field_symbol;
           if(!codegen_expr(p, scope, e->as.assign.lhs->as.access.owner)) return false;
           da_append(&p->code, INST_STOREF);
           da_append(&p->code, symbol->addr);
+        } else if (lhs->kind == EXPR_INDEX) {
+          if(!codegen_expr(p, scope, lhs->as.index.expr)) return false;
+          if(!codegen_expr(p, scope, lhs->as.index.idx)) return false;
+          da_append(&p->code, INST_STOREI);
         } else {
           TODO("codegen_expr - assignment: unsupported lhs");
         }
@@ -3001,7 +3162,46 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           da_append(&p->code, INST_STOREF);
           da_append(&p->code, f->symbol->addr);
         }
+        // other value should be set to INVALID_HANDLE
 
+        break;
+      }
+      case EXPR_MKARR: {
+        da_append(&p->code, INST_MKOBJ);
+        if (e->as.mkarr.repeat) {
+          uint64_t repeat = e->as.mkarr.repeat->as.number.u; // is constant
+          da_append(&p->code, repeat);
+
+          for (size_t i = 0; i < repeat; i++) {
+            da_append(&p->code, INST_DUP);
+
+            if(!codegen_expr(p, scope, *e->as.mkarr.elems.items)) return false;
+
+            da_append(&p->code, INST_SWAP); // maybe better to swap the pop logic in VM
+            da_append(&p->code, INST_STOREF);
+            da_append(&p->code, i);
+          }
+        } else {
+          da_append(&p->code, e->as.mkarr.elems.count);
+
+          for (size_t i=0; i < e->as.mkarr.elems.count; i++) {
+            da_append(&p->code, INST_DUP);
+
+            if(!codegen_expr(p, scope, da_at(e->as.mkarr.elems, i))) return false;
+
+            da_append(&p->code, INST_SWAP); // maybe better to swap the pop logic in VM
+            da_append(&p->code, INST_STOREF);
+            da_append(&p->code, i);
+          }
+        }
+         
+        break;
+      }
+      case EXPR_INDEX: {
+        if (!codegen_expr(p, scope, e->as.index.expr)) return false;
+
+        if (!codegen_expr(p, scope, e->as.index.idx)) return false;
+        da_append(&p->code, INST_LOADI);
         break;
       }
       default:
@@ -3218,6 +3418,8 @@ static inline int codegen(program_t* p, ast_root_t* root) {
         case EXPR_SUBEXPR:
         case EXPR_ASSIGNMENT:
         case EXPR_MKOBJ:
+        case EXPR_MKARR:
+        case EXPR_INDEX:
         default:
           UNREACHABLE("codegen - var initialization (messed up typechecker?)");
       }
@@ -3300,7 +3502,7 @@ static inline bool compile(program_t* program, const char* path, const sb_t* sou
   if(!codegen(program, root)) return false;
   fprintf(stdout, "%s%s\033[0m Codegen OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
-  // __dbg_print_symbol_table(stdout, root->scope);
+  __dbg_print_symbol_table(stdout, root->scope);
 
   __dbg_print_disass(stdout, program, root->scope);
 

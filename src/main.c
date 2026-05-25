@@ -45,6 +45,7 @@ int main(int argc, char** argv) {
     case VM_CALL_STACK_OVERFLOW:  sb_appendf(&sb, "CALL_STACK_OVERFLOW");  break;
     case VM_UNDEFINED_EXTERN:     sb_appendf(&sb, "UNDEFINED_EXTERN");     break;
     case VM_UNDEFINED_EXPORT:     sb_appendf(&sb, "UNDEFINED_EXPORT");     break;
+    case VM_OUT_OF_RANGE:         sb_appendf(&sb, "OUT_OF_RANGE");         break;
   }
   sb_appendf(&sb, ".\n");
   fprintf(stdout, "%.*s", SB_FMT(sb));

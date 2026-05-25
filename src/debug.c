@@ -38,6 +38,7 @@ void __dbg_print_tok(FILE* stream, token_t tok) {
       case TOK_MOD: fprintf(stream, "%-20s", "TOK_MOD"); break;
       case TOK_STRUCT: fprintf(stream, "%-20s", "TOK_STRUCT"); break;
       case TOK_TYPE: fprintf(stream, "%-20s", "TOK_TYPE"); break;
+      case TOK_NEW: fprintf(stream, "%-20s", "TOK_NEW"); break;
       default: fprintf(stream, "%-20s", "<INVALID TOKEN>"); break;
     }
   }
@@ -141,6 +142,14 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
             __dbg_print_ast(stream, (ast_node_t*)f->value, level + 2);
           }
           break;
+        case EXPR_MKARR:
+          fprintf(stream, " (%s)\n", "EXPR_MKARR");
+          TODO("EXPR_MKARR");
+          break;
+        case EXPR_INDEX:
+          fprintf(stream, " (%s)\n", "EXPR_INDEX");
+          TODO("EXPR_INDEX");
+          break;
         default: break;
       }
       break;
@@ -231,6 +240,8 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
       TODO("__dbg_print_ast: AST_STRUCT");
     case AST_MOD:
       TODO("__dbg_print_ast: AST_MOD");
+    case AST_TYPEDEF:
+      TODO("__dbg_print_ast: AST_TYPEDEF");
     default:
       UNREACHABLE("__dbg_print_ast %d", n->ast_kind);
   }
@@ -329,6 +340,113 @@ void __dbg_print_data(FILE* stream, constant_t c) {
 #endif
 }
 
+void __dbg_print_disass_inst(FILE* stream, instruction_t* inst) {
+#ifdef NDEBUG
+  (void)stream;
+  (void)inst;
+#else
+    switch(*inst) {
+      case INST_NOP:
+        fprintf(stream, "  %-10s\n", "NOP"); break;
+      case INST_PUSH:
+        fprintf(stream, "  %-10s 0x%08X\n", "PUSH", *(++inst)); break;
+      // case INST_PUSHL:
+      //   fprintf(stream, "  %-10s 0x%016lX\n", "PUSHL", ((uint64_t)*(++inst) << 32) | *(++inst)); break;
+      case INST_POP:
+        fprintf(stream, "  %-10s\n", "POP"); break;
+      case INST_DUP:
+        fprintf(stream, "  %-10s\n", "DUP"); break;
+      case INST_SWAP:
+        fprintf(stream, "  %-10s\n", "SWAP"); break;
+      case INST_LOAD:
+        fprintf(stream, "  %-10s 0x%08X\n", "LOAD", *(++inst)); break;
+      case INST_LOADG:
+        fprintf(stream, "  %-10s 0x%08X\n", "LOADG", *(++inst)); break;
+      case INST_LOADC: {
+        fprintf(stream, "  %-10s 0x%08X\n", "LOADC", *(++inst)); break;
+      }
+      case INST_LOADF:
+        fprintf(stream, "  %-10s 0x%08X\n", "LOADF", *(++inst)); break;
+      case INST_LOADI:
+        fprintf(stream, "  %-10s\n", "LOADI"); break;
+      case INST_STORE:
+        fprintf(stream, "  %-10s 0x%08X\n", "STORE", *(++inst)); break;
+      case INST_STOREG:
+        fprintf(stream, "  %-10s 0x%08X\n", "STOREG", *(++inst)); break;
+      case INST_STOREF:
+        fprintf(stream, "  %-10s 0x%08X\n", "STOREF", *(++inst)); break;
+      case INST_STOREI:
+        fprintf(stream, "  %-10s\n", "STOREI"); break;
+      case INST_JMP: {
+        uint32_t op = *(++inst);
+        fprintf(stream, "  %-10s 0x%08X        \n", "JMP", op);
+        break;
+      }
+      case INST_JNZ: {
+        uint32_t op = *(++inst);
+        fprintf(stream, "  %-10s 0x%08X        \n", "JNZ", op);
+        break;
+      }
+      case INST_JZ: {
+        uint32_t op = *(++inst);
+        fprintf(stream, "  %-10s 0x%08X        \n", "JZ", op);
+        break;
+      }
+      case INST_CALL: {
+        uint32_t op = *(++inst);
+        fprintf(stream, "  %-10s 0x%08X\n", "CALL", op); break;
+      }
+      case INST_HOSTCALL: {
+        uint32_t op = *(++inst);
+        fprintf(stream, "  %-10s 0x%08X\n", "HOSTCALL", op); break;
+      }
+      case INST_RET:
+        fprintf(stream, "  %-10s\n", "RET"); break;
+      case INST_ADD:
+        fprintf(stream, "  %-10s\n", "ADD"); break;
+      case INST_SUB:
+        fprintf(stream, "  %-10s\n", "SUB"); break;
+      case INST_MULT:
+        fprintf(stream, "  %-10s\n", "MULT"); break;
+      case INST_DIVI:
+        fprintf(stream, "  %-10s\n", "DIVI"); break;
+      case INST_DIVU:
+        fprintf(stream, "  %-10s\n", "DIVU"); break;
+      case INST_REM:
+        fprintf(stream, "  %-10s\n", "REM"); break;
+      case INST_ADDF:
+        fprintf(stream, "  %-10s\n", "ADDF"); break;
+      case INST_SUBF:
+        fprintf(stream, "  %-10s\n", "SUBF"); break;
+      case INST_MULTF:
+        fprintf(stream, "  %-10s\n", "MULTF"); break;
+      case INST_DIVF:
+        fprintf(stream, "  %-10s\n", "DIVF"); break;
+       case INST_EQ:
+        fprintf(stream, "  %-10s\n", "EQ"); break;
+       case INST_LEQ:
+        fprintf(stream, "  %-10s\n", "LEQ"); break;
+       case INST_GEQ:
+        fprintf(stream, "  %-10s\n", "GEQ"); break;
+       case INST_LT:
+        fprintf(stream, "  %-10s\n", "LT"); break;
+       case INST_GT:
+        fprintf(stream, "  %-10s\n", "GT"); break;
+       case INST_LNOT:
+        fprintf(stream, "  %-10s\n", "LNOT"); break;
+       case INST_HALT:
+        fprintf(stream, "  %-10s\n", "HALT"); break;
+
+      case INST_MKOBJ:
+        fprintf(stream, "  %-10s 0x%08X\n", "MKOBJ", *(++inst)); break;
+
+      case INST_COUNT:
+      default:
+        fprintf(stream, "  %-10s\n", "<INVALID>"); break;
+    }
+#endif
+}
+
 void __dbg_print_disass(FILE* stream, program_t* p, scope_t* root) {
 #ifdef NDEBUG
   (void)stream;
@@ -368,12 +486,16 @@ void __dbg_print_disass(FILE* stream, program_t* p, scope_t* root) {
       }
       case INST_LOADF:
         fprintf(stream, "  %-10s 0x%08X\n", "LOADF", p->code.items[++i]); break;
+      case INST_LOADI:
+        fprintf(stream, "  %-10s\n", "LOADI"); break;
       case INST_STORE:
         fprintf(stream, "  %-10s 0x%08X\n", "STORE", p->code.items[++i]); break;
       case INST_STOREG:
         fprintf(stream, "  %-10s 0x%08X\n", "STOREG", p->code.items[++i]); break;
       case INST_STOREF:
         fprintf(stream, "  %-10s 0x%08X\n", "STOREF", p->code.items[++i]); break;
+      case INST_STOREI:
+        fprintf(stream, "  %-10s\n", "STOREI"); break;
       case INST_JMP: {
         uint32_t op = p->code.items[++i];
         fprintf(stream, "  %-10s 0x%08X        \n", "JMP", op);

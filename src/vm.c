@@ -414,6 +414,17 @@ vm_exitcode_t exec(vm_t* vm) {
       vm->ip++;
       break;
     }
+    case INST_LOADI: {
+      POP(vm, a);
+      obj_handle_t handle;
+      POP(vm, handle);
+      if (handle == HANDLE_INVALID) return VM_INVALID_HANDLE;
+      obj_t* obj = get_obj(handle);
+      if (a > obj->as.structure.n_fields) return VM_OUT_OF_RANGE;
+      PUSH(vm, obj->as.structure.fields[a]);
+      vm->ip++;
+      break;
+    }
     case INST_STORE:
       operand = *(++vm->ip);
       POP(vm, CURR_FRAME(vm)->vars[operand]);
@@ -429,6 +440,18 @@ vm_exitcode_t exec(vm_t* vm) {
       if (handle == HANDLE_INVALID) return VM_INVALID_HANDLE;
       obj_t* obj = get_obj(handle);
       POP(vm, obj->as.structure.fields[operand]);
+      // release_obj(handle);
+      vm->ip++;
+      break;
+    }
+    case INST_STOREI: {
+      POP(vm, a);
+      obj_handle_t handle;
+      POP(vm, handle);
+      if (handle == HANDLE_INVALID) return VM_INVALID_HANDLE;
+      obj_t* obj = get_obj(handle);
+      if (a > obj->as.structure.n_fields) return VM_OUT_OF_RANGE;
+      POP(vm, obj->as.structure.fields[a]);
       // release_obj(handle);
       vm->ip++;
       break;
@@ -642,7 +665,8 @@ vm_exitcode_t call(const char* fn, size_t n_args, ...) {
   vm_exitcode_t ec = VM_NEXT;
   // __dbg_print_stack(stdout, vm);
   while(!vm->halt) {
-    // fprintf(stdout, "%p (0x%08lX) %d\n", vm->ip, (vm->ip - active->code), *vm->ip);
+    // fprintf(stdout, "%p (0x%08llX)\n", vm->ip, (vm->ip - active->code));
+    // __dbg_print_disass_inst(stdout, vm->ip);
     ec = exec(vm);
     if (ec != VM_NEXT) break; 
     // __dbg_print_stack(stdout, vm);
