@@ -10,7 +10,7 @@
 #include <ffi.h>
 
 #include "sb.h"
-#include "da.h"
+#include "vec.h"
 #include "arena.h"
 #include "slice.h"
 
@@ -430,27 +430,27 @@ static inline int tok_tokenize(tokenizer_t* t) {
     }
 
     tok.loc = loc; 
-    da_append(&t->tokens, tok);
+    vec_push(&t->tokens, tok);
 
     p   += tok.view.size;
     col += tok.view.size;
   }
 
-  da_append(&t->tokens, ((token_t){ .kind = TOK_EOF, .loc = { .line = line, .col = col, .line_view = line_view }}));
+  vec_push(&t->tokens, ((token_t){ .kind = TOK_EOF, .loc = { .line = line, .col = col, .line_view = line_view }}));
   return 0;
 }
 
 void tok_destroy(tokenizer_t* t) {
-  da_free(t->tokens);
+  vec_clear(&t->tokens);
   arena_free(&t->arena);
 }
 
 static inline token_t get_tok(parser_t* p) {
   if (p->current >= p->tokens.count) {
-    fdiagf(stderr, DIAG_FATAL, p->tokens.items[p->current].loc, "No more tokens.");
+    fdiagf(stderr, DIAG_FATAL, vec_get(&p->tokens, p->current).loc, "No more tokens.");
     abort();
   }
-  return p->tokens.items[p->current];
+  return vec_get(&p->tokens, p->current);
 }
 
 static inline int tok_is(parser_t* p, tok_kind_t kind) {
@@ -489,7 +489,7 @@ static inline symbol_t* make_symbol(arena_t* arena, scope_t* scope, symb_kind_t 
   s->kind = kind;
   s->storage = storage;
   s->type = type;
-  da_append(&scope->symbols, s);
+  vec_push(&scope->symbols, s);
   return s;
 }
 
@@ -501,16 +501,12 @@ static inline symbol_t* make_method(arena_t* arena, const type_t* owner, const c
 static inline ast_qn_t* _make_qn(arena_t* a, size_t n, ...) {
   va_list args;
 
-  struct {
-    const char** items;
-    size_t count;
-    size_t capacity;
-  } names = { 0 };
+  VEC(const char*) names = { 0 };
 
   va_start(args, n);
   for (size_t i=0; i < n; i++) {
     const char* name = arena_strdup(a, va_arg(args, const char*));
-    da_append(&names, name);
+    vec_push(&names, name);
   }
   va_end(args);
 
@@ -518,7 +514,7 @@ static inline ast_qn_t* _make_qn(arena_t* a, size_t n, ...) {
   ast_qn_t* qn = NULL;
   for (size_t i = 0; i < n; i++) {
     qn = arena_alloc(a, sizeof(*qn));
-    qn->name = da_at(names, n - i - 1);
+    qn->name = vec_get(&names, n - i - 1);
     qn->next = next;
     next = qn;
   }
@@ -532,7 +528,7 @@ static inline symbol_t* resolve_symbol_local_any(scope_t* scope, ast_qn_t* name)
 
   symbol_t* symb = NULL;
   // OPTIMIZE
-  da_foreach(symbol_t*, s, &scope->symbols) {
+  vec_foreach(s, &scope->symbols) {
     if(strcmp((*s)->name, name->name) == 0) { symb = *s; break; }
   }
 
@@ -546,7 +542,7 @@ static inline symbol_t* resolve_field(scope_t* scope, const char* name) {
   if (!scope) return NULL;
   if (!name) return NULL;
 
-  da_foreach(symbol_t*, s, &scope->symbols) {
+  vec_foreach(s, &scope->symbols) {
     if(strcmp((*s)->name, name) == 0) return *s;
   }
   
@@ -562,7 +558,7 @@ static inline symbol_t* resolve_symbol_local(scope_t* scope, ast_qn_t* name, sym
   symbol_t* symb = NULL;
   if (name->next) {
     // OPTIMIZE
-    da_foreach(symbol_t*, s, &scope->symbols) {
+    vec_foreach(s, &scope->symbols) {
       if(strcmp((*s)->name, name->name) == 0 && (*s)->kind == SYMB_TYPE) { symb = *s; break; }
     }
 
@@ -572,7 +568,7 @@ static inline symbol_t* resolve_symbol_local(scope_t* scope, ast_qn_t* name, sym
   }
 
   // OPTIMIZE
-  da_foreach(symbol_t*, s, &scope->symbols) {
+  vec_foreach(s, &scope->symbols) {
     if(strcmp((*s)->name, name->name) == 0 && (*s)->kind == kind) return *s;
   }
 
@@ -583,7 +579,7 @@ static inline symbol_t* resolve_qn_root(scope_t* scope, const char* name) {
   if (!scope) return NULL;
   if (!name) return NULL;
 
-  da_foreach(symbol_t*, s, &scope->symbols) {
+  vec_foreach(s, &scope->symbols) {
     if((*s)->name && strcmp((*s)->name, name) == 0) return *s;
   }
 
@@ -635,7 +631,7 @@ static inline void exit_scope(typechecker_t* t) {
 static inline const char* attributes_get(ast_attr_list_t* l, const char* key) {
   if(!l) return NULL;
   // OPTIMIZE
-  da_foreach(struct _attribute, d, &l->attrs) {
+  vec_foreach(d, &l->attrs) {
     if(strcmp(d->key, key) == 0) return d->value;
   }
   return NULL;
@@ -819,7 +815,7 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
 
     ast_expr_t* elem = parse_expr(p, 0);
     if (!elem) return NULL;
-    da_append(&n->as.mkarr.elems, elem);
+    vec_push(&n->as.mkarr.elems, elem);
 
     if (tok_is(p, ';')) {
       if(!expect(p, ';')) return NULL;
@@ -835,7 +831,7 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
 
         elem = parse_expr(p, 0);
         if (!elem) return NULL;
-        da_append(&n->as.mkarr.elems, elem);
+        vec_push(&n->as.mkarr.elems, elem);
       }
     }
 
@@ -864,7 +860,7 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
 
       ast_expr_t* value = parse_expr(p, 0);
       if(!value) return NULL;
-      da_append(&n->as.mkobj.fields, ((struct _mkobj_field){ .field = field, .value = value }));
+      vec_push(&n->as.mkobj.fields, ((struct _mkobj_field){ .field = field, .value = value }));
 
       while(tok_is(p, ',')) {
         if(!expect(p, ',')) return NULL;
@@ -879,7 +875,7 @@ static inline ast_expr_t* parse_primary_expr(parser_t* p) {
 
         value = parse_expr(p, 0);
         if(!value) return NULL;
-        da_append(&n->as.mkobj.fields, ((struct _mkobj_field){ .field = field, .value = value }));
+        vec_push(&n->as.mkobj.fields, ((struct _mkobj_field){ .field = field, .value = value }));
       }
     }
 
@@ -991,7 +987,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
         if (!tok_is(p, ')')) {
           ast_expr_t* arg = parse_expr(p, 0);
           if(!arg) return NULL;
-          da_append(&n->as.funcall.args, arg);
+          vec_push(&n->as.funcall.args, arg);
 
           while(tok_is(p, ',')) {
             if(!expect(p, ',')) return NULL;
@@ -999,7 +995,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
 
             arg = parse_expr(p, 0);
             if(!arg) return NULL;
-            da_append(&n->as.funcall.args, arg);
+            vec_push(&n->as.funcall.args, arg);
           }
         }
         if(!expect(p, ')')) return NULL;
@@ -1200,7 +1196,7 @@ static inline ast_body_t* parse_body(parser_t* p) {
     ast_stmt_t* stmt = parse_stmt(p);
     if(!stmt) return NULL;
     
-    da_append(&n->stmts, stmt);
+    vec_push(&n->stmts, stmt);
   }
 
   if(!expect(p, '}')) return NULL;
@@ -1246,7 +1242,7 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
     ast_param_t* param = parse_param(p);
     if(!param) return NULL;
 
-    da_append(&n->params, param);
+    vec_push(&n->params, param);
 
     if (tok_is(p, ')')) {
       if(!expect(p, ')')) return NULL;
@@ -1259,7 +1255,7 @@ static inline ast_sig_t* parse_signature(parser_t* p) {
         param = parse_param(p);
         if(!param) return NULL;
 
-        da_append(&n->params, param);
+        vec_push(&n->params, param);
       } 
 
       if(!expect(p, ')')) return NULL;
@@ -1357,7 +1353,7 @@ static inline ast_attr_list_t* parse_attr_list(parser_t* p) {
   attr.value = arena_strdup(&p->arena, get_tok(p).as.s);
   next(p);
 
-  da_append(&n->attrs, attr);
+  vec_push(&n->attrs, attr);
 
   while(!tok_is(p, ']')) {
     if(!expect(p, ',')) return NULL;
@@ -1375,7 +1371,7 @@ static inline ast_attr_list_t* parse_attr_list(parser_t* p) {
     attr.value = arena_strdup(&p->arena, get_tok(p).as.s);
     next(p);
 
-    da_append(&n->attrs, attr);
+    vec_push(&n->attrs, attr);
   }
 
   if(!expect(p, ']')) return NULL;
@@ -1428,7 +1424,7 @@ static inline ast_impl_t* parse_impl(parser_t* p) {
 
     ast_func_def_t* def = parse_func_def(p, loc, method_name, flags, attributes);
 
-    da_append(&n->methods, def);
+    vec_push(&n->methods, def);
   }
 
   if(!expect(p, '}')) return NULL;
@@ -1463,7 +1459,7 @@ static inline ast_iface_t* parse_iface(parser_t* p, loc_t loc, const char* name)
 
     ast_func_def_t* def = parse_func_def(p, loc, method_name, flags, NULL);
 
-    da_append(&n->methods, def);
+    vec_push(&n->methods, def);
   }
 
   if(!expect(p, '}')) return NULL;
@@ -1491,7 +1487,7 @@ static inline ast_struct_t* parse_struct(parser_t* p, loc_t loc, const char* nam
     if(!expect(p, ';')) return NULL;
     next(p);
 
-    da_append(&n->fields, field);
+    vec_push(&n->fields, field);
   }
 
   if(!expect(p, '}')) return NULL;
@@ -1556,7 +1552,7 @@ static inline ast_root_t* parse(parser_t* p) {
       ast_impl_t* impl = parse_impl(p);
       if(!impl) return NULL;
 
-      da_append(&n->impls, impl);
+      vec_push(&n->impls, impl);
     } else {
       ast_attr_list_t* attributes = NULL;
       if(tok_is(p, '[')) {
@@ -1578,32 +1574,32 @@ static inline ast_root_t* parse(parser_t* p) {
         ast_func_def_t* def = parse_func_def(p, loc, name, flags, attributes);
         if (!def) return NULL;
 
-        da_append(&n->func_defs, def);
+        vec_push(&n->func_defs, def);
       } else if (tok_is(p, TOK_STRUCT)) {
         ast_struct_t* structure = parse_struct(p, loc, name);
         if(!structure) return NULL;
 
-        da_append(&n->structs, structure);
+        vec_push(&n->structs, structure);
       } else if (tok_is(p, TOK_INTERFACE)) {
         ast_iface_t* interface = parse_iface(p, loc, name);
         if(!interface) return NULL;
 
-        da_append(&n->interfaces, interface);
+        vec_push(&n->interfaces, interface);
       } else if (tok_is(p, TOK_MOD)) {
         ast_mod_t* submod = parse_mod(p, loc, name);
         if(!submod) return NULL;
 
-        da_append(&n->submods, submod);
+        vec_push(&n->submods, submod);
       } else if (tok_is(p, TOK_TYPE)) {
         ast_typedef_t* type_alias = parse_typedef(p, loc, name);
         if (!type_alias) return NULL;
 
-        da_append(&n->typedefs, type_alias);
+        vec_push(&n->typedefs, type_alias);
       } else {
         ast_var_def_t* def = parse_var_def(p, loc, name, flags, true, attributes);
         if (!def) return NULL;
 
-        da_append(&n->var_defs, def);
+        vec_push(&n->var_defs, def);
       }
     }
   }
@@ -1645,7 +1641,7 @@ static inline int type_equals(type_t a, type_t b) {
       if (a.as.func.params.count != b.as.func.params.count) return 0;
       bool same = true;
       for (size_t i=0; i < a.as.func.params.count && same; i++) {
-        same = type_equals(*a.as.func.params.items[i], *b.as.func.params.items[i]);
+        same = type_equals(*vec_get(&a.as.func.params, i), *vec_get(&b.as.func.params, i));
       }
       return same;
     case TYPE_INTERFACE:
@@ -1690,7 +1686,7 @@ void render_type(sb_t* sb, const type_t* t) {
       break;
     case TYPE_FUNC:
       sb_appendf(sb, "(");
-      da_foreach(type_t*, typ, &t->as.func.params) {
+      vec_foreach(typ, &t->as.func.params) {
         render_type(sb, *typ);
         sb_appendf(sb, ",");
       }
@@ -1737,7 +1733,7 @@ static inline const char* qn_to_str(arena_t* a, const ast_qn_t* qn) {
 
 static inline void typechecker_destroy(typechecker_t* t) {
   arena_free(&t->arena);
-  da_free(t->custom_types);
+  vec_clear(&t->custom_types);
 }
 
 static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* name, size_t size) {
@@ -1765,35 +1761,35 @@ static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* nam
 
 static inline type_t* get_or_create_array_of(typechecker_t* t, const type_t* type) {
   // OPTIMIZE
-  da_foreach(type_t*, typ, &t->custom_types) {
+  vec_foreach(typ, &t->custom_types) {
     if (type_is_of_kind(*typ, TYPE_ARRAY) && type_equals(*(*typ)->as.array.inner, *type)) return *typ;
   }
 
   type_t* typ = make_type(t, TYPE_ARRAY, NULL, 1);
   typ->as.array.inner = (type_t*)type;
-  da_append(&t->custom_types, typ);
+  vec_push(&t->custom_types, typ);
   
   return typ; 
 }
 
 static inline type_t* get_or_create_func_type_from_arr(typechecker_t* t, const type_t* ret_type, size_t n_params, type_t** params) {
   // OPTIMIZE
-  da_foreach(type_t*, typ, &t->custom_types) {
+  vec_foreach(typ, &t->custom_types) {
     if ((*typ)->kind != TYPE_FUNC) continue;
     if ((*typ)->as.func.params.count != n_params) continue;
     if (!type_equals(*(*typ)->as.func.ret, *ret_type)) continue;
     bool same = true;
     for (size_t i = 0; i < n_params && same; i++)
-      same = type_equals(*(*typ)->as.func.params.items[i], *params[i]);
+      same = type_equals(*vec_get(&(*typ)->as.func.params, i), *params[i]);
     if (same)
       return *typ;
   }
 
   type_t* type = make_type(t, TYPE_FUNC, NULL, 1); // which is the correct size?
   for(size_t i=0; i < n_params; i++)
-    da_append(&type->as.func.params, params[i]);
+    vec_push(&type->as.func.params, params[i]);
   type->as.func.ret = (type_t*)ret_type;
-  da_append(&t->custom_types, type);
+  vec_push(&t->custom_types, type);
 
   return type;
 }
@@ -1802,19 +1798,15 @@ static inline type_t* get_or_create_func_type_from_arr(typechecker_t* t, const t
 static inline type_t* get_or_create_func_type_of(typechecker_t* t, const type_t* ret_type, size_t n_params, ...) {
   va_list args; 
 
-  struct {
-    type_t** items;
-    size_t count;
-    size_t capacity;
-  } params = { 0 };
+  VEC(type_t*) params = { 0 };
 
   va_start(args, n_params);
   for(size_t i=0; i < n_params; i++) {
-    da_append(&params, va_arg(args, type_t*));
+    vec_push(&params, va_arg(args, type_t*));
   }
   va_end(args);
 
-  return get_or_create_func_type_from_arr(t, ret_type, n_params, params.items);
+  return get_or_create_func_type_from_arr(t, ret_type, n_params, vec_data(&params));
 }
 
 static inline type_t* resolve_type(typechecker_t* t, ast_qn_t* name, int depth) {
@@ -1961,7 +1953,7 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
   symbol_t* iface_symb = resolve_symbol(owner->scope, iface, SYMB_TYPE);
 
   bool implements = false;
-  da_foreach(ast_qn_t*, impl, &owner->impls) {
+  vec_foreach(impl, &owner->impls) {
     if (iface_symb == resolve_symbol(owner->scope, *impl, SYMB_TYPE)) {
       implements = true;
       break;
@@ -1971,13 +1963,13 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
   if (!implements) return NULL;
 
   symbol_t* method = NULL;
-  da_foreach(symbol_t*, s, &owner->scope->symbols) {
+  vec_foreach(s, &owner->scope->symbols) {
     if(
         (*s)->kind == SYMB_FUNC &&
         strcmp((*s)->name, method_name) == 0 && 
         (*s)->type->as.func.params.count == 2 &&
-        type_equals(*(*s)->type->as.func.params.items[0], *owner) &&
-        type_equals(*(*s)->type->as.func.params.items[1], *other)
+        type_equals(*vec_get(&(*s)->type->as.func.params, 0), *owner) &&
+        type_equals(*vec_get(&(*s)->type->as.func.params, 1), *other)
     )
       method = *s;
   }
@@ -2031,7 +2023,7 @@ static inline symbol_t* find_unop_impl(const type_t* owner, op_kind_t op) {
   symbol_t* iface_symb = resolve_symbol(owner->scope, iface, SYMB_TYPE);
 
   bool implements = false;
-  da_foreach(ast_qn_t*, impl, &owner->impls) {
+  vec_foreach(impl, &owner->impls) {
     if (iface_symb == resolve_symbol(owner->scope, *impl, SYMB_TYPE)) {
       implements = true;
       break;
@@ -2041,12 +2033,12 @@ static inline symbol_t* find_unop_impl(const type_t* owner, op_kind_t op) {
   if (!implements) return NULL;
 
   symbol_t* method = NULL;
-  da_foreach(symbol_t*, s, &owner->scope->symbols) {
+  vec_foreach(s, &owner->scope->symbols) {
     if(
         (*s)->kind == SYMB_FUNC &&
         strcmp((*s)->name, method_name) == 0 && 
         (*s)->type->as.func.params.count == 1 &&
-        type_equals(*(*s)->type->as.func.params.items[0], *owner)
+        type_equals(*vec_get(&(*s)->type->as.func.params, 0), *owner)
     )
       method = *s;
   }
@@ -2095,10 +2087,8 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
   ast_expr_t* rhs = e->as.binop.rhs;
 
   e->kind = EXPR_FUNCALL;
-  e->as.funcall.args.items = NULL;
-  e->as.funcall.args.count = 0;
-  e->as.funcall.args.capacity = 0;
-  da_append(&e->as.funcall.args, rhs);
+  vec_clear(&e->as.funcall.args); // maybe vec_reset?
+  vec_push(&e->as.funcall.args, rhs);
   // crafting a new ast node on separate arena. bad idea?
   e->as.funcall.callee = arena_alloc(&t->arena, sizeof(ast_expr_t));
   e->as.funcall.callee->ast_kind = AST_EXPR;
@@ -2146,9 +2136,7 @@ static inline bool resolve_type_unop(typechecker_t* t, ast_expr_t* e) {
   if (strcmp(ret->name, "Self") == 0) ret = ret->as.alias.target;
 
   e->kind = EXPR_FUNCALL;
-  e->as.funcall.args.items = NULL;
-  e->as.funcall.args.count = 0;
-  e->as.funcall.args.capacity = 0;
+  vec_clear(&e->as.funcall.args);
   // crafting a new ast node on separate arena. bad idea?
   e->as.funcall.callee = arena_alloc(&t->arena, sizeof(ast_expr_t));
   e->as.funcall.callee->ast_kind = AST_EXPR;
@@ -2301,13 +2289,13 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
 
       if (callee->kind == EXPR_ACCESS) {
         // NOTE: should never happen
-        if(!type_equals(*callee->as.access.owner->type, **callee->type->as.func.params.items)) {
+        if(!type_equals(*callee->as.access.owner->type, *vec_first(&callee->type->as.func.params))) {
           fdiagf(
             stderr,
             DIAG_ERROR,
             callee->loc,
             "Mismatched type for method: expected `%s`, got `%s`",
-            type_to_str(&t->arena, *callee->type->as.func.params.items),
+            type_to_str(&t->arena, vec_first(&callee->type->as.func.params)),
             type_to_str(&t->arena, callee->as.access.owner->type)
           );
           return false;
@@ -2315,10 +2303,10 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       }
 
       for(size_t i = 0; i < n_args; i++) {
-        ast_expr_t* arg = da_at(expr->as.funcall.args, i);
+        ast_expr_t* arg = vec_get(&expr->as.funcall.args, i);
         if(!typecheck_expr(t, arg)) return false;
         type_t const* a = arg->type;
-        type_t const* b = da_at(callee->type->as.func.params, i + n_hidden_args);
+        type_t const* b = vec_get(&callee->type->as.func.params, i + n_hidden_args);
         if (!type_equals(*a, *b)) {
           // TODO: find way to retrieve argument name for better diagnostics
           fdiagf(
@@ -2380,7 +2368,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       }
 
       for(size_t i = 0; i < n_fields; i++) {
-        struct _mkobj_field *f = &da_at(expr->as.mkobj.fields, i);
+        struct _mkobj_field *f = &vec_get(&expr->as.mkobj.fields, i);
         if(!typecheck_expr(t, f->value)) return false;
 
         symbol_t* s = resolve_field(type->type->as.type.of->scope, f->field);
@@ -2420,8 +2408,8 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       const type_t* inner_type = NULL;
 
       if (expr->as.mkarr.repeat) {
-        if(!typecheck_expr(t, da_at(expr->as.mkarr.elems, 0))) return NULL;
-        inner_type = da_at(expr->as.mkarr.elems, 0)->type;
+        if(!typecheck_expr(t, vec_get(&expr->as.mkarr.elems, 0))) return NULL;
+        inner_type = vec_get(&expr->as.mkarr.elems, 0)->type;
 
         if(!typecheck_expr(t, expr->as.mkarr.repeat)) return false;
 
@@ -2446,7 +2434,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
           return false;
         }
       } else {
-        da_foreach(ast_expr_t*, e, &expr->as.mkarr.elems) {
+        vec_foreach(e, &expr->as.mkarr.elems) {
           if (!typecheck_expr(t, *e)) return NULL;
           if (inner_type == NULL) inner_type = (*e)->type;
           else {
@@ -2580,7 +2568,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         return false;
       }
 
-      da_foreach(symbol_t*, symb, &t->current_scope->symbols) {
+      vec_foreach(symb, &t->current_scope->symbols) {
         if (
             *symb != stmt->as.var_def->symbol && 
             (*symb)->kind == SYMB_VAR &&
@@ -2611,7 +2599,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
 
       enter_scope_new(t, arena_sprintf(&t->arena, "%s_if", t->current_scope->name));
       if_else->if_scope = t->current_scope;
-      da_foreach(ast_stmt_t*, stmt, &if_else->if_body->stmts) {
+      vec_foreach(stmt, &if_else->if_body->stmts) {
         if(!typecheck_stmt(t, *stmt, ret_type)) return false;
       }
       exit_scope(t);
@@ -2619,7 +2607,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
       if(if_else->else_body) {
         enter_scope_new(t, arena_sprintf(&t->arena, "%s_else", t->current_scope->name));
         if_else->else_scope = t->current_scope;
-        da_foreach(ast_stmt_t*, stmt, &if_else->else_body->stmts) {
+        vec_foreach(stmt, &if_else->else_body->stmts) {
           if(!typecheck_stmt(t, *stmt, ret_type)) return false;
         }
         exit_scope(t);
@@ -2642,7 +2630,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
 
       enter_scope_new(t, arena_sprintf(&t->arena, "%s_while", t->current_scope->name));
       wl->scope = t->current_scope;
-      da_foreach(ast_stmt_t*, stmt, &wl->body->stmts) {
+      vec_foreach(stmt, &wl->body->stmts) {
         if(!typecheck_stmt(t, *stmt, ret_type)) return false;
       }
       exit_scope(t);
@@ -2657,28 +2645,24 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
 }
 
 static inline bool resolve_func_def(typechecker_t* t, ast_func_def_t* def) {
-  struct {
-    type_t** items;
-    size_t count;
-    size_t capacity;
-  } params = { 0 };
+  VEC(type_t*) params = { 0 };
 
   enter_scope_new(t, arena_sprintf(&t->arena, "fun_%s", def->name));
 
   if(!resolve_type_decl(t, def->sig->ret)) return false;
-  da_foreach(ast_param_t*, p, &def->sig->params) {
+  vec_foreach(p, &def->sig->params) {
     if(!resolve_type_decl(t, (*p)->type)) return false;
     symbol_t* param_sym = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_LOCAL, (*p)->name, (*p)->type->resolved_type);
     set_symbol_address(param_sym, params.count);
 
-    da_append(&params, (*p)->type->resolved_type);
+    vec_push(&params, (*p)->type->resolved_type);
   }
 
   type_t* sig_type = get_or_create_func_type_from_arr(
     t, 
     def->sig->ret->resolved_type, 
-    params.count,
-    params.items
+    vec_len(&params),
+    vec_data(&params)
   );
 
   def->sig->resolved_type = sig_type;
@@ -2705,7 +2689,7 @@ static inline bool typecheck_func(typechecker_t* t, ast_func_def_t* func) {
     return false;
   }
 
-  da_foreach(symbol_t*, symb, &t->current_scope->symbols) {
+  vec_foreach(symb, &t->current_scope->symbols) {
     if (
         *symb != func->symbol && 
         (*symb)->kind == SYMB_FUNC &&
@@ -2728,7 +2712,7 @@ static inline bool typecheck_func(typechecker_t* t, ast_func_def_t* func) {
 
   if (func->body) {
     enter_scope(t, func->scope);
-    da_foreach(ast_stmt_t*, stmt, &func->body->stmts) {
+    vec_foreach(stmt, &func->body->stmts) {
       if(!typecheck_stmt(t, *stmt, func->sig->ret->resolved_type)) return false;
     }
     exit_scope(t);
@@ -2751,7 +2735,7 @@ static inline void typechecker_init(typechecker_t* t) {
   t->builtins.character = make_type(t, TYPE_CHAR, "char", 1);
   t->builtins.boolean   = make_type(t, TYPE_BOOL, "bool", 1);
   t->builtins.str       = make_type(t, TYPE_STR,  "str",  1);
-  t->builtins.addr      = make_type(t, TYPE_ADDR, "addr", 1);
+  t->builtins.addr      = make_type(t, TYPE_ADDR, "addr", 2);
 
   enter_scope_new(t, "root");
 }
@@ -2766,7 +2750,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
   // resolve types and symbols first
 
-  da_foreach(ast_mod_t*, mod, &root->submods) {
+  vec_foreach(mod, &root->submods) {
     type_t* type = make_type(t, TYPE_MODULE, (*mod)->name, 0);
 
     enter_scope(t, type->scope);
@@ -2776,11 +2760,13 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   }
 
   // Add names to symbol table before resolving aliases
-  da_foreach(ast_struct_t*, s, &root->structs) {
+  vec_foreach(s, &root->structs) {
+    size_t size = 0;
+    // TODO: size should be sum of fields
     (*s)->self_type = make_type(t, TYPE_STRUCT, (*s)->name, (*s)->fields.count);
   }
 
-  da_foreach(ast_typedef_t*, td, &root->typedefs) {
+  vec_foreach(td, &root->typedefs) {
     if (!resolve_type_decl(t, (*td)->alias)) return false;
 
     type_t* alias = (*td)->alias->resolved_type;
@@ -2790,9 +2776,9 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   }
 
   // Typecheck struct fields after resolving type aliases
-  da_foreach(ast_struct_t*, s, &root->structs) {
+  vec_foreach(s, &root->structs) {
     enter_scope(t, (*s)->self_type->scope);
-    da_foreach(ast_param_t*, f, &(*s)->fields) {
+    vec_foreach(f, &(*s)->fields) {
       if(!resolve_type_decl(t, (*f)->type)) return false;
 
       symbol_t* sym = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_INSTANCE, (*f)->name, (*f)->type->resolved_type);
@@ -2800,25 +2786,25 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
         fdiagf(stderr, DIAG_FATAL, (*f)->loc, "Failed to create type");
         abort();
       }
-      set_symbol_address(sym, da_indexof(&(*s)->fields, f));
+      set_symbol_address(sym, vec_indexof(&(*s)->fields, f));
       (*f)->symbol = sym;
 
-      da_append(&(*s)->self_type->as.structure.fields, (*f)->type->resolved_type);
+      vec_push(&(*s)->self_type->as.structure.fields, (*f)->type->resolved_type);
     }
     exit_scope(t);
   }
 
-  da_foreach(ast_func_def_t*, d, &root->func_defs)
+  vec_foreach(d, &root->func_defs)
     if(!resolve_func_def(t, *d)) return false;
 
-  da_foreach(ast_iface_t*, iface, &root->interfaces) {
+  vec_foreach(iface, &root->interfaces) {
     type_t* self = make_type(t, TYPE_ALIAS, "Self", 0);
     self->as.alias.target = (type_t*)t->builtins.none;
 
     type_t* type = make_type(t, TYPE_INTERFACE, (*iface)->name, 0);
 
     enter_scope(t, type->scope);
-    da_foreach(ast_func_def_t*, def, &(*iface)->methods) {
+    vec_foreach(def, &(*iface)->methods) {
       if(!resolve_func_def(t, *def)) return false;
 
       if((*def)->body) {
@@ -2830,12 +2816,12 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
         fdiagf(stderr, DIAG_WARN, (*def)->loc, "Specifiers for method `%s` in `%s` interface will be ignored.", (*def)->name, (*iface)->name);
       }
 
-      da_append(&type->as.interface.methods, ((interface_method_t){ .name = (*def)->name, .type = (*def)->sig->resolved_type }));
+      vec_push(&type->as.interface.methods, ((interface_method_t){ .name = (*def)->name, .type = (*def)->sig->resolved_type }));
     }
     exit_scope(t);
   }
 
-  da_foreach(ast_impl_t*, impl, &root->impls) {
+  vec_foreach(impl, &root->impls) {
     bool impl_self = false;
     {
       if ((*impl)->interface->name && !(*impl)->interface->name->next)
@@ -2867,10 +2853,10 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     self->as.alias.target = type;
     self->scope = type->scope;
 
-    da_foreach(ast_func_def_t*, method, &(*impl)->methods) {
+    vec_foreach(method, &(*impl)->methods) {
       if(!impl_self) {
         bool found = false;
-        da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
+        vec_foreach(m, &(*impl)->interface->resolved_type->as.interface.methods) {
           if(strcmp(m->name, (*method)->name) == 0) { found = true; break;}
         }
         if(!found) {
@@ -2885,7 +2871,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
     if (!impl_self) {
       while (type->kind == TYPE_ALIAS) type = type->as.alias.target;
-      da_foreach(interface_method_t, m, &(*impl)->interface->resolved_type->as.interface.methods) {
+      vec_foreach(m, &(*impl)->interface->resolved_type->as.interface.methods) {
         // TODO: compare types, not just name
 
         symbol_t* s = resolve_field(type->scope, m->name);
@@ -2894,11 +2880,11 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
           return false;
         }
       }
-      da_append(&type->impls, (*impl)->interface->name);
+      vec_push(&type->impls, (*impl)->interface->name);
     }
   }
 
-  da_foreach(ast_var_def_t*, d, &root->var_defs) {
+  vec_foreach(d, &root->var_defs) {
     const type_t* type = NULL;
 
     if((*d)->init) {
@@ -2935,7 +2921,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       return false;
     }
 
-    da_foreach(symbol_t*, symb, &t->current_scope->symbols) {
+    vec_foreach(symb, &t->current_scope->symbols) {
       if (
           *symb != (*d)->symbol && 
           (*symb)->kind == SYMB_VAR &&
@@ -2952,16 +2938,16 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
   // then check bodies
 
-  da_foreach(ast_impl_t*, impl, &root->impls) {
+  vec_foreach(impl, &root->impls) {
     type_t* type = (*impl)->type->resolved_type;
     scope_t* saved_scope = t->current_scope;
     enter_scope(t, type->scope);
-    da_foreach(ast_func_def_t*, method, &(*impl)->methods)
+    vec_foreach(method, &(*impl)->methods)
       if(!typecheck_func(t, *method)) return false;
     t->current_scope = saved_scope;
   }
 
-  da_foreach(ast_func_def_t*, d, &root->func_defs) {
+  vec_foreach(d, &root->func_defs) {
     if(!typecheck_func(t, *d)) return false;
   }
  
@@ -2973,13 +2959,13 @@ static inline void codegen_load_var(program_t* p, symbol_t* symbol) {
     case STO_EXTERN:
       TODO("codegen_load_var - load extern symbol");
     case STO_LOCAL:
-      da_append(&p->code, INST_LOAD);
-      da_append(&p->code, symbol->addr);
+      vec_push(&p->code, INST_LOAD);
+      vec_push(&p->code, symbol->addr);
       break;
     case STO_EXPORT:
     case STO_GLOBAL:
-      da_append(&p->code, INST_LOADG);
-      da_append(&p->code, symbol->addr);
+      vec_push(&p->code, INST_LOADG);
+      vec_push(&p->code, symbol->addr);
       break;
     case STO_INSTANCE:
     default: 
@@ -2987,7 +2973,7 @@ static inline void codegen_load_var(program_t* p, symbol_t* symbol) {
   }
   
   if (!symbol->addr_resolved)
-    da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count - 1}));
+    vec_push(&p->patches, ((struct _patch){ .symbol = symbol, .addr = vec_len(&p->code) - 1}));
 }
 
 static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
@@ -2997,21 +2983,21 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         break;
       }
       case EXPR_STRING:
-        da_append(&p->code, INST_LOADC);
-        da_append(&p->code, p->constants.count);
+        vec_push(&p->code, INST_LOADC);
+        vec_push(&p->code, p->constants.count);
         // TODO: alloc on arena (make a 'program' arena that holds data that needs to be transfered
         // from compiler to vm. This arena will also hold any kind of ffi data)
-        da_append(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = strdup(e->as.s) }));
+        vec_push(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = strdup(e->as.s) }));
         break;
       case EXPR_NUMBER:
         if(e->as.number.ti & TI_LONG) {
           TODO("codegen_expr: handle long/wide data");
-          // da_append(&p->code, INST_PUSHL);
-          // da_append(&p->code, e->as.number.u >> 32);
-          // da_append(&p->code, e->as.number.u & (uint32_t)-1);
+          // vec_push(&p->code, INST_PUSHL);
+          // vec_push(&p->code, e->as.number.u >> 32);
+          // vec_push(&p->code, e->as.number.u & (uint32_t)-1);
         } else {
-          da_append(&p->code, INST_PUSH);
-          da_append(&p->code, e->as.number.u & (uint32_t)-1);
+          vec_push(&p->code, INST_PUSH);
+          vec_push(&p->code, e->as.number.u & (uint32_t)-1);
         }
         break;
       case EXPR_BINOP:
@@ -3021,16 +3007,16 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         //TODO: implicit cast if either type is different from the result
 
         switch(e->as.binop.op){
-          case OP_PLUS: da_append(&p->code, INST_ADD); break;
-          case OP_MINUS: da_append(&p->code, INST_SUB); break;
-          case OP_MULT: da_append(&p->code, INST_MULT); break;
-          case OP_DIV: da_append(&p->code, INST_DIVI); break;
-          case OP_REM: da_append(&p->code, INST_REM); break;
-          case OP_EQ: da_append(&p->code, INST_EQ); break;
-          case OP_LEQ: da_append(&p->code, INST_LEQ); break;
-          case OP_GEQ: da_append(&p->code, INST_GEQ); break;
-          case OP_LT: da_append(&p->code, INST_LT); break;
-          case OP_GT: da_append(&p->code, INST_GT); break;
+          case OP_PLUS: vec_push(&p->code, INST_ADD); break;
+          case OP_MINUS: vec_push(&p->code, INST_SUB); break;
+          case OP_MULT: vec_push(&p->code, INST_MULT); break;
+          case OP_DIV: vec_push(&p->code, INST_DIVI); break;
+          case OP_REM: vec_push(&p->code, INST_REM); break;
+          case OP_EQ: vec_push(&p->code, INST_EQ); break;
+          case OP_LEQ: vec_push(&p->code, INST_LEQ); break;
+          case OP_GEQ: vec_push(&p->code, INST_GEQ); break;
+          case OP_LT: vec_push(&p->code, INST_LT); break;
+          case OP_GT: vec_push(&p->code, INST_GT); break;
           case OP_MEMB:
           case OP_ASSIGN:
           case OP_CALL:
@@ -3048,12 +3034,12 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         //TODO: implicit cast if either type is different from the result
 
         switch(e->as.unop.op){
-          case OP_NOT: da_append(&p->code, INST_LNOT); break;
+          case OP_NOT: vec_push(&p->code, INST_LNOT); break;
           case OP_MINUS: {
-            da_append(&p->code, INST_PUSH);
-            da_append(&p->code, 0);
-            da_append(&p->code, INST_SWAP);
-            da_append(&p->code, INST_SUB);
+            vec_push(&p->code, INST_PUSH);
+            vec_push(&p->code, 0);
+            vec_push(&p->code, INST_SWAP);
+            vec_push(&p->code, INST_SUB);
             break;
           }
           case OP_NUMOF:
@@ -3078,14 +3064,14 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
       case EXPR_ACCESS: {
         symbol_t* symbol = e->as.access.field_symbol;
         if(!codegen_expr(p, scope, e->as.access.owner)) return false;
-        da_append(&p->code, INST_LOADF);
-        da_append(&p->code, symbol->addr);
+        vec_push(&p->code, INST_LOADF);
+        vec_push(&p->code, symbol->addr);
         break;
       }
       case EXPR_FUNCALL:
         // SysV-style calling convention
         for(int i = e->as.funcall.args.count - 1; i >= 0; i--) {
-          if(!codegen_expr(p, scope, e->as.funcall.args.items[i])) return false;
+          if(!codegen_expr(p, scope, vec_get(&e->as.funcall.args, (size_t)i))) return false;
         }
         ast_expr_t* callee = e->as.funcall.callee;
 
@@ -3102,12 +3088,12 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           TODO("codegen_expr: EXPR_FUNCALL - callee not a symbol");
         }
 
-        da_append(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
+        vec_push(&p->code, symbol->storage == STO_EXTERN ? INST_HOSTCALL : INST_CALL);
         if (symbol->addr_resolved)
-          da_append(&p->code, symbol->addr);
+          vec_push(&p->code, symbol->addr);
         else {
-          da_append(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count }));
-          da_append(&p->code, 0xBAADF00D);
+          vec_push(&p->patches, ((struct _patch){ .symbol = symbol, .addr = p->code.count }));
+          vec_push(&p->code, 0xBAADF00D);
         }
         break;
       case EXPR_SUBEXPR:
@@ -3123,13 +3109,13 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
             case STO_EXTERN:
               TODO("codegen_expr - store extern symbol");
             case STO_LOCAL:
-              da_append(&p->code, INST_STORE);
-              da_append(&p->code, symbol->addr);
+              vec_push(&p->code, INST_STORE);
+              vec_push(&p->code, symbol->addr);
               break;
             case STO_EXPORT:
             case STO_GLOBAL:
-              da_append(&p->code, INST_STOREG);
-              da_append(&p->code, symbol->addr);
+              vec_push(&p->code, INST_STOREG);
+              vec_push(&p->code, symbol->addr);
               break;
             case STO_INSTANCE:
             default: 
@@ -3138,60 +3124,60 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         } else if (lhs->kind == EXPR_ACCESS) {
           symbol_t* symbol = lhs->as.access.field_symbol;
           if(!codegen_expr(p, scope, e->as.assign.lhs->as.access.owner)) return false;
-          da_append(&p->code, INST_STOREF);
-          da_append(&p->code, symbol->addr);
+          vec_push(&p->code, INST_STOREF);
+          vec_push(&p->code, symbol->addr);
         } else if (lhs->kind == EXPR_INDEX) {
           if(!codegen_expr(p, scope, lhs->as.index.expr)) return false;
           if(!codegen_expr(p, scope, lhs->as.index.idx)) return false;
-          da_append(&p->code, INST_STOREI);
+          vec_push(&p->code, INST_STOREI);
         } else {
           TODO("codegen_expr - assignment: unsupported lhs");
         }
         break;
       }
       case EXPR_MKOBJ: {
-        da_append(&p->code, INST_MKOBJ);
-        da_append(&p->code, e->as.mkobj.type->type->size);
+        vec_push(&p->code, INST_MKOBJ);
+        vec_push(&p->code, e->as.mkobj.type->type->size);
 
-        da_foreach(struct _mkobj_field, f, &e->as.mkobj.fields) {
-          da_append(&p->code, INST_DUP);
+        vec_foreach(f, &e->as.mkobj.fields) {
+          vec_push(&p->code, INST_DUP);
 
           if(!codegen_expr(p, scope, f->value)) return false;
 
-          da_append(&p->code, INST_SWAP); // maybe better to swap the pop logic in VM
-          da_append(&p->code, INST_STOREF);
-          da_append(&p->code, f->symbol->addr);
+          vec_push(&p->code, INST_SWAP); // maybe better to swap the pop logic in VM
+          vec_push(&p->code, INST_STOREF);
+          vec_push(&p->code, f->symbol->addr);
         }
         // other value should be set to INVALID_HANDLE
 
         break;
       }
       case EXPR_MKARR: {
-        da_append(&p->code, INST_MKOBJ);
+        vec_push(&p->code, INST_MKOBJ);
         if (e->as.mkarr.repeat) {
           uint64_t repeat = e->as.mkarr.repeat->as.number.u; // is constant
-          da_append(&p->code, repeat);
+          vec_push(&p->code, repeat);
 
           for (size_t i = 0; i < repeat; i++) {
-            da_append(&p->code, INST_DUP);
+            vec_push(&p->code, INST_DUP);
 
-            if(!codegen_expr(p, scope, *e->as.mkarr.elems.items)) return false;
+            if(!codegen_expr(p, scope, vec_first(&e->as.mkarr.elems))) return false;
 
-            da_append(&p->code, INST_SWAP); // maybe better to swap the pop logic in VM
-            da_append(&p->code, INST_STOREF);
-            da_append(&p->code, i);
+            vec_push(&p->code, INST_SWAP); // maybe better to swap the pop logic in VM
+            vec_push(&p->code, INST_STOREF);
+            vec_push(&p->code, i);
           }
         } else {
-          da_append(&p->code, e->as.mkarr.elems.count);
+          vec_push(&p->code, e->as.mkarr.elems.count);
 
           for (size_t i=0; i < e->as.mkarr.elems.count; i++) {
-            da_append(&p->code, INST_DUP);
+            vec_push(&p->code, INST_DUP);
 
-            if(!codegen_expr(p, scope, da_at(e->as.mkarr.elems, i))) return false;
+            if(!codegen_expr(p, scope, vec_get(&e->as.mkarr.elems, i))) return false;
 
-            da_append(&p->code, INST_SWAP); // maybe better to swap the pop logic in VM
-            da_append(&p->code, INST_STOREF);
-            da_append(&p->code, i);
+            vec_push(&p->code, INST_SWAP); // maybe better to swap the pop logic in VM
+            vec_push(&p->code, INST_STOREF);
+            vec_push(&p->code, i);
           }
         }
          
@@ -3201,7 +3187,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         if (!codegen_expr(p, scope, e->as.index.expr)) return false;
 
         if (!codegen_expr(p, scope, e->as.index.idx)) return false;
-        da_append(&p->code, INST_LOADI);
+        vec_push(&p->code, INST_LOADI);
         break;
       }
       default:
@@ -3217,7 +3203,7 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
     case STMT_EXPR: return codegen_expr(p, scope, s->as.expression);
     case STMT_RET: {
       if (s->as.retval) codegen_expr(p, scope, s->as.retval);
-      da_append(&p->code, INST_RET);
+      vec_push(&p->code, INST_RET);
       return true;
     }
     case STMT_VAR_DEF: {
@@ -3232,8 +3218,8 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
       if (s->as.var_def->init) {
         if(!codegen_expr(p, scope, s->as.var_def->init)) return false;
 
-        da_append(&p->code, INST_STORE);
-        da_append(&p->code, symb->addr);
+        vec_push(&p->code, INST_STORE);
+        vec_push(&p->code, symb->addr);
       }
       return true;
     }
@@ -3242,27 +3228,27 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
       size_t j_to_else_offset = 0;
 
       if(!codegen_expr(p, scope, s->as.if_else.cond)) return false;
-      da_append(&p->code, INST_JZ);
-      da_append(&p->code, 0);
+      vec_push(&p->code, INST_JZ);
+      vec_push(&p->code, 0);
       if (s->as.if_else.else_body)
         j_to_else_offset = p->code.count - 1;
       else
         j_to_end_offset = p->code.count - 1;
 
-      da_foreach(ast_stmt_t*, stmt, &s->as.if_else.if_body->stmts)
+      vec_foreach(stmt, &s->as.if_else.if_body->stmts)
         if(!codegen_stmt(p, s->as.if_else.if_scope, f, *stmt)) return false;
 
       if(s->as.if_else.else_body) {
-        da_append(&p->code, INST_JMP);
-        da_append(&p->code, 0);
+        vec_push(&p->code, INST_JMP);
+        vec_push(&p->code, 0);
         j_to_end_offset = p->code.count - 1;
-        p->code.items[j_to_else_offset] = p->code.count - j_to_else_offset + 1;
+        vec_set(&p->code, j_to_else_offset, p->code.count - j_to_else_offset + 1);
 
-        da_foreach(ast_stmt_t*, stmt, &s->as.if_else.else_body->stmts)
+        vec_foreach(stmt, &s->as.if_else.else_body->stmts)
           if(!codegen_stmt(p, s->as.if_else.else_scope, f, *stmt)) return false;
       }
 
-      p->code.items[j_to_end_offset] = p->code.count - j_to_end_offset + 1;
+      vec_set(&p->code, j_to_end_offset, p->code.count - j_to_end_offset + 1);
       return true;
     }
     case STMT_WHILE: {
@@ -3272,18 +3258,18 @@ static inline bool codegen_stmt(program_t* p, scope_t* scope, frame_t* f, ast_st
       struct _while* wl = &s->as.while_loop;
       if(!codegen_expr(p, scope, wl->cond)) return false;
 
-      da_append(&p->code, INST_JZ);
-      da_append(&p->code, 0);
+      vec_push(&p->code, INST_JZ);
+      vec_push(&p->code, 0);
       j_to_end_offset = p->code.count - 1;
 
-      da_foreach(ast_stmt_t*, stmt, &wl->body->stmts)
+      vec_foreach(stmt, &wl->body->stmts)
         if(!codegen_stmt(p, wl->scope, f, *stmt)) return false;
 
       int32_t rel_jmp = (p->code.count - 1) - j_to_start;
-      da_append(&p->code, INST_JMP);
-      da_append(&p->code, -rel_jmp);
+      vec_push(&p->code, INST_JMP);
+      vec_push(&p->code, -rel_jmp);
 
-      p->code.items[j_to_end_offset] = p->code.count - j_to_end_offset + 1;
+      vec_set(&p->code, j_to_end_offset, p->code.count - j_to_end_offset + 1);
 
       return true;
     }
@@ -3322,14 +3308,10 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
   if (d->symbol->storage == STO_EXTERN) {
     type_t* sig = d->sig->resolved_type;
 
-    struct {
-      ffi_type** items;
-      size_t count;
-      size_t capacity;
-    } param_types = { 0 };
+    VEC(ffi_type*) param_types = { 0 };
 
     for(size_t i=0; i < sig->as.func.params.count; i++)
-      da_append(&param_types, type_to_ffi_type(*sig->as.func.params.items[i]));
+      vec_push(&param_types, type_to_ffi_type(*vec_get(&sig->as.func.params, i)));
 
     ffi_type* ret = type_to_ffi_type(*sig->as.func.ret);
 
@@ -3337,9 +3319,9 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
     ffi_status status = ffi_prep_cif(
       &cif,
       FFI_DEFAULT_ABI,
-      param_types.count,
+      vec_len(&param_types),
       ret,
-      param_types.items
+      vec_data(&param_types)
     );
 
     if (status != FFI_OK) {
@@ -3359,7 +3341,7 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
       // TODO: lib is leaked
       lib = strdup(lib);
 
-    da_append(&p->externs, ((struct _extern){ 
+    vec_push(&p->externs, ((struct _extern){ 
       .cif = cif,
       .name = name,
       .lib = lib,
@@ -3373,19 +3355,19 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
     f.loc_vars = d->sig->params.count;
     // SysV-style calling convention
     for (size_t i = 0; i < f.loc_vars; i++) {
-      da_append(&p->code, INST_STORE);
-      da_append(&p->code, i);
+      vec_push(&p->code, INST_STORE);
+      vec_push(&p->code, i);
     }
 
-    da_foreach(ast_stmt_t*, stmt, &d->body->stmts)
+    vec_foreach(stmt, &d->body->stmts)
       if(!codegen_stmt(p, d->scope, &f, *stmt)) return false;
 
-    if(da_last(&p->code) != INST_RET)
-      da_append(&p->code, INST_RET);
+    if(vec_last(&p->code) != INST_RET)
+      vec_push(&p->code, INST_RET);
 
     if (d->symbol->storage == STO_EXPORT) {
       // leak
-      da_append(&p->exports, ((struct _export){ .name = strdup(d->symbol->name), .addr = d->symbol->addr }));
+      vec_push(&p->exports, ((struct _export){ .name = strdup(d->symbol->name), .addr = d->symbol->addr }));
     }
   }
 
@@ -3393,19 +3375,19 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
 }
 
 static inline int codegen(program_t* p, ast_root_t* root) {
-  da_append(&p->code, INST_HALT);
+  vec_push(&p->code, INST_HALT);
 
-  da_foreach(ast_func_def_t*, d, &root->func_defs) {
+  vec_foreach(d, &root->func_defs) {
     if(!codegen_func_def(p, *d)) return false;
   }
 
-  da_foreach(ast_var_def_t*, d, &root->var_defs) {
+  vec_foreach(d, &root->var_defs) {
     uint32_t val = 0;
     if ((*d)->init) {
       switch((*d)->init->kind) {
         case EXPR_STRING:
           val = p->constants.count;
-          da_append(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = strdup((*d)->init->as.s) }));
+          vec_push(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = strdup((*d)->init->as.s) }));
           break;
         case EXPR_NUMBER:
           val = (*d)->init->as.number.u;
@@ -3426,28 +3408,28 @@ static inline int codegen(program_t* p, ast_root_t* root) {
     }
     set_symbol_address((*d)->symbol, p->globals.count);
 
-    da_append(&p->globals, val);
+    vec_push(&p->globals, val);
   }
-  da_foreach(ast_impl_t*, impl, &root->impls) {
-    da_foreach(ast_func_def_t*, d, &(*impl)->methods) {
+  vec_foreach(impl, &root->impls) {
+    vec_foreach(d, &(*impl)->methods) {
       if(!codegen_func_def(p, *d)) return false;
     }
   }
 
-  da_foreach(ast_mod_t*, mod, &root->submods) {
+  vec_foreach(mod, &root->submods) {
     if(!codegen(p, (*mod)->root)) return false;
   }
 
   // patch addresses
-  da_foreach(struct _patch, patch, &p->patches) {
-    p->code.items[patch->addr] = patch->symbol->addr;
+  vec_foreach(patch, &p->patches) {
+    vec_set(&p->code, patch->addr, patch->symbol->addr);
   }
 
   return true;
 }
 
 static inline void add_method_to_interface(type_t* interface, interface_method_t method) {
-  da_append(&interface->as.interface.methods, method);
+  vec_push(&interface->as.interface.methods, method);
 }
 
 static inline type_t* make_interface_with_methods(typechecker_t* t, const char* name, size_t n_methods, ...) {
@@ -3458,7 +3440,7 @@ static inline type_t* make_interface_with_methods(typechecker_t* t, const char* 
   va_start(args, n_methods);
 
   for(size_t i=0; i<n_methods; i++) {
-    da_append(&interface->as.interface.methods, va_arg(args, interface_method_t));
+    vec_push(&interface->as.interface.methods, va_arg(args, interface_method_t));
   }
 
   va_end(args);
@@ -3467,7 +3449,7 @@ static inline type_t* make_interface_with_methods(typechecker_t* t, const char* 
 }
 
 static inline type_t* method_owner(symbol_t* s) {
-  return (*s->type->as.func.params.items);
+  return vec_first(&s->type->as.func.params);
 }
 
 // TODO: save slice_t instead of sb_t in tokenizer
@@ -3484,7 +3466,7 @@ static inline bool compile(program_t* program, const char* path, const sb_t* sou
   if(tok_tokenize(&tok)) return false;
   fprintf(stdout, "%s%s\033[0m Tokenization OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
 
-  // da_foreach(token_t, t, &tok.tokens) {
+  // vec_foreach(t, &tok.tokens) {
   //   __dbg_print_tok(stdout, *t);
   // }
 

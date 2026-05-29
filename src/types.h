@@ -5,6 +5,7 @@
 #include <ffi.h>
 
 #include "arena.h"
+#include "vec.h"
 #include "sb.h"
 #include "slice.h"
 
@@ -81,11 +82,7 @@ typedef struct {
   loc_t loc;
 } token_t;
 
-typedef struct {
-  token_t *items;
-  size_t count;
-  size_t capacity;
-} tokenarr_t;
+typedef VEC(token_t) tokenarr_t;
 
 typedef struct {
   slice_t source;
@@ -172,11 +169,7 @@ struct _scope {
   struct _scope* parent;
   // TODO: OPTIMIZE
   // transform into hashmap
-  struct {
-    symbol_t** items;
-    size_t count;
-    size_t capacity;
-  } symbols;
+  VEC(symbol_t*) symbols;
 };
 
 typedef struct _ast_expr_t ast_expr_t;
@@ -203,11 +196,7 @@ typedef struct {
 
 typedef struct {
   AST_DEFAULT_FIELDS;
-  struct {
-    ast_param_t** items;
-    size_t count;
-    size_t capacity;
-  } params;
+  VEC(ast_param_t*) params;
   ast_type_t* ret;
   type_t* resolved_type;
 } ast_sig_t;
@@ -221,11 +210,7 @@ struct _attribute {
 
 typedef struct {
   AST_DEFAULT_FIELDS;
-  struct {
-    struct _attribute* items;
-    size_t count;
-    size_t capacity;
-  } attrs;
+  VEC(struct _attribute) attrs;
 } ast_attr_list_t;
 
 typedef struct {
@@ -254,31 +239,19 @@ typedef struct {
   scope_t* scope;
   ast_type_t* type;
   ast_type_t* interface;
-  struct {
-    ast_func_def_t** items;
-    size_t count;
-    size_t capacity;
-  } methods;
+  VEC(ast_func_def_t*) methods;
 } ast_impl_t;
 
 typedef struct {
   AST_DEFAULT_FIELDS;
   const char* name;
-  struct {
-    ast_func_def_t** items;
-    size_t count;
-    size_t capacity;
-  } methods;
+  VEC(ast_func_def_t*) methods;
 } ast_iface_t;
 
 typedef struct {
   AST_DEFAULT_FIELDS;
   const char* name;
-  struct {
-    ast_param_t** items;
-    size_t count;
-    size_t capacity;
-  } fields;
+  VEC(ast_param_t*) fields;
   type_t* self_type;
 } ast_struct_t;
 
@@ -379,11 +352,7 @@ struct _ast_expr_t {
     } access;
     struct { 
       ast_expr_t* callee;
-      struct _args {
-        ast_expr_t** items;
-        size_t count;
-        size_t capacity;
-      } args;
+      VEC(ast_expr_t*) args;
     } funcall;
     struct {
       ast_expr_t* lhs;
@@ -391,22 +360,14 @@ struct _ast_expr_t {
     } assign;
     struct {
       ast_expr_t* type;
-      struct {
-        struct _mkobj_field {
-          const char* field;
-          ast_expr_t* value;
-          symbol_t* symbol;
-        }* items;
-        size_t count;
-        size_t capacity;
-      } fields;
+      VEC(struct _mkobj_field {
+        const char* field;
+        ast_expr_t* value;
+        symbol_t* symbol;
+      }) fields;
     } mkobj;
     struct {
-      struct {
-        ast_expr_t** items;
-        size_t count;
-        size_t capacity;
-      } elems;
+      VEC(ast_expr_t*) elems;
       ast_expr_t* repeat;
     } mkarr;
     struct {
@@ -450,50 +411,18 @@ typedef struct {
 
 struct _ast_body_t {
   AST_DEFAULT_FIELDS;
-  struct {
-    ast_stmt_t** items;
-    size_t count;
-    size_t capacity;
-  } stmts;
+  VEC(ast_stmt_t*) stmts;
 };
 
 struct _ast_root {
   AST_DEFAULT_FIELDS;
-  struct {
-    ast_func_def_t** items;
-    size_t count;
-    size_t capacity;
-  } func_defs;
-  struct {
-    ast_var_def_t** items;
-    size_t count;
-    size_t capacity;
-  } var_defs;
-  struct {
-    ast_impl_t** items;
-    size_t count;
-    size_t capacity;
-  } impls;
-  struct {
-    ast_iface_t** items;
-    size_t count;
-    size_t capacity;
-  } interfaces;
-  struct {
-    ast_mod_t** items;
-    size_t count;
-    size_t capacity;
-  } submods;
-  struct {
-    ast_struct_t** items;
-    size_t count;
-    size_t capacity;
-  } structs;
-  struct {
-    ast_typedef_t** items;
-    size_t count;
-    size_t capacity;
-  } typedefs;
+  VEC(ast_func_def_t*) func_defs;
+  VEC(ast_var_def_t*) var_defs;
+  VEC(ast_impl_t*) impls;
+  VEC(ast_iface_t*) interfaces;
+  VEC(ast_mod_t*) submods;
+  VEC(ast_struct_t*) structs;
+  VEC(ast_typedef_t*) typedefs;
   scope_t* scope;
 };
 
@@ -545,11 +474,7 @@ struct _type {
   type_kind_t kind;
   union {
     struct {
-      struct {
-        struct _type** items;
-        size_t count;
-        size_t capacity;
-      } fields;
+      VEC(struct _type*) fields;
     } structure;
     struct {
       struct _type* inner;
@@ -557,22 +482,14 @@ struct _type {
     } array;
     struct {
       struct _type* ret;
-      struct {
-        struct _type** items;
-        size_t count;
-        size_t capacity;
-      } params;
+      VEC(struct _type*) params;
     } func;
     struct {
       struct _type* target;
     } alias; 
     struct {
       const char* name;
-      struct _i_methods {
-        interface_method_t* items;
-        size_t count;
-        size_t capacity;
-      } methods;
+      VEC(interface_method_t) methods;
     } interface;
     struct {
       struct _type* of;
@@ -580,11 +497,7 @@ struct _type {
   } as;
   scope_t* scope;
   // TODO: make hashmap<ast_qn_t*, bool>
-  struct {
-    ast_qn_t** items;
-    size_t count;
-    size_t capacity;
-  } impls;
+  VEC(ast_qn_t*) impls;
 };
 
 struct _method {
@@ -596,11 +509,7 @@ struct _method {
 
 typedef struct {
   arena_t arena;
-  struct {
-    type_t** items;
-    size_t count;
-    size_t capacity;
-  } custom_types; // use for interning
+  VEC(type_t*) custom_types; // use for interning
   struct {
     type_t const* none;
     type_t const* i32;
@@ -729,49 +638,41 @@ typedef uint32_t instruction_t; enum {
   INST_COUNT,
 };
 
-typedef struct {
-  instruction_t* items;
-  size_t count;
-  size_t capacity;
-} instrarr_t;
+typedef VEC(instruction_t) instrarr_t;
 
 typedef struct {
   instrarr_t code;
   struct _consts {
-    constant_t* items;
-    size_t count;
-    size_t capacity;
+    __VEC_HEADER__(constant_t);
   } constants;
   struct _glob {
-    uint32_t* items;
-    size_t count;
-    size_t capacity;
+    __VEC_HEADER__(uint32_t);
   } globals;
   struct _exports {
-    struct _export {
-      const char* name;
-      uint32_t addr;
-    }* items;
-    size_t count;
-    size_t capacity;
+    __VEC_HEADER__(
+      struct _export {
+        const char* name;
+        uint32_t addr;
+      }
+    );
   } exports;
   struct _externs {
-    struct _extern{ 
-      ffi_cif cif;
-      const char* name;
-      const char* lib;
-      bool access_state;
-    }* items;
-    size_t count;
-    size_t capacity;
+    __VEC_HEADER__(
+      struct _extern{ 
+        ffi_cif cif;
+        const char* name;
+        const char* lib;
+        bool access_state;
+      }
+    );
   } externs;
   struct _patches {
-    struct _patch {
-      uint32_t addr;
-      symbol_t* symbol; 
-    }* items;
-    size_t count;
-    size_t capacity;
+    __VEC_HEADER__(
+      struct _patch {
+        uint32_t addr;
+        symbol_t* symbol; 
+      }
+    );
   } patches;
 } program_t;
 
@@ -804,10 +705,8 @@ typedef struct _handle_node {
 } handle_node_t;
 
 typedef struct {
-  obj_t* items;
+  __VEC_HEADER__(obj_t);
   handle_node_t* freelist;
-  size_t count;
-  size_t capacity;
 } obj_pool_t;
 
 typedef struct {

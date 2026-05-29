@@ -4,7 +4,7 @@
 #include "debug.h"
 
 #include "types.h"
-#include "da.h"
+#include "vec.h"
 #include "macros.h"
 
 void __dbg_print_tok(FILE* stream, token_t tok) {
@@ -58,10 +58,10 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
       ast_root_t* root = (ast_root_t*)n;
       fprintf(stream, "%*s%s\n", level, "","AST_ROOT");
       fprintf(stream, "%*s%s\n", level + 2, "","DEFINITIONS:");
-      da_foreach(ast_func_def_t*, d, &root->func_defs) {
+      vec_foreach(d, &root->func_defs) {
         __dbg_print_ast(stream, (ast_node_t*)*d, level + 4);
       }
-      da_foreach(ast_var_def_t*, d, &root->var_defs) {
+      vec_foreach(d, &root->var_defs) {
         __dbg_print_ast(stream, (ast_node_t*)*d, level + 4);
       }
       break;
@@ -119,7 +119,7 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
           fprintf(stream, "%*scallee:\n", level + 2, "");
           __dbg_print_ast(stream, (ast_node_t*)expr->as.funcall.callee, level + 2);
           fprintf(stream, "%*sArgs:\n", level + 2, "");
-          da_foreach(ast_expr_t*, a, &expr->as.funcall.args) {
+          vec_foreach(a, &expr->as.funcall.args) {
             __dbg_print_ast(stream, (ast_node_t*)*a, level + 2);
           }
           break;
@@ -137,7 +137,7 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
         case EXPR_MKOBJ:
           fprintf(stream, " (%s)\n", "EXPR_MKOBJ");
           fprintf(stream, "%*sfields:\n", level + 2, "");
-          da_foreach(struct _mkobj_field, f, &expr->as.mkobj.fields) {
+          vec_foreach(f, &expr->as.mkobj.fields) {
             fprintf(stream, "%*s%s:\n", level + 2, "", f->field);
             __dbg_print_ast(stream, (ast_node_t*)f->value, level + 2);
           }
@@ -209,7 +209,7 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
       break;
     case AST_BODY:
       fprintf(stream, "%*s%s\n", level, "", "AST_BODY");
-      da_foreach(ast_stmt_t*, stmt, &((ast_body_t*)n)->stmts) {
+      vec_foreach(stmt, &((ast_body_t*)n)->stmts) {
         __dbg_print_ast(stream, (ast_node_t*)*stmt, level + 2);
       }
       break;
@@ -224,7 +224,7 @@ void __dbg_print_ast(FILE* stream, ast_node_t* n, int level) {
       ast_sig_t* sig = (ast_sig_t*)n;
       fprintf(stream, "%*s%s\n", level, "", "AST_SIG");
       fprintf(stream, "%*sParams:\n", level + 2, "");
-      da_foreach(ast_param_t*, p, &sig->params) {
+      vec_foreach(p, &sig->params) {
         __dbg_print_ast(stream, (ast_node_t*)*p, level + 2);
       }
       fprintf(stream, "%*sRet type:\n", level + 2, "");
@@ -254,7 +254,7 @@ static inline void __dbg_print_symbol_table_entries(FILE* stream, scope_t* scope
   (void)scope;
 #else
   if(!scope) return;
-  da_foreach(symbol_t*, s, &scope->symbols) {
+  vec_foreach(s, &scope->symbols) {
     fprintf(stream, "%-30s %-30s ", (*s)->name, scope->name);
     switch((*s)->storage) {
       case STO_LOCAL:
@@ -454,18 +454,18 @@ void __dbg_print_disass(FILE* stream, program_t* p, scope_t* root) {
   (void)root;
 #else
   for (size_t i = 0; i < p->code.count; i++) {
-    da_foreach(symbol_t*, s, &root->symbols) {
+    vec_foreach(s, &root->symbols) {
       if(i == (*s)->addr && (*s)->kind == SYMB_FUNC && (*s)->storage != STO_EXTERN)
         fprintf(stream, "function <%s>:\n", (*s)->name);
     }
     fprintf(stream, "  0x%08" PRIx64, i);
-    switch(p->code.items[i]) {
+    switch(vec_get(&p->code, i)) {
       case INST_NOP:
         fprintf(stream, "  %-10s\n", "NOP"); break;
       case INST_PUSH:
-        fprintf(stream, "  %-10s 0x%08X\n", "PUSH", p->code.items[++i]); break;
+        fprintf(stream, "  %-10s 0x%08X\n", "PUSH", vec_get(&p->code, ++i)); break;
       // case INST_PUSHL:
-      //   fprintf(stream, "  %-10s 0x%016lX\n", "PUSHL", ((uint64_t)p->code.items[++i] << 32) | p->code.items[++i]); break;
+      //   fprintf(stream, "  %-10s 0x%016lX\n", "PUSHL", ((uint64_t)vec_get(&p->code, ++i) << 32) | vec_get(&p->code, ++i)); break;
       case INST_POP:
         fprintf(stream, "  %-10s\n", "POP"); break;
       case INST_DUP:
@@ -473,48 +473,48 @@ void __dbg_print_disass(FILE* stream, program_t* p, scope_t* root) {
       case INST_SWAP:
         fprintf(stream, "  %-10s\n", "SWAP"); break;
       case INST_LOAD:
-        fprintf(stream, "  %-10s 0x%08X\n", "LOAD", p->code.items[++i]); break;
+        fprintf(stream, "  %-10s 0x%08X\n", "LOAD", vec_get(&p->code, ++i)); break;
       case INST_LOADG:
-        fprintf(stream, "  %-10s 0x%08X\n", "LOADG", p->code.items[++i]); break;
+        fprintf(stream, "  %-10s 0x%08X\n", "LOADG", vec_get(&p->code, ++i)); break;
       case INST_LOADC: {
-        uint32_t op = p->code.items[++i];
+        uint32_t op = vec_get(&p->code, ++i);
         fprintf(stream, "  %-10s 0x%08X        ", "LOADC", op);
         fprintf(stream, "    ->    ");
-        __dbg_print_data(stream, p->constants.items[op]);
+        __dbg_print_data(stream, vec_get(&p->constants, op));
         fprintf(stream, "\n");
         break;
       }
       case INST_LOADF:
-        fprintf(stream, "  %-10s 0x%08X\n", "LOADF", p->code.items[++i]); break;
+        fprintf(stream, "  %-10s 0x%08X\n", "LOADF", vec_get(&p->code, ++i)); break;
       case INST_LOADI:
         fprintf(stream, "  %-10s\n", "LOADI"); break;
       case INST_STORE:
-        fprintf(stream, "  %-10s 0x%08X\n", "STORE", p->code.items[++i]); break;
+        fprintf(stream, "  %-10s 0x%08X\n", "STORE", vec_get(&p->code, ++i)); break;
       case INST_STOREG:
-        fprintf(stream, "  %-10s 0x%08X\n", "STOREG", p->code.items[++i]); break;
+        fprintf(stream, "  %-10s 0x%08X\n", "STOREG", vec_get(&p->code, ++i)); break;
       case INST_STOREF:
-        fprintf(stream, "  %-10s 0x%08X\n", "STOREF", p->code.items[++i]); break;
+        fprintf(stream, "  %-10s 0x%08X\n", "STOREF", vec_get(&p->code, ++i)); break;
       case INST_STOREI:
         fprintf(stream, "  %-10s\n", "STOREI"); break;
       case INST_JMP: {
-        uint32_t op = p->code.items[++i];
+        uint32_t op = vec_get(&p->code, ++i);
         fprintf(stream, "  %-10s 0x%08X        \n", "JMP", op);
         break;
       }
       case INST_JNZ: {
-        uint32_t op = p->code.items[++i];
+        uint32_t op = vec_get(&p->code, ++i);
         fprintf(stream, "  %-10s 0x%08X        \n", "JNZ", op);
         break;
       }
       case INST_JZ: {
-        uint32_t op = p->code.items[++i];
+        uint32_t op = vec_get(&p->code, ++i);
         fprintf(stream, "  %-10s 0x%08X        \n", "JZ", op);
         break;
       }
       case INST_CALL: {
-        uint32_t op = p->code.items[++i];
+        uint32_t op = vec_get(&p->code, ++i);
         fprintf(stream, "  %-10s 0x%08X        ", "CALL", op);
-        da_foreach(symbol_t*, s, &root->symbols) {
+        vec_foreach(s, &root->symbols) {
           if(op == (*s)->addr && (*s)->kind == SYMB_FUNC && (*s)->storage != STO_EXTERN) {
             fprintf(stream, "    ->    ");
             fprintf(stream, "<%s>", (*s)->name);
@@ -525,9 +525,9 @@ void __dbg_print_disass(FILE* stream, program_t* p, scope_t* root) {
         break;
       }
       case INST_HOSTCALL: {
-        uint32_t op = p->code.items[++i];
+        uint32_t op = vec_get(&p->code, ++i);
         fprintf(stream, "  %-10s 0x%08X        ", "HOSTCALL", op);
-        da_foreach(symbol_t*, s, &root->symbols) {
+        vec_foreach(s, &root->symbols) {
           if(op == (*s)->addr && (*s)->kind == SYMB_FUNC && (*s)->storage == STO_EXTERN) {
             fprintf(stream, "    ->    ");
             fprintf(stream, "<extern::%s>", (*s)->name);
@@ -575,7 +575,7 @@ void __dbg_print_disass(FILE* stream, program_t* p, scope_t* root) {
         fprintf(stream, "  %-10s\n", "HALT"); break;
 
       case INST_MKOBJ:
-        fprintf(stream, "  %-10s 0x%08X\n", "MKOBJ", p->code.items[++i]); break;
+        fprintf(stream, "  %-10s 0x%08X\n", "MKOBJ", vec_get(&p->code, ++i)); break;
 
       case INST_COUNT:
       default:

@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 #include "sb.h"
-#include "da.h"
+#include "vec.h"
 #include "arena.h"
 
 #include "types.h"
@@ -54,8 +54,8 @@ int main(int argc, char** argv) {
 
 #define SB_IMPLEMENTATION
 #include "sb.h"
-#define DA_IMPLEMENTATION
-#include "da.h"
+#define VEC_IMPLEMENTATION
+#include "vec.h"
 #define ARENA_IMPLEMENTATION
 #include "arena.h"
 #define SLICE_IMPLEMENTATION

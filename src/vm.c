@@ -8,7 +8,7 @@
 
 #include "arena.h"
 #include "sb.h"
-#include "da.h"
+#include "vec.h"
 
 #include "macros.h"
 #include "types.h"
@@ -48,7 +48,7 @@ void set_active_task(task_t* t) {
 obj_t* get_obj(obj_handle_t h) {
   const vm_t* vm = get_vm_instance();
   if (h == HANDLE_INVALID) return NULL;
-  return &da_at(vm->active_task->obj_pool, h);
+  return &vec_get(&vm->active_task->obj_pool, h);
 }
 
 static inline obj_handle_t make_obj_str(obj_pool_t* pool, const char* s) {
@@ -59,13 +59,13 @@ static inline obj_handle_t make_obj_str(obj_pool_t* pool, const char* s) {
     free(tmp);
   } else {
     ret = pool->count;
-    da_append(pool, (obj_t){ 0 });
+    vec_push(pool, (obj_t){ 0 });
   }
 
-  da_at(*pool, ret).kind = OBJ_STR;
-  da_at(*pool, ret).as.str.data = strdup(s);
-  da_at(*pool, ret).as.str.size = strlen(s);
-  da_at(*pool, ret).refs = 0;
+  vec_get(pool, ret).kind = OBJ_STR;
+  vec_get(pool, ret).as.str.data = strdup(s);
+  vec_get(pool, ret).as.str.size = strlen(s);
+  vec_get(pool, ret).refs = 0;
 
   return ret;
 }
@@ -80,7 +80,7 @@ FMT_PRINTF(2, 3) static inline obj_handle_t make_obj_strf(obj_pool_t* pool, cons
     free(tmp);
   } else {
     ret = pool->count;
-    da_append(pool, (obj_t){ 0 });
+    vec_push(pool, (obj_t){ 0 });
   }
 
   va_start(args, fmt);
@@ -91,10 +91,10 @@ FMT_PRINTF(2, 3) static inline obj_handle_t make_obj_strf(obj_pool_t* pool, cons
   len = vsnprintf(s, len + 1, fmt, args);
   va_end(args);
 
-  da_at(*pool, ret).kind = OBJ_STR;
-  da_at(*pool, ret).as.str.data = s;
-  da_at(*pool, ret).as.str.size = len;
-  da_at(*pool, ret).refs = 0;
+  vec_get(pool, ret).kind = OBJ_STR;
+  vec_get(pool, ret).as.str.data = s;
+  vec_get(pool, ret).as.str.size = len;
+  vec_get(pool, ret).refs = 0;
 
   return ret;
 }
@@ -107,13 +107,13 @@ static inline obj_handle_t make_obj_struct(obj_pool_t* pool, size_t size) {
     free(tmp);
   } else {
     ret = pool->count;
-    da_append(pool, (obj_t){ 0 });
+    vec_push(pool, (obj_t){ 0 });
   }
 
-  da_at(*pool, ret).kind = OBJ_STRUCT;
-  da_at(*pool, ret).as.structure.fields = malloc(sizeof(uint32_t) * size);
-  da_at(*pool, ret).as.structure.n_fields = size;
-  da_at(*pool, ret).refs = 0;
+  vec_get(pool, ret).kind = OBJ_STRUCT;
+  vec_get(pool, ret).as.structure.fields = malloc(sizeof(uint32_t) * size);
+  vec_get(pool, ret).as.structure.n_fields = size;
+  vec_get(pool, ret).refs = 0;
 
   return ret;
 }
@@ -125,7 +125,7 @@ static inline void destroy_obj(obj_handle_t handle) {
 
   obj_pool_t* pool = &get_active_task()->obj_pool;
 
-  obj_t* obj = &da_at(*pool, handle);
+  obj_t* obj = &vec_get(pool, handle);
   switch(obj->kind) {
     case OBJ_STR:
       free((void*)obj->as.str.data);
@@ -133,7 +133,7 @@ static inline void destroy_obj(obj_handle_t handle) {
     case OBJ_STRUCT:
       for (size_t i = 0; i < obj->as.structure.n_fields; i++)
         release_obj(obj->as.structure.fields[i]); 
-      free(da_at(*pool, handle).as.structure.fields);
+      free(vec_get(pool, handle).as.structure.fields);
       break;
     default:
       UNREACHABLE("destroy - unknown obj kind");
@@ -149,12 +149,12 @@ static inline void destroy_obj(obj_handle_t handle) {
 static inline void release_obj(obj_handle_t handle) {
   if (handle == HANDLE_INVALID) return;
   obj_pool_t pool = get_active_task()->obj_pool;
-  if (--da_at(pool, handle).refs <= 0) destroy_obj(handle);
+  if (--vec_get(&pool, handle).refs <= 0) destroy_obj(handle);
 }
 
 static inline obj_handle_t acquire_obj(obj_handle_t handle) {
   if (handle != HANDLE_INVALID)
-    ++da_at(get_active_task()->obj_pool, handle).refs;
+    ++vec_get(&get_active_task()->obj_pool, handle).refs;
   return handle;
 }
 
@@ -246,23 +246,23 @@ task_t* load_task(program_t* p) {
   t->program = p;
 
 #if defined(_WIN32)
-  void* pages = VirtualAlloc(NULL, p->code.count * sizeof(*p->code.items), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  void* pages = VirtualAlloc(NULL, vec_data_size(&p->code), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
   if(!pages) return NULL;
-  CopyMemory(pages, p->code.items, p->code.count * sizeof(*p->code.items));
+  CopyMemory(pages, vec_data(&p->code), vec_data_size(&p->code));
   t->code = pages;
-  t->last_inst = t->code + (p->code.count - 1) * sizeof(*p->code.items);
+  t->last_inst = t->code + (vec_len(&p->code) - 1) * vec_elem_size(&p->code);
   DWORD old_prot = 0;
-  VirtualProtect(t->code, (p->code.count - 1) * sizeof(*p->code.items), PAGE_READONLY, &old_prot);
+  VirtualProtect(t->code, (vec_len(&p->code) - 1) * vec_elem_size(&p->code), PAGE_READONLY, &old_prot);
 
   pages = VirtualAlloc(NULL, MAX_STACK, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
   if(!pages) return NULL;
   t->stack = pages;
 #elif defined(__linux__)
-  void* pages = mmap(NULL, p->code.count * sizeof(*p->code.items), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  void* pages = mmap(NULL, vec_data_size(&p->code), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if(!pages) return NULL;
-  memcpy(pages, p->code.items, p->code.count * sizeof(*p->code.items));
+  memcpy(pages, p->code.items, vec_data_size(&p->code));
   t->code = pages;
-  t->last_inst = t->code + (p->code.count - 1) * sizeof(*p->code.items);
+  t->last_inst = t->code + (vec_len(&p->code) - 1) * vec_elem_size(&p->code);
   // TODO: make code read-only
 
   pages = mmap(NULL, MAX_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -279,11 +279,11 @@ task_t* load_task(program_t* p) {
     t->consts.count = p->constants.count;
 
     for (size_t i=0; i < p->constants.count; i++) {
-      constant_t* c = &p->constants.items[i];
+      constant_t* c = &vec_get(&p->constants, i);
       switch(c->kind) {
         case DK_STR:
           obj_handle_t h = make_obj_str(&t->obj_pool, c->as.s);
-          ++da_at(t->obj_pool, h).refs;
+          ++vec_get(&t->obj_pool, h).refs;
           t->consts.data[i] = h;
           free((void*)c->as.s);
           break;
@@ -303,13 +303,13 @@ task_t* load_task(program_t* p) {
     t->externs.count = p->externs.count;
 
     for (size_t i=0; i < p->externs.count; i++) {
-      t->externs.data[i].cif = p->externs.items[i].cif;
-      t->externs.data[i].name = arena_strdup(&t->arena, p->externs.items[i].name);
-      t->externs.data[i].lib = p->externs.items[i].lib ? arena_strdup(&t->arena, p->externs.items[i].lib) : NULL;
-      t->externs.data[i].access_state = p->externs.items[i].access_state;
+      t->externs.data[i].cif = vec_get(&p->externs, i).cif;
+      t->externs.data[i].name = arena_strdup(&t->arena, vec_get(&p->externs, i).name);
+      t->externs.data[i].lib = vec_get(&p->externs, i).lib ? arena_strdup(&t->arena, vec_get(&p->externs, i).lib) : NULL;
+      t->externs.data[i].access_state = vec_get(&p->externs, i).access_state;
 
 #ifdef _WIN32
-      LoadLibraryA(p->externs.items[i].lib);
+      LoadLibraryA(vec_get(&p->externs, i).lib);
 #endif
     }
   }
@@ -320,8 +320,8 @@ task_t* load_task(program_t* p) {
     t->exports.count = p->exports.count;
 
     for (size_t i=0; i < p->exports.count; i++) {
-      t->exports.data[i].name = arena_strdup(&t->arena, p->exports.items[i].name);
-      t->exports.data[i].addr = p->exports.items[i].addr;
+      t->exports.data[i].name = arena_strdup(&t->arena, vec_get(&p->exports, i).name);
+      t->exports.data[i].addr = vec_get(&p->exports, i).addr;
     }
   }
 
@@ -331,7 +331,7 @@ task_t* load_task(program_t* p) {
     t->globals.count = p->globals.count;
 
     for (size_t i=0; i < t->globals.count; i++) {
-      t->globals.data[i] = p->globals.items[i];
+      t->globals.data[i] = vec_get(&p->globals, i);
     }
   }
 
