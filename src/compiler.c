@@ -1655,10 +1655,43 @@ static inline int type_equals(type_t a, type_t b) {
   }
 }
 
-static bool type_is_of_kind(const type_t* type, type_kind_t kind) {
-  // TODO: what if checking alias? -> early return
+static inline type_structure_t* type_struct(const type_t* type) {
   while (type->kind == TYPE_ALIAS) type = type->as.alias.target;
-  return type->kind == kind;
+  return (type_structure_t*)&type->as.structure;
+}
+
+static inline type_array_t* type_array(const type_t* type) {
+  while (type->kind == TYPE_ALIAS) type = type->as.alias.target;
+  return (type_array_t*)&type->as.array;
+}
+
+static inline type_func_t* type_func(const type_t* type) {
+  while (type->kind == TYPE_ALIAS) type = type->as.alias.target;
+  return (type_func_t*)&type->as.func;
+}
+
+static inline type_alias_t* type_alias(const type_t* type) {
+  return (type_alias_t*)&type->as.alias;
+}
+
+static inline type_interface_t* type_interface(const type_t* type) {
+  while (type->kind == TYPE_ALIAS) type = type->as.alias.target;
+  return (type_interface_t*)&type->as.interface;
+}
+
+static inline type_type_t* type_type(const type_t* type) {
+  while (type->kind == TYPE_ALIAS) type = type->as.alias.target;
+  return (type_type_t*)&type->as.type;
+}
+
+static inline const type_t* type_get_effective(const type_t* type) {
+  while (type->kind == TYPE_ALIAS) type = type->as.alias.target;
+  return type;
+}
+
+static inline bool type_is_of_kind(const type_t* type, type_kind_t kind) {
+  if (kind == TYPE_ALIAS) return type->kind == kind; 
+  return type_get_effective(type)->kind == kind;
 }
 
 void render_type(sb_t* sb, const type_t* t) {
@@ -1787,8 +1820,8 @@ static inline type_t* get_or_create_func_type_from_arr(typechecker_t* t, const t
 
   type_t* type = make_type(t, TYPE_FUNC, NULL, 1); // which is the correct size?
   for(size_t i=0; i < n_params; i++)
-    vec_push(&type->as.func.params, params[i]);
-  type->as.func.ret = (type_t*)ret_type;
+    vec_push(&type_func(type)->params, params[i]);
+  type_func(type)->ret = (type_t*)ret_type;
   vec_push(&t->custom_types, type);
 
   return type;
@@ -1942,8 +1975,8 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
       UNREACHABLE("find_binop_impl");
   }
 
-  while (owner->kind == TYPE_ALIAS) owner = owner->as.alias.target;
-  while (other->kind == TYPE_ALIAS) other = other->as.alias.target;
+  owner = type_get_effective(owner);
+  owner = type_get_effective(other);
 
   if (!interface_name || !method_name) return NULL;
 
@@ -1967,9 +2000,9 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
     if(
         (*s)->kind == SYMB_FUNC &&
         strcmp((*s)->name, method_name) == 0 && 
-        (*s)->type->as.func.params.count == 2 &&
-        type_equals(*vec_get(&(*s)->type->as.func.params, 0), *owner) &&
-        type_equals(*vec_get(&(*s)->type->as.func.params, 1), *other)
+        type_func((*s)->type)->params.count == 2 &&
+        type_equals(*vec_get(&type_func((*s)->type)->params, 0), *owner) &&
+        type_equals(*vec_get(&type_func((*s)->type)->params, 1), *other)
     )
       method = *s;
   }
@@ -2013,7 +2046,8 @@ static inline symbol_t* find_unop_impl(const type_t* owner, op_kind_t op) {
       UNREACHABLE("find_unnop_impl: %c - 0x%X", op, op);
   }
 
-  while (owner->kind == TYPE_ALIAS) owner = owner->as.alias.target;
+  owner = type_get_effective(owner);
+  
 
   if (!interface_name || !method_name) return NULL;
 
@@ -2037,8 +2071,8 @@ static inline symbol_t* find_unop_impl(const type_t* owner, op_kind_t op) {
     if(
         (*s)->kind == SYMB_FUNC &&
         strcmp((*s)->name, method_name) == 0 && 
-        (*s)->type->as.func.params.count == 1 &&
-        type_equals(*vec_get(&(*s)->type->as.func.params, 0), *owner)
+        type_func((*s)->type)->params.count == 1 &&
+        type_equals(*vec_get(&type_func((*s)->type)->params, 0), *owner)
     )
       method = *s;
   }
@@ -2080,7 +2114,7 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
     return false;
   }
 
-  type_t* ret = impl->type->as.func.ret;
+  type_t* ret = type_func(impl->type)->ret;
   if (strcmp(ret->name, "Self") == 0) ret = ret->as.alias.target;
 
   ast_expr_t* lhs = e->as.binop.lhs;
@@ -2132,7 +2166,7 @@ static inline bool resolve_type_unop(typechecker_t* t, ast_expr_t* e) {
     return false;
   }
 
-  type_t* ret = impl->type->as.func.ret;
+  type_t* ret = type_func(impl->type)->ret;
   if (strcmp(ret->name, "Self") == 0) ret = ret->as.alias.target;
 
   e->kind = EXPR_FUNCALL;
@@ -2275,13 +2309,13 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         return false;
       }
 
-      if (n_args + n_hidden_args != callee->type->as.func.params.count) {
+      if (n_args + n_hidden_args != type_func(callee->type)->params.count) {
           fdiagf(
             stderr,
             DIAG_ERROR,
             expr->loc,
             "Mismatched number of arguments in function call: expected %zu, got %zu.",
-            callee->type->as.func.params.count,
+            type_func(callee->type)->params.count,
             n_args + n_hidden_args
           );
           return false;
@@ -2289,13 +2323,13 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
 
       if (callee->kind == EXPR_ACCESS) {
         // NOTE: should never happen
-        if(!type_equals(*callee->as.access.owner->type, *vec_first(&callee->type->as.func.params))) {
+        if(!type_equals(*callee->as.access.owner->type, *vec_first(&type_func(callee->type)->params))) {
           fdiagf(
             stderr,
             DIAG_ERROR,
             callee->loc,
             "Mismatched type for method: expected `%s`, got `%s`",
-            type_to_str(&t->arena, vec_first(&callee->type->as.func.params)),
+            type_to_str(&t->arena, vec_first(&type_func(callee->type)->params)),
             type_to_str(&t->arena, callee->as.access.owner->type)
           );
           return false;
@@ -2306,7 +2340,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         ast_expr_t* arg = vec_get(&expr->as.funcall.args, i);
         if(!typecheck_expr(t, arg)) return false;
         type_t const* a = arg->type;
-        type_t const* b = vec_get(&callee->type->as.func.params, i + n_hidden_args);
+        type_t const* b = vec_get(&type_func(callee->type)->params, i + n_hidden_args);
         if (!type_equals(*a, *b)) {
           // TODO: find way to retrieve argument name for better diagnostics
           fdiagf(
@@ -2322,7 +2356,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         }
       }
 
-      expr->type = callee->type->as.func.ret;
+      expr->type = type_func(callee->type)->ret;
       return true;
     case EXPR_SUBEXPR:
       if (!typecheck_expr(t, expr->as.subexpr)) return false;
@@ -2371,7 +2405,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         struct _mkobj_field *f = &vec_get(&expr->as.mkobj.fields, i);
         if(!typecheck_expr(t, f->value)) return false;
 
-        symbol_t* s = resolve_field(type->type->as.type.of->scope, f->field);
+        symbol_t* s = resolve_field(type_type(type->type)->of->scope, f->field);
         if (!s) {
           fdiagf(
             stderr,
@@ -2402,7 +2436,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         }
       }
 
-      expr->type = type->type->as.type.of; 
+      expr->type = type_type(type->type)->of; 
       return true;
     case EXPR_MKARR:
       const type_t* inner_type = NULL;
@@ -2489,7 +2523,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         return false;
       }
   
-      expr->type = expr->as.index.expr->type->as.array.inner;
+      expr->type = type_array(expr->as.index.expr->type)->inner;
       return true;
     default:
       UNREACHABLE("typecheck_expr");
@@ -2761,9 +2795,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
   // Add names to symbol table before resolving aliases
   vec_foreach(s, &root->structs) {
-    size_t size = 0;
-    // TODO: size should be sum of fields
-    (*s)->self_type = make_type(t, TYPE_STRUCT, (*s)->name, (*s)->fields.count);
+    (*s)->self_type = make_type(t, TYPE_STRUCT, (*s)->name, 1);
   }
 
   vec_foreach(td, &root->typedefs) {
@@ -2778,8 +2810,10 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   // Typecheck struct fields after resolving type aliases
   vec_foreach(s, &root->structs) {
     enter_scope(t, (*s)->self_type->scope);
+
     vec_foreach(f, &(*s)->fields) {
       if(!resolve_type_decl(t, (*f)->type)) return false;
+      type_struct((*s)->self_type)->obj_size += (*f)->type->resolved_type->size;
 
       symbol_t* sym = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_INSTANCE, (*f)->name, (*f)->type->resolved_type);
       if(!sym) {
@@ -2789,7 +2823,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       set_symbol_address(sym, vec_indexof(&(*s)->fields, f));
       (*f)->symbol = sym;
 
-      vec_push(&(*s)->self_type->as.structure.fields, (*f)->type->resolved_type);
+      vec_push(&type_struct((*s)->self_type)->fields, (*f)->type->resolved_type);
     }
     exit_scope(t);
   }
@@ -2837,7 +2871,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     }
 
     if(!resolve_type_decl(t, (*impl)->type)) return false;
-    type_t* type = (*impl)->type->resolved_type;
+    const type_t* type = (*impl)->type->resolved_type;
 
     // TODO: Temporary. I'll come back to this when I implement GENERICS
     // (Rust style blanket implementations impl <iface>: T[] {...})
@@ -2850,13 +2884,13 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     enter_scope(t, type->scope);
     
     type_t* self = make_type(t, TYPE_ALIAS, "Self", 0);
-    self->as.alias.target = type;
+    self->as.alias.target = (type_t*)type;
     self->scope = type->scope;
 
     vec_foreach(method, &(*impl)->methods) {
       if(!impl_self) {
         bool found = false;
-        vec_foreach(m, &(*impl)->interface->resolved_type->as.interface.methods) {
+        vec_foreach(m, &type_interface((*impl)->interface->resolved_type)->methods) {
           if(strcmp(m->name, (*method)->name) == 0) { found = true; break;}
         }
         if(!found) {
@@ -2870,8 +2904,8 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     t->current_scope = saved_scope;
 
     if (!impl_self) {
-      while (type->kind == TYPE_ALIAS) type = type->as.alias.target;
-      vec_foreach(m, &(*impl)->interface->resolved_type->as.interface.methods) {
+      type = type_get_effective(type);
+      vec_foreach(m, &type_interface((*impl)->interface->resolved_type)->methods) {
         // TODO: compare types, not just name
 
         symbol_t* s = resolve_field(type->scope, m->name);
@@ -3137,7 +3171,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
       }
       case EXPR_MKOBJ: {
         vec_push(&p->code, INST_MKOBJ);
-        vec_push(&p->code, e->as.mkobj.type->type->size);
+        vec_push(&p->code, type_struct(e->type)->obj_size);
 
         vec_foreach(f, &e->as.mkobj.fields) {
           vec_push(&p->code, INST_DUP);
@@ -3148,7 +3182,6 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           vec_push(&p->code, INST_STOREF);
           vec_push(&p->code, f->symbol->addr);
         }
-        // other value should be set to INVALID_HANDLE
 
         break;
       }
@@ -3156,7 +3189,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         vec_push(&p->code, INST_MKOBJ);
         if (e->as.mkarr.repeat) {
           uint64_t repeat = e->as.mkarr.repeat->as.number.u; // is constant
-          vec_push(&p->code, repeat);
+          vec_push(&p->code, repeat * type_array(e->type)->inner->size);
 
           for (size_t i = 0; i < repeat; i++) {
             vec_push(&p->code, INST_DUP);
@@ -3168,7 +3201,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
             vec_push(&p->code, i);
           }
         } else {
-          vec_push(&p->code, e->as.mkarr.elems.count);
+          vec_push(&p->code, e->as.mkarr.elems.count * type_array(e->type)->inner->size);
 
           for (size_t i=0; i < e->as.mkarr.elems.count; i++) {
             vec_push(&p->code, INST_DUP);
@@ -3449,7 +3482,7 @@ static inline type_t* make_interface_with_methods(typechecker_t* t, const char* 
 }
 
 static inline type_t* method_owner(symbol_t* s) {
-  return vec_first(&s->type->as.func.params);
+  return vec_first(&type_func(s->type)->params);
 }
 
 // TODO: save slice_t instead of sb_t in tokenizer

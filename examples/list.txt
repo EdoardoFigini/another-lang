@@ -24,13 +24,18 @@ List: struct {
 }
 
 export main: () -> none {
-  l := List();
+  l := new List{};
+
+  print((l.to_str() + " - count: " + (#l).to_str() + "\n").c_str());
 
   i := 10;
   while i > 0 {
     l.insert(i);
     i = i - 1;
   }
+
+  print((l.to_str() + " - count: " + (#l).to_str() + "\n").c_str());
+
   i = 11;
   while i <= 20 {
     l.append(i);
@@ -41,15 +46,14 @@ export main: () -> none {
 }
 
 impl Self: List {
-  init : (self: Self) -> Self {
-    self._count = 0U;
-    return self;
+  make : () -> Self {
+    return new Self { };
   }
 
   insert: (self: Self, n: i32) -> none {
     tmp := self.head;
 
-    self.head = Node(n);
+    self.head = Node::make(n);
     self.head.next = tmp;
 
     if self._count == 0U {
@@ -65,7 +69,7 @@ impl Self: List {
       return;
     }
 
-    self.tail.next = Node(n);
+    self.tail.next = Node::make(n);
     self.tail = self.tail.next; 
 
     self._count = self._count + 1U;
@@ -93,9 +97,8 @@ impl core::ops::Countable: List {
 }
 
 impl Self: Node {
-  init : (self: Self, n: i32) -> Self {
-    self.item = n;
-    return self;
+  make : (n: i32) -> Self {
+    return new Self { item = n };
   }
 
   to_str: (self: Self) -> str {

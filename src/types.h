@@ -468,32 +468,45 @@ typedef struct {
   const type_t* type;
 } interface_method_t;
 
+typedef struct {
+  VEC(struct _type*) fields;
+  size_t obj_size;
+} type_structure_t;
+
+typedef struct {
+  struct _type* inner;
+  size_t size;
+} type_array_t;
+
+typedef struct {
+  struct _type* ret;
+  VEC(struct _type*) params;
+} type_func_t;
+
+typedef struct {
+  struct _type* target;
+} type_alias_t;
+
+typedef struct {
+  const char* name;
+  VEC(interface_method_t) methods;
+} type_interface_t;
+
+typedef struct {
+  struct _type* of;
+} type_type_t;
+
 struct _type {
   const char* name;
   size_t size;
   type_kind_t kind;
   union {
-    struct {
-      VEC(struct _type*) fields;
-    } structure;
-    struct {
-      struct _type* inner;
-      size_t size;
-    } array;
-    struct {
-      struct _type* ret;
-      VEC(struct _type*) params;
-    } func;
-    struct {
-      struct _type* target;
-    } alias; 
-    struct {
-      const char* name;
-      VEC(interface_method_t) methods;
-    } interface;
-    struct {
-      struct _type* of;
-    } type;
+    type_structure_t structure;
+    type_array_t     array;
+    type_func_t      func;
+    type_alias_t     alias;
+    type_interface_t interface;
+    type_type_t      type;
   } as;
   scope_t* scope;
   // TODO: make hashmap<ast_qn_t*, bool>
