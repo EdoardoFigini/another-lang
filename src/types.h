@@ -100,10 +100,6 @@ typedef struct {
   scope_t* current_scope;
 } parser_t;
 
-static inline void parser_destroy(parser_t* p) {
-  // tokens and source destroyed in tok_destroy
-  arena_free(&p->arena);
-}
 
 typedef enum {
   AST_ROOT = 1,
@@ -155,11 +151,17 @@ typedef enum {
   STO_INSTANCE,
 } symb_storage_t;
 
+typedef union {
+  type_t* type;
+  // TODO: compile-time constants
+} compile_time_value_t;
+
 typedef struct {
   const char* name;
   symb_kind_t kind;
   symb_storage_t storage;
   type_t* type;
+  compile_time_value_t value;
   uint32_t addr;
   bool addr_resolved;
 } symbol_t;
@@ -329,6 +331,7 @@ struct _ast_expr_t {
     const char* s;
     struct {
       lit_type_info_flags_t ti;
+      // TODO: this should be in compile_time_constant_t
       union {
         uint64_t u;
         int64_t i;
@@ -376,6 +379,7 @@ struct _ast_expr_t {
     } index;
     ast_expr_t* subexpr;
   } as;
+  compile_time_value_t value;
 };
 
 typedef enum {
@@ -536,6 +540,7 @@ typedef struct {
     type_t const* str;
     type_t const* array;
     type_t const* addr;
+    type_t const* type;
 
     scope_t* scope;
   } builtins;

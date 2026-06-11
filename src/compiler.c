@@ -522,6 +522,13 @@ static inline ast_qn_t* _make_qn(arena_t* a, size_t n, ...) {
   return qn;
 }
 
+static inline scope_t* type_get_scope(const type_t* type);
+
+static inline scope_t* symbol_get_scope(const symbol_t* s) {
+  if (s->kind == SYMB_TYPE) return type_get_scope(s->value.type);
+  return type_get_scope(s->type);
+}
+
 static inline symbol_t* resolve_symbol_local_any(scope_t* scope, ast_qn_t* name) { 
   if (!scope) return NULL;
   if (!name) return NULL;
@@ -533,7 +540,7 @@ static inline symbol_t* resolve_symbol_local_any(scope_t* scope, ast_qn_t* name)
   }
 
   if (name->next && symb->kind != SYMB_TYPE) return NULL;
-  if (name->next) return resolve_symbol_local_any(symb->type->scope, name->next);
+  if (name->next) return resolve_symbol_local_any(symbol_get_scope(symb), name->next);
 
   return symb;
 }
@@ -564,7 +571,7 @@ static inline symbol_t* resolve_symbol_local(scope_t* scope, ast_qn_t* name, sym
 
     if (!symb) return NULL;
 
-    return resolve_symbol_local(symb->type->scope, name->next, kind);
+    return resolve_symbol_local(symbol_get_scope(symb), name->next, kind);
   }
 
   // OPTIMIZE
@@ -593,7 +600,7 @@ static inline symbol_t* resolve_symbol_any(scope_t* scope, ast_qn_t* name) {
   symbol_t* symb = resolve_qn_root(scope, name->name);
   if (!symb) return NULL;
 
-  if (name->next) return resolve_symbol_local_any(symb->type->scope, name->next);
+  if (name->next) return resolve_symbol_local_any(symbol_get_scope(symb), name->next);
 
   return symb;
 }
@@ -605,7 +612,7 @@ static inline symbol_t* resolve_symbol(scope_t* scope, ast_qn_t* name, symb_kind
   symbol_t* symb = resolve_qn_root(scope, name->name);
   if (!symb) return NULL;
 
-  if (name->next) return resolve_symbol_local(symb->type->scope, name->next, kind);
+  if (name->next) return resolve_symbol_local(symbol_get_scope(symb), name->next, kind);
 
   return symb->kind == kind ? symb : NULL;
 }
@@ -1612,6 +1619,11 @@ static inline void parser_init(parser_t* p, const tokenizer_t* t) {
   p->current = 0;
 }
 
+static inline void parser_destroy(parser_t* p) {
+  // tokens and source destroyed in tok_destroy
+  arena_free(&p->arena);
+}
+
 static inline int type_equals(type_t a, type_t b) {
   while (a.kind == TYPE_ALIAS) a = *a.as.alias.target;
   while (b.kind == TYPE_ALIAS) b = *b.as.alias.target;
@@ -1647,6 +1659,10 @@ static inline int type_equals(type_t a, type_t b) {
     case TYPE_INTERFACE:
       return strcmp(a.name, b.name) == 0;
     case TYPE_TYPE:
+      // All should typecheck with Type.
+      // HACK: should compare with t->builtins.type.
+      if (strcmp(a.name, "Type") == 0) return true;
+      if (strcmp(b.name, "Type") == 0) return true;
       return type_equals(*a.as.type.of, *b.as.type.of);
     case TYPE_ALIAS:
     case TYPES_COUNT:
@@ -1689,13 +1705,18 @@ static inline const type_t* type_get_effective(const type_t* type) {
   return type;
 }
 
+static inline scope_t* type_get_scope(const type_t* type) {
+  type = type_get_effective(type);
+  return type->scope;
+}
+
 static inline bool type_is_of_kind(const type_t* type, type_kind_t kind) {
   if (kind == TYPE_ALIAS) return type->kind == kind; 
   return type_get_effective(type)->kind == kind;
 }
 
 void render_type(sb_t* sb, const type_t* t) {
-  if(!t) UNREACHABLE("render_type: null type*");
+  if(!t) UNREACHABLE("render_type: null type*"); 
   switch(t->kind) {
     case TYPE_NONE:
     case TYPE_I32:
@@ -1711,6 +1732,7 @@ void render_type(sb_t* sb, const type_t* t) {
     case TYPE_STRUCT:
     case TYPE_MODULE:
     case TYPE_INTERFACE:
+    case TYPE_TYPE:
       sb_appendf(sb, "%s", t->name);
       break;
     case TYPE_ARRAY:
@@ -1725,9 +1747,6 @@ void render_type(sb_t* sb, const type_t* t) {
       }
       sb_appendf(sb, ") -> ");
       render_type(sb, t->as.func.ret);
-      break;
-    case TYPE_TYPE:
-      sb_appendf(sb, "type %s", t->name);
       break;
     case TYPE_ALIAS:
       sb_appendf(sb, "%s", t->name);
@@ -1775,19 +1794,16 @@ static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* nam
   type->name = name;
   type->size = size;
 
-  type_t* type_type = arena_alloc(&t->arena, sizeof(*type));
-  type_type->kind = TYPE_TYPE;
-  type_type->name = name;
-  type_type->size = 0;
-  type_type->as.type.of = type;
-
   if (name) {
-    make_symbol(&t->arena, t->current_scope, SYMB_TYPE, STO_LOCAL, name, type_type);
+    // if builtins type is null means we are creating it. Its type should be itself. `Type` is of type `Type`.
+    type_t* symbol_type = (type_t*)t->builtins.type ? (type_t*)t->builtins.type : type; 
+
+    symbol_t* symb = make_symbol(&t->arena, t->current_scope, SYMB_TYPE, STO_LOCAL, name, symbol_type);
+    symb->value.type = type; 
     enter_scope_new(t, arena_sprintf(&t->arena, "type_%s", name));
     type->scope = t->current_scope;
     exit_scope(t);
   }
-  type_type->scope = type->scope;
   
   return type;
 }
@@ -1849,7 +1865,7 @@ static inline type_t* resolve_type(typechecker_t* t, ast_qn_t* name, int depth) 
   if (!symbol) return NULL;
 
   if (!symbol->type) return NULL;
-  res = symbol->type->as.type.of;
+  res = symbol->value.type; 
   if (!res) return NULL;
 
   while(depth-- > 0) {
@@ -2212,7 +2228,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
           stderr,
           DIAG_ERROR,
           expr->loc, 
-          "Cannot access instance field `%s` statically through type `%.*s`."
+          "Cannot access instance field `%s` statically through type `%.*s`. "
           "Try to instance an object (`obj: %.*s;`) and access the field from it (`obj.%s`).", 
           s->name,
           SB_FMT(sb),
@@ -2224,6 +2240,10 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
 
       expr->as.symbol.resolved_symbol = s;
       expr->type = s->type;
+      if (s->kind == SYMB_TYPE) { 
+        expr->value = s->value;
+        expr->is_const = true;
+      }
       return true;
     case EXPR_STRING:
       expr->type = t->builtins.str;
@@ -2262,31 +2282,43 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
     case EXPR_ACCESS: {
       if(!typecheck_expr(t, expr->as.access.owner)) return false;
 
-      symbol_t* s = resolve_field(expr->as.access.owner->type->scope, expr->as.access.field);
-      if (!s) {
-        fdiagf(
-          stderr,
-          DIAG_ERROR,
-          expr->loc,
-          "`%s` has no field named `%s`.",
-          type_to_str(&t->arena, expr->as.access.owner->type),
-          expr->as.access.field
-        );
-        return false;
-      }
-
+      symbol_t* s = resolve_field(type_get_scope(expr->as.access.owner->value.type), expr->as.access.field);
       if (type_is_of_kind(expr->as.access.owner->type, TYPE_TYPE)) {
-        fdiagf(
-          stderr,
-          DIAG_ERROR,
-          expr->as.access.owner->loc,
-          "Cannot access field `%s` of `%s`. "
-          "Maybe you wanted to access its scope? (try using `::` operator instead of `.`).",
-          expr->as.access.field,
-          type_to_str(&t->arena, expr->as.access.owner->type)
-        );
+        if (!s) {
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            expr->loc,
+            "`%s` has no field named `%s`. Besides, you cannot access instance fields. "
+            "Maybe you wanted to access its scope? (try using `::` instead of `.` - with a valid member name).",
+            type_to_str(&t->arena, expr->as.access.owner->value.type),
+            expr->as.access.field
+          );
+        } else {
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            expr->as.access.owner->loc,
+            "Cannot access field `%s` of `%s`. "
+            "Maybe you wanted to access its scope? (try using `::` instead of `.`).",
+            expr->as.access.field,
+            type_to_str(&t->arena, expr->as.access.owner->value.type)
+          );
+        }
         return false;
-      } 
+      } else { 
+        if (!s) {
+          fdiagf(
+            stderr,
+            DIAG_ERROR,
+            expr->loc,
+            "`%s` has no field named `%s`.",
+            type_to_str(&t->arena, expr->as.access.owner->type),
+            expr->as.access.field
+          );
+          return false;
+        }
+      }
 
       expr->as.access.field_symbol = s;
       expr->type = s->type;
@@ -2394,18 +2426,23 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       ast_expr_t* type = expr->as.mkobj.type;
       if(!typecheck_expr(t, type)) return false;
 
-      size_t n_fields = expr->as.mkobj.fields.count;
+      if (!type->is_const) {
+        fdiagf(stderr, DIAG_ERROR, type->loc, "Expression is not compile-time constant.");
+        return false;
+      }
 
       if (!type_is_of_kind(type->type, TYPE_TYPE)) {
         fdiagf(stderr, DIAG_ERROR, type->loc, "Unrecognized type `%s`.", type_to_str(&t->arena, type->type));
         return false;
       }
 
+      size_t n_fields = expr->as.mkobj.fields.count;
+
       for(size_t i = 0; i < n_fields; i++) {
         struct _mkobj_field *f = &vec_get(&expr->as.mkobj.fields, i);
         if(!typecheck_expr(t, f->value)) return false;
 
-        symbol_t* s = resolve_field(type_type(type->type)->of->scope, f->field);
+        symbol_t* s = resolve_field(type_get_scope(type->value.type), f->field);
         if (!s) {
           fdiagf(
             stderr,
@@ -2436,7 +2473,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         }
       }
 
-      expr->type = type_type(type->type)->of; 
+      expr->type = type->value.type; 
       return true;
     case EXPR_MKARR:
       const type_t* inner_type = NULL;
@@ -2759,6 +2796,8 @@ static inline void typechecker_init(typechecker_t* t) {
   enter_scope_new(t, "__builtin_types");
   t->builtins.scope = t->current_scope;
   
+  // type must be first
+  t->builtins.type      = make_type(t, TYPE_TYPE, "Type", 0);
   t->builtins.none      = make_type(t, TYPE_NONE, "none", 0);
   t->builtins.i32       = make_type(t, TYPE_I32,  "i32",  1);
   t->builtins.i64       = make_type(t, TYPE_I64,  "i64",  2);
@@ -2787,7 +2826,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   vec_foreach(mod, &root->submods) {
     type_t* type = make_type(t, TYPE_MODULE, (*mod)->name, 0);
 
-    enter_scope(t, type->scope);
+    enter_scope(t, type_get_scope(type));
     t->current_scope->parent = t->builtins.scope; 
     typecheck(t, (*mod)->root);
     t->current_scope = root->scope;
@@ -2809,7 +2848,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
   // Typecheck struct fields after resolving type aliases
   vec_foreach(s, &root->structs) {
-    enter_scope(t, (*s)->self_type->scope);
+    enter_scope(t, type_get_scope((*s)->self_type));
 
     vec_foreach(f, &(*s)->fields) {
       if(!resolve_type_decl(t, (*f)->type)) return false;
@@ -2837,7 +2876,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
     type_t* type = make_type(t, TYPE_INTERFACE, (*iface)->name, 0);
 
-    enter_scope(t, type->scope);
+    enter_scope(t, type_get_scope(type));
     vec_foreach(def, &(*iface)->methods) {
       if(!resolve_func_def(t, *def)) return false;
 
@@ -2881,11 +2920,11 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     }
 
     scope_t* saved_scope = t->current_scope;
-    enter_scope(t, type->scope);
+    enter_scope(t, type_get_scope(type));
     
     type_t* self = make_type(t, TYPE_ALIAS, "Self", 0);
     self->as.alias.target = (type_t*)type;
-    self->scope = type->scope;
+    self->scope = type_get_scope(type);
 
     vec_foreach(method, &(*impl)->methods) {
       if(!impl_self) {
@@ -2908,7 +2947,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
       vec_foreach(m, &type_interface((*impl)->interface->resolved_type)->methods) {
         // TODO: compare types, not just name
 
-        symbol_t* s = resolve_field(type->scope, m->name);
+        symbol_t* s = resolve_field(type_get_scope(type), m->name);
         if(!s || s->kind != SYMB_FUNC) {
           fdiagf(stderr, DIAG_ERROR, (*impl)->loc, "Missing required method `%s` in `%s` interface implementation.", m->name, qn_to_str(&t->arena, (*impl)->interface->name));
           return false;
@@ -2975,7 +3014,7 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   vec_foreach(impl, &root->impls) {
     type_t* type = (*impl)->type->resolved_type;
     scope_t* saved_scope = t->current_scope;
-    enter_scope(t, type->scope);
+    enter_scope(t, type_get_scope(type));
     vec_foreach(method, &(*impl)->methods)
       if(!typecheck_func(t, *method)) return false;
     t->current_scope = saved_scope;
