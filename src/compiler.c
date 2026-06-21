@@ -2282,7 +2282,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
     case EXPR_ACCESS: {
       if(!typecheck_expr(t, expr->as.access.owner)) return false;
 
-      symbol_t* s = resolve_field(type_get_scope(expr->as.access.owner->value.type), expr->as.access.field);
+      symbol_t* s = resolve_field(type_get_scope(expr->as.access.owner->type), expr->as.access.field);
       if (type_is_of_kind(expr->as.access.owner->type, TYPE_TYPE)) {
         if (!s) {
           fdiagf(
@@ -2291,7 +2291,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
             expr->loc,
             "`%s` has no field named `%s`. Besides, you cannot access instance fields. "
             "Maybe you wanted to access its scope? (try using `::` instead of `.` - with a valid member name).",
-            type_to_str(&t->arena, expr->as.access.owner->value.type),
+            type_to_str(&t->arena, expr->as.access.owner->type),
             expr->as.access.field
           );
         } else {
@@ -2302,7 +2302,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
             "Cannot access field `%s` of `%s`. "
             "Maybe you wanted to access its scope? (try using `::` instead of `.`).",
             expr->as.access.field,
-            type_to_str(&t->arena, expr->as.access.owner->value.type)
+            type_to_str(&t->arena, expr->as.access.owner->type)
           );
         }
         return false;
