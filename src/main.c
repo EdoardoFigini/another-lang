@@ -29,7 +29,10 @@ int main(int argc, char** argv) {
 
   task_t* t = load_task(&prog);
   set_active_task(t);
+  
+  fprintf(stdout, "==========[BEGIN OUTPUT]==========\n");
   vm_exitcode_t res = call("main", 0);
+  fprintf(stdout, "==========[END OUTPUT]==========\n");
 
 
   sb_t sb = { 0 };

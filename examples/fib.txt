@@ -1,7 +1,5 @@
 N := 9U;
 
-extern print: (s: addr) -> i32;
-
 fib: (n : u32) -> u32 {
   if n < 2U {
     return n;
@@ -12,15 +10,7 @@ fib: (n : u32) -> u32 {
 
 export main: () -> none {
   res := fib(N);
-  print(res.to_str().c_str());
+  std::io::print(res.to_str());
 }
 
-impl Self: u32 {
-  [[name="i32__to_str"]]
-  extern to_str: (self: Self) -> str;
-}
-
-impl Self: str {
-  [[name="str__c_str"]]
-  extern c_str: (self: Self) -> addr;
-}
+@import std;

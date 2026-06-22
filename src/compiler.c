@@ -20,6 +20,8 @@
 
 #include "vm.h"
 
+#define COMPTIME_DIRECTIVE_PREFIX "@"
+
 const char* tok_keywords[] = {
   [KW_RETURN]    = "return",
   [KW_EXTERN]    = "extern",
@@ -34,6 +36,10 @@ const char* tok_keywords[] = {
   [KW_STRUCT]    = "struct",
   [KW_TYPE]      = "type",
   [KW_NEW]       = "new",
+};
+
+const char* tok_ctds[] = {
+  [CT_IMPORT]   = COMPTIME_DIRECTIVE_PREFIX "import",
 };
 
 typedef enum {
@@ -125,6 +131,8 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
       case TOK_TYPE:
       case TOK_NEW:
         return tok_keywords[k];
+      case TOK_IMPORT:
+        return tok_ctds[k];
       default: return "<INVALID TOKEN>";
     }
   }
@@ -387,23 +395,46 @@ static inline int tok_tokenize(tokenizer_t* t) {
             break;
         }
         break;
+      case '@': {
+        char* end = p + 1;
+        for (; *end && (isalpha(*end) || isdigit(*end) || *end == '_'); end++);
+
+        bool found = false; 
+        for(size_t i=0; i < sizeof(tok_ctds)/sizeof(*tok_ctds); i++) {
+          if (!tok_ctds[i]) continue;
+          size_t ctd_len = strlen(tok_ctds[i]);
+          if(ctd_len == (size_t)(end - p) && memcmp(p, tok_ctds[i], ctd_len) == 0) {
+            found = true;
+            tok = (token_t){ .kind = i, .view = { .data = p, .size = (int)(end - p) } };
+            break;
+          }
+        }
+        if(found) break;
+        else {
+          fdiagf(stderr, DIAG_ERROR, loc, "Tokenizer: - unrecognized Compile-Time directive");
+          // TODO: continue instead of returning
+          return 1;
+        }
+      }
+
 
       default:
         if(isalpha(*p) || *p == '_') {
-          uint8_t kw = 0;
+          char* end = p;
+          for (; *end && (isalpha(*end) || isdigit(*end) || *end == '_'); end++);
+
+          bool found = false;
           for(size_t i=0; i < sizeof(tok_keywords)/sizeof(*tok_keywords); i++) {
             if (!tok_keywords[i]) continue;
-            int kw_len = strlen(tok_keywords[i]);
-            if(memcmp(p, tok_keywords[i], kw_len) == 0) {
-              kw = 1;
-              tok = (token_t){ .kind = i, .view = { .data = p, .size = kw_len } };
+            size_t kw_len = strlen(tok_keywords[i]);
+            if(kw_len == (size_t)(end - p) && memcmp(p, tok_keywords[i], kw_len) == 0) {
+              found = true;
+              tok = (token_t){ .kind = i, .view = { .data = p, .size = (int)(end - p) } };
               break;
             }
           }
-          if(kw) break;
+          if(found) break;
 
-          char* end = p;
-          for (; *end && (isalpha(*end) || isdigit(*end) || *end == '_'); end++);
           tok = (token_t){
             .kind = TOK_IDENT,
             .view = { .data = p, .size = (int)(end - p) },
@@ -414,6 +445,7 @@ static inline int tok_tokenize(tokenizer_t* t) {
           if(tok_num_literal(t, &end, loc, &tok)) return 1;
 
         } else if (*p == '"') {
+          // TODO: move to `case '"':`
           char* end = p;
           const char* str = tok_string(t, &end, loc);
           if (!str) return 1;
@@ -485,7 +517,7 @@ static inline void set_symbol_address(symbol_t* s, uint32_t addr) {
 
 static inline symbol_t* make_symbol(arena_t* arena, scope_t* scope, symb_kind_t kind, symb_storage_t storage, const char* name, type_t* type) {
   symbol_t* s = arena_alloc(arena, sizeof(*s));
-  s->name = name;
+  s->name = name ? arena_strdup(arena, name) : NULL;
   s->kind = kind;
   s->storage = storage;
   s->type = type;
@@ -1546,6 +1578,24 @@ static inline ast_mod_t* parse_mod(parser_t* p, loc_t loc, const char* name) {
   return n;
 }
 
+static inline ast_import_t* parse_import(parser_t* p) {
+  if (!expect(p, TOK_IMPORT)) return NULL;
+  next(p);
+
+  ast_import_t* n = arena_alloc(&p->arena, sizeof(*n));
+  n->ast_kind = AST_IMPORT;
+  n->loc = get_tok(p).loc;
+
+  const char* name = get_tok(p).as.s; 
+  next(p);
+  n->name = arena_strdup(&p->arena, name);
+
+  if(!expect(p, ';')) return NULL;
+  next(p);
+  
+  return n;
+}
+
 // root: ( [ attr_list ] spec_flags ident ':' func_def )* 
 //     | ( [ attr_list ] spec_flags ident ':' var_def )*
 //     | ( ident ':' 'impl' ident '{' ( ident ':' func_decl func_def '}' )+ )*
@@ -1555,7 +1605,12 @@ static inline ast_root_t* parse(parser_t* p) {
   n->scope = p->current_scope;
 
   while(!tok_is(p, TOK_EOF) && !tok_is(p, '}')) {
-    if (tok_is(p, TOK_IMPL)) {
+    if (tok_is(p, TOK_IMPORT)) {
+      ast_import_t* import = parse_import(p);
+      if(!import) return NULL;
+
+      vec_push(&n->imports, import);
+    } else if (tok_is(p, TOK_IMPL)) {
       ast_impl_t* impl = parse_impl(p);
       if(!impl) return NULL;
 
@@ -1791,7 +1846,7 @@ static inline void typechecker_destroy(typechecker_t* t) {
 static inline type_t* make_type(typechecker_t* t, type_kind_t k, const char* name, size_t size) {
   type_t* type = arena_alloc(&t->arena, sizeof(*type));
   type->kind = k;
-  type->name = name;
+  type->name = name ? arena_strdup(&t->arena, name) : NULL;
   type->size = size;
 
   if (name) {
@@ -1873,6 +1928,37 @@ static inline type_t* resolve_type(typechecker_t* t, ast_qn_t* name, int depth) 
   }
 
   return res;
+}
+
+static inline const type_t* specialize_self_in_type(typechecker_t* t, const type_t* type, const type_t* owner) {
+  if (!type) return NULL;
+
+  if (type->kind == TYPE_ALIAS && strcmp(type->name, "Self") == 0) {
+    return owner;
+  } 
+
+  if (type->kind == TYPE_FUNC) {
+    type_t* new_func = arena_alloc(&t->arena, sizeof(*new_func));
+    *new_func = *type;
+    new_func->as.func.ret = (type_t*)specialize_self_in_type(t, type->as.func.ret, owner);
+
+    VEC(type_t*) new_params = {0};
+    vec_foreach(p, &type->as.func.params) {
+      vec_push(&new_params, (type_t*)specialize_self_in_type(t, *p, owner));
+    }
+    memcpy(&new_func->as.func.params, &new_params, sizeof(new_params));
+
+    return new_func;
+  } 
+
+  if (type->kind == TYPE_ARRAY) {
+    type_t* new_arr = arena_alloc(&t->arena, sizeof(*new_arr));
+    *new_arr = *type;
+    new_arr->as.array.inner = (type_t*)specialize_self_in_type(t, type->as.array.inner, owner);
+    return new_arr;
+  } 
+
+  return type; // Primitives, structs, and other types remain unchanged
 }
 
 static inline bool is_op_cmp(op_kind_t op) {
@@ -1992,7 +2078,7 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
   }
 
   owner = type_get_effective(owner);
-  owner = type_get_effective(other);
+  other = type_get_effective(other);
 
   if (!interface_name || !method_name) return NULL;
 
@@ -2321,7 +2407,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       }
 
       expr->as.access.field_symbol = s;
-      expr->type = s->type;
+      expr->type = specialize_self_in_type(t, s->type, expr->as.access.owner->type);
       return true;
     }
     case EXPR_FUNCALL:
@@ -2479,7 +2565,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       const type_t* inner_type = NULL;
 
       if (expr->as.mkarr.repeat) {
-        if(!typecheck_expr(t, vec_get(&expr->as.mkarr.elems, 0))) return NULL;
+        if(!typecheck_expr(t, vec_get(&expr->as.mkarr.elems, 0))) return false;
         inner_type = vec_get(&expr->as.mkarr.elems, 0)->type;
 
         if(!typecheck_expr(t, expr->as.mkarr.repeat)) return false;
@@ -2506,7 +2592,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         }
       } else {
         vec_foreach(e, &expr->as.mkarr.elems) {
-          if (!typecheck_expr(t, *e)) return NULL;
+          if (!typecheck_expr(t, *e)) return false;
           if (inner_type == NULL) inner_type = (*e)->type;
           else {
             if (!type_equals(*(*e)->type, *inner_type)) {
@@ -2525,7 +2611,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
       expr->type = get_or_create_array_of(t, inner_type);
       return true;
     case EXPR_INDEX:
-      if (!typecheck_expr(t, expr->as.index.expr)) return NULL;
+      if (!typecheck_expr(t, expr->as.index.expr)) return false;
       // TODO: Indexable interface 
       if (!type_is_of_kind(expr->as.index.expr->type, TYPE_ARRAY)) {
         fdiagf(
@@ -2538,7 +2624,7 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
         return false;
       }
 
-      if (!typecheck_expr(t, expr->as.index.idx)) return NULL;
+      if (!typecheck_expr(t, expr->as.index.idx)) return false;
       // TODO: Range type
       if(
         !type_equals(*expr->as.index.idx->type, *t->builtins.u32) &&
@@ -2809,30 +2895,21 @@ static inline void typechecker_init(typechecker_t* t) {
   t->builtins.boolean   = make_type(t, TYPE_BOOL, "bool", 1);
   t->builtins.str       = make_type(t, TYPE_STR,  "str",  1);
   t->builtins.addr      = make_type(t, TYPE_ADDR, "addr", 2);
-
-  enter_scope_new(t, "root");
 }
 
-// TODO: Typecheck should create a new tree different from AST, makes no sense
-// to add type-related fields inside the AST nodes (expr->type, type->resolved_type,
-// symbols, etc.). This will also avoid having to construct AST nodes after parsing
-// for stuff like operator overloading.
-// TODO: Make a function to check type->kind, otherwise aliases will fail checks
-static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
-  root->scope = t->current_scope;
-
-  // resolve types and symbols first
-
+// structs
+// aliases
+// interfaces
+static inline bool typecheck_decls_types(typechecker_t* t, ast_root_t* root) {
   vec_foreach(mod, &root->submods) {
     type_t* type = make_type(t, TYPE_MODULE, (*mod)->name, 0);
+    (*mod)->scope = type_get_scope(type);
 
-    enter_scope(t, type_get_scope(type));
-    t->current_scope->parent = t->builtins.scope; 
-    typecheck(t, (*mod)->root);
-    t->current_scope = root->scope;
+    enter_scope(t, (*mod)->scope);
+    if(!typecheck_decls_types(t, (*mod)->root)) return false;
+    exit_scope(t);
   }
 
-  // Add names to symbol table before resolving aliases
   vec_foreach(s, &root->structs) {
     (*s)->self_type = make_type(t, TYPE_STRUCT, (*s)->name, 1);
   }
@@ -2845,30 +2922,6 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     type->scope = alias->scope;
     type->as.alias.target = alias;
   }
-
-  // Typecheck struct fields after resolving type aliases
-  vec_foreach(s, &root->structs) {
-    enter_scope(t, type_get_scope((*s)->self_type));
-
-    vec_foreach(f, &(*s)->fields) {
-      if(!resolve_type_decl(t, (*f)->type)) return false;
-      type_struct((*s)->self_type)->obj_size += (*f)->type->resolved_type->size;
-
-      symbol_t* sym = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_INSTANCE, (*f)->name, (*f)->type->resolved_type);
-      if(!sym) {
-        fdiagf(stderr, DIAG_FATAL, (*f)->loc, "Failed to create type");
-        abort();
-      }
-      set_symbol_address(sym, vec_indexof(&(*s)->fields, f));
-      (*f)->symbol = sym;
-
-      vec_push(&type_struct((*s)->self_type)->fields, (*f)->type->resolved_type);
-    }
-    exit_scope(t);
-  }
-
-  vec_foreach(d, &root->func_defs)
-    if(!resolve_func_def(t, *d)) return false;
 
   vec_foreach(iface, &root->interfaces) {
     type_t* self = make_type(t, TYPE_ALIAS, "Self", 0);
@@ -2889,10 +2942,26 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
         fdiagf(stderr, DIAG_WARN, (*def)->loc, "Specifiers for method `%s` in `%s` interface will be ignored.", (*def)->name, (*iface)->name);
       }
 
-      vec_push(&type->as.interface.methods, ((interface_method_t){ .name = (*def)->name, .type = (*def)->sig->resolved_type }));
+      const char* method_name = (*def)->name ? arena_strdup(&t->arena, (*def)->name) : NULL;
+      vec_push(&type->as.interface.methods, ((interface_method_t){ .name = method_name, .type = (*def)->sig->resolved_type }));
     }
     exit_scope(t);
   }
+
+  return true;
+}
+
+// functions
+// implementations
+static inline bool typecheck_decls_funcs(typechecker_t* t, ast_root_t* root) {
+  vec_foreach(mod, &root->submods) {
+    enter_scope(t, (*mod)->scope);
+    if(!typecheck_decls_funcs(t, (*mod)->root)) return false;
+    exit_scope(t);
+  }
+
+  vec_foreach(d, &root->func_defs)
+    if(!resolve_func_def(t, *d)) return false;
 
   vec_foreach(impl, &root->impls) {
     bool impl_self = false;
@@ -2957,6 +3026,17 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
     }
   }
 
+  return true;
+}
+
+// root-level variable defs
+static inline bool typecheck_inits(typechecker_t* t, ast_root_t* root) {
+  vec_foreach(mod, &root->submods) {
+    enter_scope(t, (*mod)->scope);
+    if(!typecheck_inits(t, (*mod)->root)) return false;
+    exit_scope(t);
+  }
+
   vec_foreach(d, &root->var_defs) {
     const type_t* type = NULL;
 
@@ -3009,7 +3089,36 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
 
   }
 
-  // then check bodies
+  return true;
+}
+
+// bodies
+static inline bool typecheck_bodies(typechecker_t* t, ast_root_t* root) {
+  vec_foreach(mod, &root->submods) {
+    enter_scope(t, (*mod)->scope);
+    if(!typecheck_bodies(t, (*mod)->root)) return false;
+    exit_scope(t);
+  }
+
+  vec_foreach(s, &root->structs) {
+    enter_scope(t, type_get_scope((*s)->self_type));
+
+    vec_foreach(f, &(*s)->fields) {
+      if(!resolve_type_decl(t, (*f)->type)) return false;
+      type_struct((*s)->self_type)->obj_size += (*f)->type->resolved_type->size;
+
+      symbol_t* sym = make_symbol(&t->arena, t->current_scope, SYMB_VAR, STO_INSTANCE, (*f)->name, (*f)->type->resolved_type);
+      if(!sym) {
+        fdiagf(stderr, DIAG_FATAL, (*f)->loc, "Failed to create symbol");
+        abort();
+      }
+      set_symbol_address(sym, vec_indexof(&(*s)->fields, f));
+      (*f)->symbol = sym;
+
+      vec_push(&type_struct((*s)->self_type)->fields, (*f)->type->resolved_type);
+    }
+    exit_scope(t);
+  }
 
   vec_foreach(impl, &root->impls) {
     type_t* type = (*impl)->type->resolved_type;
@@ -3023,8 +3132,26 @@ static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
   vec_foreach(d, &root->func_defs) {
     if(!typecheck_func(t, *d)) return false;
   }
- 
+
   return true;
+}
+
+// TODO: Typecheck should create a new tree different from AST, makes no sense
+// to add type-related fields inside the AST nodes (expr->type, type->resolved_type,
+// symbols, etc.). This will also avoid having to construct AST nodes after parsing
+// for stuff like operator overloading.
+// TODO: differenciate between private/public symbols. Moreover @import <mod>
+// inside <mod1> should not make <mod> accessible from a program that @import-s <mod1>.
+// Now it is possible to have std::core::... since std @import-s core.
+static inline bool typecheck(typechecker_t* t, ast_root_t* root) {
+  root->scope = t->current_scope;
+
+  if (!typecheck_decls_types(t, root))  return false;
+  if (!typecheck_decls_funcs(t, root))  return false;
+  if (!typecheck_inits(t, root))  return false;
+  if (!typecheck_bodies(t, root)) return false;
+
+  return true; 
 }
 
 static inline void codegen_load_var(program_t* p, symbol_t* symbol) {
@@ -3060,7 +3187,7 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
         vec_push(&p->code, p->constants.count);
         // TODO: alloc on arena (make a 'program' arena that holds data that needs to be transfered
         // from compiler to vm. This arena will also hold any kind of ffi data)
-        vec_push(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = strdup(e->as.s) }));
+        vec_push(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = arena_strdup(&p->arena, e->as.s) }));
         break;
       case EXPR_NUMBER:
         if(e->as.number.ti & TI_LONG) {
@@ -3405,13 +3532,10 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
 
     const char* name = attributes_get(d->attributes, "name");
     if(!name) name = d->name;
-    // TODO: name is leaked
-    name = strdup(name);
+    name = arena_strdup(&p->arena, name);
 
     const char* lib = attributes_get(d->attributes, "lib");
-    if(lib)
-      // TODO: lib is leaked
-      lib = strdup(lib);
+    if(lib) lib = arena_strdup(&p->arena, lib);
 
     vec_push(&p->externs, ((struct _extern){ 
       .cif = cif,
@@ -3438,8 +3562,10 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
       vec_push(&p->code, INST_RET);
 
     if (d->symbol->storage == STO_EXPORT) {
-      // leak
-      vec_push(&p->exports, ((struct _export){ .name = strdup(d->symbol->name), .addr = d->symbol->addr }));
+      vec_push(&p->exports, ((struct _export){ 
+        .name = arena_strdup(&p->arena, d->symbol->name),
+        .addr = d->symbol->addr,
+      }));
     }
   }
 
@@ -3447,7 +3573,8 @@ static inline bool codegen_func_def(program_t* p, ast_func_def_t* d) {
 }
 
 static inline int codegen(program_t* p, ast_root_t* root) {
-  vec_push(&p->code, INST_HALT);
+  if (vec_len(&p->code) == 0)
+    vec_push(&p->code, INST_HALT);
 
   vec_foreach(d, &root->func_defs) {
     if(!codegen_func_def(p, *d)) return false;
@@ -3459,7 +3586,7 @@ static inline int codegen(program_t* p, ast_root_t* root) {
       switch((*d)->init->kind) {
         case EXPR_STRING:
           val = p->constants.count;
-          vec_push(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = strdup((*d)->init->as.s) }));
+          vec_push(&p->constants, ((constant_t){ .kind = DK_STR, .as.s = arena_strdup(&p->arena, (*d)->init->as.s) }));
           break;
         case EXPR_NUMBER:
           val = (*d)->init->as.number.u;
@@ -3524,47 +3651,95 @@ static inline type_t* method_owner(symbol_t* s) {
   return vec_first(&type_func(s->type)->params);
 }
 
-// TODO: save slice_t instead of sb_t in tokenizer
-static inline bool compile(program_t* program, const char* path, const sb_t* source) {
+static inline bool compile_module(program_t* p, const char* name, const char* path, slice_t source, typechecker_t* t) {
+  // return if already compiled
+  vec_foreach(i, &p->imports) {
+    if (strcmp(*i, name) == 0) {
+      fprintf(stdout, "%s%s\033[0m Skipping module `%s` (already compiled).\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG], name);
+      return true; 
+    }
+  }
+
   tokenizer_t tok = { 0 };
-  tok.source = slice_from_sb(*source);
+  parser_t parser = { 0 };
+
+  tok.source = source; 
   tok.path = path;
 
-  parser_t parser = { 0 };
-  typechecker_t tc = { 0 };
-
-  printf("%.*s\n\n", SB_FMT(*source));
 
   if(tok_tokenize(&tok)) return false;
-  fprintf(stdout, "%s%s\033[0m Tokenization OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
-
-  // vec_foreach(t, &tok.tokens) {
-  //   __dbg_print_tok(stdout, *t);
-  // }
+  fprintf(stdout, "%s%s\033[0m Tokenized `%s`.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG], name);
 
   parser_init(&parser, &tok);
   ast_root_t* root = parse(&parser);
   if(!root) return false;
-  fprintf(stdout, "%s%s\033[0m Parsing OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
+  fprintf(stdout, "%s%s\033[0m Parsed `%s`.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG], name);
 
-  // __dbg_print_ast(stdout, (ast_node_t*)root, 0);
+  type_t* type = make_type(t, TYPE_MODULE, name, 0);
 
-  typechecker_init(&tc);
-  if(!typecheck(&tc, root)) return false;
-  fprintf(stdout, "%s%s\033[0m Typechecker OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
+  enter_scope(t, type_get_scope(type));
 
-  if(!codegen(program, root)) return false;
-  fprintf(stdout, "%s%s\033[0m Codegen OK.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG]);
+  bool ok = true;
+  vec_foreach(i, &root->imports) {
+    // TODO: specify modules path from compile options
+    slice_t parent = slice_from_cstr(path);
+    while (parent.size > 0 && *(parent.data + parent.size - 1) != '/' && *(parent.data + parent.size - 1) != '\\') parent.size--;
+    const char* import_path = NULL;
+    sb_t sb = { 0 };
 
-  __dbg_print_symbol_table(stdout, root->scope);
+    for (size_t it = 0; ; it++) {
+      switch (it) {
+        case 0:
+          import_path = arena_sprintf(&parser.arena, "%.*s%s.txt", SLICE_FMT(parent), (*i)->name);
+          break;
+        case 1:
+          import_path = arena_sprintf(&parser.arena, "%.*smodules/%s.txt", SLICE_FMT(parent), (*i)->name);
+          break;
+        case 2:
+          // TODO: change this -> should be install_dir/modules
+          import_path = arena_sprintf(&parser.arena, "./modules/%s.txt", (*i)->name);
+          break;
+        default:
+          fdiagf(stderr, DIAG_ERROR, (*i)->loc, "Could not find module `%s`.", (*i)->name);
+          return false;
+      }
 
-  __dbg_print_disass(stdout, program, root->scope);
+      if (sb_read_file(import_path, &sb) >= 0) {
+        ok = ok && compile_module(p, (*i)->name, import_path, slice_from_sb(sb), t);
+        break;
+      }
+    }
+
+    sb_free(&sb);
+  }
+  if (!ok) return ok;
+
+  if(!typecheck(t, root)) return false;
+  fprintf(stdout, "%s%s\033[0m Typeched `%s`.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG], name);
+
+  // __dbg_print_symbol_table(stdout, root->scope);
+
+  exit_scope(t);
+
+  if(!codegen(p, root)) return false;
+  fprintf(stdout, "%s%s\033[0m Codegen `%s`.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG], name);
+
+  // __dbg_print_disass(stdout, p, root->scope);
+
+  vec_push(&p->imports, arena_strdup(&p->arena, name));
 
   tok_destroy(&tok);
   parser_destroy(&parser);
-  typechecker_destroy(&tc);
 
   return true;
+}
+
+static inline bool compile_root(program_t* program, const char* path, slice_t source) {
+  typechecker_t tc = { 0 };
+  typechecker_init(&tc);
+  bool res = compile_module(program, "root", path, source, &tc);
+  typechecker_destroy(&tc);
+  return res;
 }
 
 bool compile_from_file(program_t* program, const char* path) {
@@ -3574,15 +3749,11 @@ bool compile_from_file(program_t* program, const char* path) {
     return false;
   }
   sb_appendz(&sb, "");
-  bool res = compile(program, path, &sb);
+  bool res = compile_root(program, path, slice_from_sb(sb));
   sb_free(&sb);
   return res;
 }
 
 bool compile_from_cstr(program_t* program, const char* source) {
-  sb_t sb = { 0 };
-  sb_appendz(&sb, source);
-  bool res = compile(program, NULL, &sb);
-  sb_free(&sb);
-  return res;
+  return compile_root(program, NULL, slice_from_cstr(source));
 }

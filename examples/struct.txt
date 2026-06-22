@@ -1,3 +1,6 @@
+@import core;
+@import std;
+
 Vec2: struct {
   x: i32;
   y: i32;
@@ -10,20 +13,6 @@ Line: struct {
   p2: Point;
 }
 
-extern print: (s: addr) -> i32;
-
-core: mod {
-  ops: mod {
-    Add: interface {
-      add: (self: Self, other: Self) -> Self;
-    }
-  }
-}
-
-Stringify: interface {
-  to_str: (self: Self) -> str;
-}
-
 export main: () -> none {
   a := Vec2::make(34, 20);
 
@@ -33,31 +22,13 @@ export main: () -> none {
 
   res := a + b;
 
-  print(res.to_str().c_str());
+  std::io::print(res.to_str());
 
   line := Line::make(a, new Point{ x=0, y=0 });
   line.p2.x = 6;
   line.p2.y = 7;
 
-  print(Line::to_str(line).c_str());
-}
-
-impl core::ops::Add: str {
-  add: (self: Self, other: Self) -> Self {
-    return self.concat(other);
-  }
-}
-
-impl Self: str {
-  [[name="str__concat"]]
-  extern concat: (self: Self, other: Self) -> Self;
-  [[name="str__c_str"]]
-  extern c_str: (self: Self) -> addr;
-}
-
-impl Stringify: i32 {
-  [[name="i32__to_str"]]
-  extern to_str: (self: Self) -> str;
+  std::io::print(Line::to_str(line));
 }
 
 impl core::ops::Add: Vec2 {
@@ -69,7 +40,7 @@ impl core::ops::Add: Vec2 {
   }
 }
 
-impl Stringify: Vec2 {
+impl std::io::Stringify: Vec2 {
   to_str: (self: Self) -> str {
     return "Vec2(" + self.x.to_str() + ", " + self.y.to_str() + ")";
   }
@@ -86,7 +57,7 @@ impl Self: Vec2 {
   }
 }
 
-impl Stringify: Line {
+impl std::io::Stringify: Line {
   to_str: (self: Self) -> str {
     return "Line(" + self.p1.to_str() + ", " + self.p2.to_str() + ")";
   }

@@ -1,0 +1,5 @@
+ops: mod {
+  Add: interface {
+    add: (self: Self, other: Self) -> Self;
+  }
+}

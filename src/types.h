@@ -39,6 +39,7 @@ typedef enum {
   TOK_STRUCT,
   TOK_TYPE,
   TOK_NEW,
+  TOK_IMPORT,
 } tok_kind_t;
 
 typedef enum {
@@ -51,11 +52,15 @@ typedef enum {
   KW_WHILE     = TOK_WHILE,
   KW_IMPL      = TOK_IMPL,
   KW_INTERFACE = TOK_INTERFACE,
-  KW_MOD = TOK_MOD,
-  KW_STRUCT = TOK_STRUCT,
-  KW_TYPE = TOK_TYPE,
-  KW_NEW = TOK_NEW,
+  KW_MOD       = TOK_MOD,
+  KW_STRUCT    = TOK_STRUCT,
+  KW_TYPE      = TOK_TYPE,
+  KW_NEW       = TOK_NEW,
 } kw_kind_t;
+
+typedef enum {
+  CT_IMPORT = TOK_IMPORT,
+} comptime_kind_t;
 
 typedef enum {
   TI_UNSIGNED = 1 << 0,
@@ -118,6 +123,7 @@ typedef enum {
   AST_MOD,
   AST_STRUCT,
   AST_TYPEDEF,
+  AST_IMPORT,
 } ast_node_kind_t;
 
 #define AST_DEFAULT_FIELDS\
@@ -269,6 +275,7 @@ typedef struct {
   AST_DEFAULT_FIELDS;
   const char* name;
   ast_root_t* root;
+  scope_t* scope;
 } ast_mod_t;
 
 typedef enum {
@@ -418,6 +425,12 @@ struct _ast_body_t {
   VEC(ast_stmt_t*) stmts;
 };
 
+typedef struct {
+  AST_DEFAULT_FIELDS;
+  const char* name; 
+} ast_import_t; 
+
+
 struct _ast_root {
   AST_DEFAULT_FIELDS;
   VEC(ast_func_def_t*) func_defs;
@@ -427,6 +440,7 @@ struct _ast_root {
   VEC(ast_mod_t*) submods;
   VEC(ast_struct_t*) structs;
   VEC(ast_typedef_t*) typedefs;
+  VEC(ast_import_t*) imports;
   scope_t* scope;
 };
 
@@ -659,6 +673,7 @@ typedef uint32_t instruction_t; enum {
 typedef VEC(instruction_t) instrarr_t;
 
 typedef struct {
+  arena_t arena;
   instrarr_t code;
   struct _consts {
     __VEC_HEADER__(constant_t);
@@ -692,6 +707,7 @@ typedef struct {
       }
     );
   } patches;
+  VEC(const char*) imports;
 } program_t;
 
 // runtime

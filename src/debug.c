@@ -39,6 +39,7 @@ void __dbg_print_tok(FILE* stream, token_t tok) {
       case TOK_STRUCT: fprintf(stream, "%-20s", "TOK_STRUCT"); break;
       case TOK_TYPE: fprintf(stream, "%-20s", "TOK_TYPE"); break;
       case TOK_NEW: fprintf(stream, "%-20s", "TOK_NEW"); break;
+      case TOK_IMPORT: fprintf(stream, "%-20s", "TOK_IMPORT"); break;
       default: fprintf(stream, "%-20s", "<INVALID TOKEN>"); break;
     }
   }

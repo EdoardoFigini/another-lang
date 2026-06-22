@@ -288,7 +288,6 @@ task_t* load_task(program_t* p) {
           obj_handle_t h = make_obj_str(&t->obj_pool, c->as.s);
           ++vec_get(&t->obj_pool, h).refs;
           t->consts.data[i] = h;
-          free((void*)c->as.s);
           break;
         case DK_NUMBER:
           TODO("load_task - numeric constants");

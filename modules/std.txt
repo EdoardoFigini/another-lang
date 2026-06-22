@@ -1,0 +1,45 @@
+@import core;
+
+strings: mod {
+  impl Self: str {
+    [[name="str__concat"]]
+    extern concat: (self: Self, other: Self) -> Self;
+
+    [[name="str__c_str"]]
+    extern c_str: (self: Self) -> addr;
+  }
+
+  impl core::ops::Add: str {
+    add: (self: Self, other: Self) -> Self {
+      return self.concat(other);
+    }
+  }
+
+  // impls for builtin types should be in core?
+  impl io::Stringify: i32 {
+    [[name="i32__to_str"]]
+    extern to_str: (self: Self) -> str;
+  }
+
+  impl io::Stringify: u32 {
+    [[name="u32__to_str"]]
+    extern to_str: (self: Self) -> str;
+  }
+}
+
+io: mod {
+  [[name="print"]]
+  extern c_print: (s: addr) -> i32;
+
+  print: (s: str) -> i32 {
+    return c_print(s.c_str());
+  }
+
+  println: (s: str) -> i32 {
+    return print(s + "\n");
+  }
+
+  Stringify: interface {
+    to_str: (self: Self) -> str;
+  }
+}
