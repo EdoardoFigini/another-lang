@@ -187,15 +187,10 @@ static inline int tok_num_literal(tokenizer_t* t, char** end, loc_t loc, token_t
   int base = 10;
   int64_t integer = 0;
   double real = 0.0;
-  int sign = 1;
 
   char* start = *end;
 
   lit_type_info_flags_t type_info = 0;
-
-  // TODO: N-2 now gets tokenized as TOK_ID '-2', instead of
-  // TOK_ID '-' '2', unless '-' and '2' are separated by a space
-  if (**end == '-') { sign = -1; (*end)++; }
 
   if (**end == '0') {
     switch (*(*end + 1)) {
@@ -224,10 +219,7 @@ static inline int tok_num_literal(tokenizer_t* t, char** end, loc_t loc, token_t
     else if ( **end == 'U' || **end == 'u' || **end == 'L' || **end == 'l' )
       break;
     
-    else if ( base == 10 && (**end == 'F' || **end == 'f' ))
-      break;
-    
-    else if (base == 10 && **end == '.') {
+    else if (base == 10 && (**end == 'F' || **end == 'f' || **end == '.')) {
       type_info |= TI_REAL;
       break;
     }
@@ -262,23 +254,17 @@ static inline int tok_num_literal(tokenizer_t* t, char** end, loc_t loc, token_t
     case 'l': type_info |= TI_LONG; (*end)++; break;
   }
 
-  if (type_info & TI_REAL) {
-    tok->as.r = sign * real;
-  } 
-
   if (type_info & TI_UNSIGNED) {
-    if (sign < 0) {
-      fdiagf(stderr, DIAG_ERROR, loc, "Cannot declare a negative unsigned literal.");
-      return 1;
-    }
-
     if (type_info & TI_REAL) {
       fdiagf(stderr, DIAG_ERROR, loc, "Cannot declare an unsigned real literal.");
       return 1;
     }
     tok->as.u = integer;
   } else {
-    tok->as.i = sign * integer;
+    if (type_info & TI_REAL)
+      tok->as.r = real;
+    else 
+      tok->as.i = integer;
   }
 
   tok->kind = type_info & TI_REAL ? TOK_REALLIT : TOK_INTLIT;
@@ -381,12 +367,6 @@ static inline int tok_tokenize(tokenizer_t* t) {
         tok = (token_t){ .kind = *p, .view = { .data = p, .size = 1 } };
         break;
       case '-':
-        if (isdigit(*(p + 1))) { 
-          char* end = p;
-          if(tok_num_literal(t, &end, loc, &tok)) return 1;
-          break;
-        }
-
         switch(*(p + 1)) {
           case '>': tok = (token_t){ .kind = TOK_ARROW, .view = { .data = p, .size = 2 } }; break;
           // case '=': tok = (token_t){ .kind = TOK_MINEQS }; break;
@@ -552,6 +532,14 @@ static inline ast_qn_t* _make_qn(arena_t* a, size_t n, ...) {
   }
 
   return qn;
+}
+
+static inline ast_qn_t* dup_qn(arena_t* a, const ast_qn_t* qn) {
+  if (!qn) return NULL;
+  ast_qn_t* n = arena_alloc(a, sizeof(*n));
+  n->name = arena_strdup(a, qn->name);
+  n->next = dup_qn(a, qn->next);
+  return n;
 }
 
 static inline scope_t* type_get_scope(const type_t* type);
@@ -1083,6 +1071,7 @@ static inline ast_expr_t* parse_expr(parser_t* p, int bp) {
       case EXPR_SUBEXPR:
       case EXPR_MKOBJ:
       case EXPR_MKARR:
+      case EXPR_CAST:
       default:
         UNREACHABLE("parse_expr");
     }
@@ -2095,6 +2084,8 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
     }
   }
 
+  arena_free(&a);
+
   if (!implements) return NULL;
 
   symbol_t* method = NULL;
@@ -2108,8 +2099,6 @@ static inline symbol_t* find_binop_impl(const type_t* owner, op_kind_t op, const
     )
       method = *s;
   }
-
-  arena_free(&a);
 
   return method;
 }
@@ -2166,6 +2155,8 @@ static inline symbol_t* find_unop_impl(const type_t* owner, op_kind_t op) {
     }
   }
 
+  arena_free(&a);
+
   if (!implements) return NULL;
 
   symbol_t* method = NULL;
@@ -2178,8 +2169,6 @@ static inline symbol_t* find_unop_impl(const type_t* owner, op_kind_t op) {
     )
       method = *s;
   }
-
-  arena_free(&a);
 
   return method;
 
@@ -2198,6 +2187,22 @@ static inline bool resolve_type_binop(typechecker_t* t, ast_expr_t* e) {
   } else if (is_op_arithmetic(op)) {
     if (is_numeric(left) && is_numeric(right)) {
       e->type = find_common_type(left, right);
+
+      if (!type_equals(*e->type, *left)) {
+        ast_expr_t* n = arena_alloc(&t->arena, sizeof(*n));
+        n->ast_kind = AST_EXPR;
+        n->kind = EXPR_CAST;
+        n->type = e->type;
+        n->as.cast.expr = e->as.binop.lhs;
+        e->as.binop.lhs = n;
+      } else if (!type_equals(*e->type, *right)) {
+        ast_expr_t* n = arena_alloc(&t->arena, sizeof(*n));
+        n->ast_kind = AST_EXPR;
+        n->kind = EXPR_CAST;
+        n->type = e->type;
+        n->as.cast.expr = e->as.binop.rhs;
+        e->as.binop.rhs = n;
+      }
       return true;
     }
   }
@@ -2570,6 +2575,9 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
 
         if(!typecheck_expr(t, expr->as.mkarr.repeat)) return false;
 
+        // TODO: remove this and introduce a MKARR or MKOBJ_DYN that accepts size from the 
+        // stack instead of a code operand. this will allow for dynamic arrays and runtime
+        // instantiation will not require size known at compile-time (which does not make sense)
         if(!expr->as.mkarr.repeat->is_const) {
           fdiagf(stderr, DIAG_ERROR, expr->as.mkarr.repeat->loc, "Repeat is not a compile-time constant.");
           return false;
@@ -2648,6 +2656,20 @@ static inline bool typecheck_expr(typechecker_t* t, ast_expr_t* expr) {
   
       expr->type = type_array(expr->as.index.expr->type)->inner;
       return true;
+    case EXPR_CAST:
+      if (!typecheck_expr(t, expr->as.cast.expr)) return false;
+      if (expr->as.cast.target_type) {
+        if (!typecheck_expr(t, expr->as.cast.target_type)) return false;
+
+        if (!type_is_of_kind(expr->as.cast.target_type->type, TYPE_TYPE)) {
+          fdiagf(stderr, DIAG_ERROR, expr->as.cast.target_type->loc, "Cast target is not a type.");
+          return false;
+        }
+
+        expr->type = expr->as.cast.target_type->value.type;
+      } 
+
+      return true;
     default:
       UNREACHABLE("typecheck_expr");
   }
@@ -2721,7 +2743,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
         return false;
       }
       if( stmt->as.var_def->flags & SPEC_EXPORT ) {
-        fdiagf(stderr, DIAG_ERROR, stmt->loc, "Cannot export a local variable.n");
+        fdiagf(stderr, DIAG_ERROR, stmt->loc, "Cannot export a local variable.");
         return false;
       }
 
@@ -2731,7 +2753,7 @@ static inline bool typecheck_stmt(typechecker_t* t, ast_stmt_t* stmt, type_t* re
             (*symb)->kind == SYMB_VAR &&
             strcmp(stmt->as.var_def->name, (*symb)->name) == 0
         ) {
-          fdiagf(stderr, DIAG_ERROR, stmt->loc, "Multiple definitions for variable `%s` in this scope", stmt->as.var_def->name);
+          fdiagf(stderr, DIAG_ERROR, stmt->loc, "Multiple definitions for variable `%s` in this scope.", stmt->as.var_def->name);
           return false;
         }
         // NOTE: allow shadowing -> do not check in parent scope
@@ -3022,7 +3044,7 @@ static inline bool typecheck_decls_funcs(typechecker_t* t, ast_root_t* root) {
           return false;
         }
       }
-      vec_push(&type->impls, (*impl)->interface->name);
+      vec_push(&type->impls, dup_qn(&t->arena, (*impl)->interface->name));
     }
   }
 
@@ -3197,20 +3219,45 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
           // vec_push(&p->code, e->as.number.u & (uint32_t)-1);
         } else {
           vec_push(&p->code, INST_PUSH);
-          vec_push(&p->code, e->as.number.u & (uint32_t)-1);
+          if (e->as.number.ti & TI_REAL) {
+            float f = (float)e->as.number.r;
+            vec_push(&p->code, *(uint32_t*)&f);
+          } else
+            vec_push(&p->code, e->as.number.u & (uint32_t)-1);
         }
         break;
       case EXPR_BINOP:
-        // TODO: handle operator length, signdess and type (when implementing type checker)
         codegen_expr(p, scope, e->as.binop.lhs);
         codegen_expr(p, scope, e->as.binop.rhs);
-        //TODO: implicit cast if either type is different from the result
 
         switch(e->as.binop.op){
-          case OP_PLUS: vec_push(&p->code, INST_ADD); break;
-          case OP_MINUS: vec_push(&p->code, INST_SUB); break;
-          case OP_MULT: vec_push(&p->code, INST_MULT); break;
-          case OP_DIV: vec_push(&p->code, INST_DIVI); break;
+          case OP_PLUS: {
+              if (type_is_of_kind(e->type, TYPE_F32) || type_is_of_kind(e->type, TYPE_F64))
+                vec_push(&p->code, INST_ADDF);
+              else
+                vec_push(&p->code, INST_ADD);
+              break;
+          }
+          case OP_MINUS:
+              if (type_is_of_kind(e->type, TYPE_F32) || type_is_of_kind(e->type, TYPE_F64))
+                vec_push(&p->code, INST_SUBF);
+              else
+                vec_push(&p->code, INST_SUB);
+              break;
+          case OP_MULT:
+              if (type_is_of_kind(e->type, TYPE_F32) || type_is_of_kind(e->type, TYPE_F64))
+                vec_push(&p->code, INST_MULTF);
+              else
+                vec_push(&p->code, INST_MULT);
+              break;
+          case OP_DIV:
+              if (type_is_of_kind(e->type, TYPE_F32) || type_is_of_kind(e->type, TYPE_F64))
+                vec_push(&p->code, INST_DIVF);
+              else if (type_is_of_kind(e->type, TYPE_U32) || type_is_of_kind(e->type, TYPE_U64))
+                vec_push(&p->code, INST_DIVF);
+              else
+                vec_push(&p->code, INST_DIVI);
+              break;
           case OP_REM: vec_push(&p->code, INST_REM); break;
           case OP_EQ: vec_push(&p->code, INST_EQ); break;
           case OP_LEQ: vec_push(&p->code, INST_LEQ); break;
@@ -3387,6 +3434,22 @@ static inline bool codegen_expr(program_t* p, scope_t* scope, ast_expr_t* e) {
 
         if (!codegen_expr(p, scope, e->as.index.idx)) return false;
         vec_push(&p->code, INST_LOADI);
+        break;
+      }
+      case EXPR_CAST: {
+        if (!codegen_expr(p, scope, e->as.cast.expr)) return false;
+
+        // TODO: support long conversions
+        if (type_is_of_kind(e->type, TYPE_F32) && type_is_of_kind(e->as.cast.expr->type, TYPE_I32)) {
+          vec_push(&p->code, INST_ITOF);
+        } else if (type_is_of_kind(e->type, TYPE_I32) && type_is_of_kind(e->as.cast.expr->type, TYPE_F32)) {
+          vec_push(&p->code, INST_FTOI);
+        } else {
+          // type conversion between integers does not need a dedicated instruction.
+          // typechecker should make sure no casts between non-numeric types are legal.
+
+          // TODO("codegen_expr - Unsupported cast %s -> %s", type_to_str(&p->arena, e->as.cast.expr->type), type_to_str(&p->arena, e->type));
+        }
         break;
       }
       default:
@@ -3601,6 +3664,7 @@ static inline int codegen(program_t* p, ast_root_t* root) {
         case EXPR_MKOBJ:
         case EXPR_MKARR:
         case EXPR_INDEX:
+        case EXPR_CAST:
         default:
           UNREACHABLE("codegen - var initialization (messed up typechecker?)");
       }
@@ -3651,6 +3715,57 @@ static inline type_t* method_owner(symbol_t* s) {
   return vec_first(&type_func(s->type)->params);
 }
 
+static inline bool compile_module(program_t* p, const char* name, const char* path, slice_t source, typechecker_t* t);
+
+static inline bool compile_imports(program_t* p, const char* path, ast_root_t* root, typechecker_t* t) {
+  sb_t sb = { 0 };
+  sb_t import_path = { 0 };
+
+  bool ok = true;
+  vec_foreach(i, &root->imports) {
+    // TODO: specify modules path from compile options
+    slice_t parent = slice_from_cstr(path);
+    while (parent.size > 0 && *(parent.data + parent.size - 1) != '/' && *(parent.data + parent.size - 1) != '\\') parent.size--;
+    sb_reset(sb);
+
+    for (size_t it = 0; ; it++) {
+      sb_reset(import_path);
+
+      switch (it) {
+        case 0:
+          sb_appendf(&import_path, "%.*s%s.txt", SLICE_FMT(parent), (*i)->name);
+          break;
+        case 1:
+          sb_appendf(&import_path, "%.*smodules/%s.txt", SLICE_FMT(parent), (*i)->name);
+          break;
+        case 2:
+          // TODO: change this -> should be install_dir/modules
+          sb_appendf(&import_path, "./modules/%s.txt", (*i)->name);
+          break;
+        default:
+          fdiagf(stderr, DIAG_ERROR, (*i)->loc, "Could not find module `%s`.", (*i)->name);
+          return false;
+      }
+
+      sb_appendz(&import_path, "");
+      if (sb_read_file(import_path.items, &sb) >= 0) {
+        ok = ok && compile_module(p, (*i)->name, import_path.items, slice_from_sb(sb), t);
+        break;
+      }
+    }
+
+  }
+  sb_free(&sb);
+  sb_free(&import_path);
+
+  vec_foreach(sm, &root->submods) {
+    ok = ok && compile_imports(p, path, (*sm)->root, t);
+  }
+  
+  return ok;
+}
+
+// TODO: IMPORTANT! fix recursibe/cyclic imports
 static inline bool compile_module(program_t* p, const char* name, const char* path, slice_t source, typechecker_t* t) {
   // return if already compiled
   vec_foreach(i, &p->imports) {
@@ -3679,40 +3794,7 @@ static inline bool compile_module(program_t* p, const char* name, const char* pa
 
   enter_scope(t, type_get_scope(type));
 
-  bool ok = true;
-  vec_foreach(i, &root->imports) {
-    // TODO: specify modules path from compile options
-    slice_t parent = slice_from_cstr(path);
-    while (parent.size > 0 && *(parent.data + parent.size - 1) != '/' && *(parent.data + parent.size - 1) != '\\') parent.size--;
-    const char* import_path = NULL;
-    sb_t sb = { 0 };
-
-    for (size_t it = 0; ; it++) {
-      switch (it) {
-        case 0:
-          import_path = arena_sprintf(&parser.arena, "%.*s%s.txt", SLICE_FMT(parent), (*i)->name);
-          break;
-        case 1:
-          import_path = arena_sprintf(&parser.arena, "%.*smodules/%s.txt", SLICE_FMT(parent), (*i)->name);
-          break;
-        case 2:
-          // TODO: change this -> should be install_dir/modules
-          import_path = arena_sprintf(&parser.arena, "./modules/%s.txt", (*i)->name);
-          break;
-        default:
-          fdiagf(stderr, DIAG_ERROR, (*i)->loc, "Could not find module `%s`.", (*i)->name);
-          return false;
-      }
-
-      if (sb_read_file(import_path, &sb) >= 0) {
-        ok = ok && compile_module(p, (*i)->name, import_path, slice_from_sb(sb), t);
-        break;
-      }
-    }
-
-    sb_free(&sb);
-  }
-  if (!ok) return ok;
+  if (!compile_imports(p, path, root, t)) return false;
 
   if(!typecheck(t, root)) return false;
   fprintf(stdout, "%s%s\033[0m Typeched `%s`.\n", diag_lvl_color[DIAG_DEBUG], diag_lvl_txt[DIAG_DEBUG], name);

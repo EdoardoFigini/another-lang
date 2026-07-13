@@ -1,17 +1,3 @@
-extern print: (s: addr) -> i32;
-
-core: mod {
-  ops: mod {
-    Add: interface {
-      add: (self: Self, other: Self) -> Self;
-    }
-
-    Countable: interface {
-      count: (self: Self) -> u32;
-    }
-  }
-}
-
 Node: struct {
   item: i32;
   next: Node;
@@ -26,7 +12,7 @@ List: struct {
 export main: () -> none {
   l := new List{};
 
-  print((l.to_str() + " - count: " + (#l).to_str() + "\n").c_str());
+  std::io::println(l.to_str() + " - count: " + (#l).to_str());
 
   i := 10;
   while i > 0 {
@@ -34,7 +20,7 @@ export main: () -> none {
     i = i - 1;
   }
 
-  print((l.to_str() + " - count: " + (#l).to_str() + "\n").c_str());
+  std::io::println(l.to_str() + " - count: " + (#l).to_str());
 
   i = 11;
   while i <= 20 {
@@ -42,7 +28,7 @@ export main: () -> none {
     i = i + 1;
   }
 
-  print((l.to_str() + " - count: " + (#l).to_str() + "\n").c_str());
+  std::io::println(l.to_str() + " - count: " + (#l).to_str());
 }
 
 impl Self: List {
@@ -106,30 +92,5 @@ impl Self: Node {
   }
 }
 
-impl Self: str {
-  [[name="str__c_str"]]
-  extern c_str: (self: Self) -> addr;
-  [[name="str__concat"]]
-  extern concat: (self: Self, other: Self) -> str;
-}
-
-impl core::ops::Add: str {
-  add: (self: Self, other: Self) -> Self {
-    return self.concat(other);
-  }
-}
-
-impl Self: i32 {
-  [[name="i32__to_str"]]
-  extern to_str: (self: Self) -> str;
-}
-
-impl Self: u32 {
-  [[name="u32__to_str"]]
-  extern to_str: (self: Self) -> str;
-}
-
-impl Self: f32 {
-  [[name="f32__to_str"]]
-  extern to_str: (self: Self) -> str;
-}
+@import core;
+@import std;

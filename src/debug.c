@@ -403,6 +403,12 @@ void __dbg_print_disass_inst(FILE* stream, instruction_t* inst) {
       }
       case INST_RET:
         fprintf(stream, "  %-10s\n", "RET"); break;
+
+      case INST_FTOI:
+        fprintf(stream, "  %-10s\n", "FTOI"); break;
+      case INST_ITOF:
+        fprintf(stream, "  %-10s\n", "ITOF"); break;
+
       case INST_ADD:
         fprintf(stream, "  %-10s\n", "ADD"); break;
       case INST_SUB:
@@ -540,6 +546,12 @@ void __dbg_print_disass(FILE* stream, program_t* p, scope_t* root) {
       }
       case INST_RET:
         fprintf(stream, "  %-10s\n", "RET"); break;
+
+      case INST_FTOI:
+        fprintf(stream, "  %-10s\n", "FTOI"); break;
+      case INST_ITOF:
+        fprintf(stream, "  %-10s\n", "ITOF"); break;
+
       case INST_ADD:
         fprintf(stream, "  %-10s\n", "ADD"); break;
       case INST_SUB:

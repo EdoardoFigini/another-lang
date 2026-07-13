@@ -72,6 +72,7 @@ static inline obj_handle_t make_obj_str(obj_pool_t* pool, const char* s) {
 
 FMT_PRINTF(2, 3) static inline obj_handle_t make_obj_strf(obj_pool_t* pool, const char* fmt, ...) {
   va_list args;
+  va_list args_copy;
 
   obj_handle_t ret = HANDLE_INVALID;
   if (pool->freelist) {
@@ -86,7 +87,8 @@ FMT_PRINTF(2, 3) static inline obj_handle_t make_obj_strf(obj_pool_t* pool, cons
   va_start(args, fmt);
   int len = 0;
   char* s = NULL;
-  len = vsnprintf(s, len    , fmt, args);
+  va_copy(args_copy, args);
+  len = vsnprintf(s, len    , fmt, args_copy);
   s = malloc(len + 1);
   len = vsnprintf(s, len + 1, fmt, args);
   va_end(args);
@@ -166,8 +168,8 @@ static inline obj_handle_t acquire_obj(obj_handle_t handle) {
 
 // BUILTIN FUNCTION
 
-EXPORT int print(const char* s) {
-  return puts(s);
+EXPORT int c_print(const char* s) {
+  return fputs(s, stdout);
 }
 
 EXPORT int str_cmp(const char* a, const char* b) {
@@ -260,7 +262,7 @@ task_t* load_task(program_t* p) {
 #elif defined(__linux__)
   void* pages = mmap(NULL, vec_data_size(&p->code), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if(!pages) return NULL;
-  memcpy(pages, p->code.items, vec_data_size(&p->code));
+  memcpy(pages, vec_data(&p->code), vec_data_size(&p->code));
   t->code = pages;
   t->last_inst = t->code + (vec_len(&p->code) - 1) * vec_elem_size(&p->code);
   // TODO: make code read-only
@@ -353,7 +355,7 @@ task_t* load_task(program_t* p) {
 #define PUSH(vm, v) \
   do {\
     if ((vm)->sp >= (vm)->active_task->stack + MAX_STACK) return VM_STACK_OVERFLOW; \
-    *((vm)->sp++) = (__typeof__(*(vm)->sp))(v); \
+    *(__typeof__((v))*)(vm->sp++) = (v); \
   } while(0)
 
 vm_exitcode_t exec(vm_t* vm) {
@@ -364,6 +366,8 @@ vm_exitcode_t exec(vm_t* vm) {
   uint32_t operand = 0;
   uint32_t a = 0;
   uint32_t b = 0;
+  float af = 0;
+  float bf = 0;
 
   switch(*vm->ip) {
     case INST_NOP:
@@ -375,8 +379,8 @@ vm_exitcode_t exec(vm_t* vm) {
       vm->ip++;
       break;
     case INST_POP:
-      TODO("INST_POP");
-      if (vm->sp <= task->stack) return VM_STACK_UNDERFLOW;
+      POP(vm, operand);
+      vm->ip++;
       break;
     case INST_DUP:
       a = *(vm->sp - 1);
@@ -546,6 +550,16 @@ vm_exitcode_t exec(vm_t* vm) {
       vm->ip = CURR_FRAME(vm)->ret_addr;
       free(vm->active_task->call_stack.frames[--vm->active_task->call_stack.depth]);
       break;
+    case INST_FTOI:
+      POP(vm, af);
+      PUSH(vm, (int32_t)af);
+      vm->ip++;
+      break;
+    case INST_ITOF:
+      POP(vm, a);
+      PUSH(vm, (float)a);
+      vm->ip++;
+      break;
     case INST_ADD:
       POP(vm, b);
       POP(vm, a);
@@ -559,28 +573,52 @@ vm_exitcode_t exec(vm_t* vm) {
       vm->ip++;
       break;
     case INST_MULT:
-      TODO("INST_MULT");
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, a * b);
+      vm->ip++;
       break;
     case INST_DIVI:
-      TODO("INST_DIVI");
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, (int32_t)a / (int32_t)b);
+      vm->ip++;
       break;
     case INST_DIVU:
-      TODO("INST_DIVU");
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, a / b);
+      vm->ip++;
       break;
     case INST_REM:
-      TODO("INST_REM");
+      POP(vm, b);
+      POP(vm, a);
+      PUSH(vm, a % b);
+      vm->ip++;
       break;
     case INST_ADDF:
-      TODO("INST_ADDF");
+      POP(vm, bf);
+      POP(vm, af);
+      PUSH(vm, af + bf);
+      vm->ip++;
       break;
     case INST_SUBF:
-      TODO("INST_SUBF");
+      POP(vm, bf);
+      POP(vm, af);
+      PUSH(vm, af - bf);
+      vm->ip++;
       break;
     case INST_MULTF:
-      TODO("INST_MULTF");
+      POP(vm, bf);
+      POP(vm, af);
+      PUSH(vm, af * bf);
+      vm->ip++;
       break;
     case INST_DIVF:
-      TODO("INST_DIVF");
+      POP(vm, bf);
+      POP(vm, af);
+      PUSH(vm, af / bf);
+      vm->ip++;
       break;
     case INST_EQ:
       POP(vm, b);

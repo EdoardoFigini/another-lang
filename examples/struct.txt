@@ -22,13 +22,13 @@ export main: () -> none {
 
   res := a + b;
 
-  std::io::print(res.to_str());
+  std::io::println(res.to_str());
 
   line := Line::make(a, new Point{ x=0, y=0 });
   line.p2.x = 6;
   line.p2.y = 7;
 
-  std::io::print(Line::to_str(line));
+  std::io::println(Line::to_str(line));
 }
 
 impl core::ops::Add: Vec2 {

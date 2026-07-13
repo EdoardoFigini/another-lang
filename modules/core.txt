@@ -2,4 +2,8 @@ ops: mod {
   Add: interface {
     add: (self: Self, other: Self) -> Self;
   }
+
+  Countable: interface {
+    count: (self: Self) -> u32;
+  }
 }

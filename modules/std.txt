@@ -7,11 +7,20 @@ strings: mod {
 
     [[name="str__c_str"]]
     extern c_str: (self: Self) -> addr;
+
+    [[name="str__length"]]
+    extern length: (self: Self) -> i32;
   }
 
   impl core::ops::Add: str {
     add: (self: Self, other: Self) -> Self {
       return self.concat(other);
+    }
+  }
+
+  impl core::ops::Countable: str {
+    count: (self: Self) -> i32 {
+      return self.length();
     }
   }
 
@@ -25,10 +34,14 @@ strings: mod {
     [[name="u32__to_str"]]
     extern to_str: (self: Self) -> str;
   }
+
+  impl io::Stringify: f32 {
+    [[name="f32__to_str"]]
+    extern to_str: (self: Self) -> str;
+  }
 }
 
 io: mod {
-  [[name="print"]]
   extern c_print: (s: addr) -> i32;
 
   print: (s: str) -> i32 {

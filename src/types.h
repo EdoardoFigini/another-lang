@@ -323,6 +323,7 @@ typedef enum {
   EXPR_MKOBJ,
   EXPR_MKARR,
   EXPR_INDEX,
+  EXPR_CAST,
 } ast_expr_kind_t;
 
 struct _ast_expr_t {
@@ -385,6 +386,12 @@ struct _ast_expr_t {
       ast_expr_t* idx;
     } index;
     ast_expr_t* subexpr;
+    struct {
+      ast_expr_t* expr;
+      // can be NULL in the case of implicit cast.
+      // the target will be expression->type.
+      ast_expr_t* target_type;
+    } cast;
   } as;
   compile_time_value_t value;
 };
@@ -644,6 +651,9 @@ typedef uint32_t instruction_t; enum {
   INST_CALL,
   INST_HOSTCALL,
   INST_RET,
+
+  INST_FTOI,
+  INST_ITOF,
 
   INST_ADD,
   INST_SUB,

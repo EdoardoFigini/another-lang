@@ -5,7 +5,7 @@ export main: () -> none {
   xs[2] = -1;
   i := 0;
   while (i < 5) {
-    std::io::print(xs[i].to_str());
+    std::io::println(xs[i].to_str());
     i = i + 1;
   }
 }

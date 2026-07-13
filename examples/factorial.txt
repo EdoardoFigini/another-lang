@@ -1,0 +1,17 @@
+@import std;
+
+MAX := 10;
+
+fact: (x: i32) -> i32 {
+  if x <= 1 { return 1; }
+  return x * fact(x - 1);
+}
+
+export main: () -> none {
+  i := 0;
+  while i <= MAX {
+    out := i.to_str() + "!: " + fact(i).to_str();
+    std::io::println(out);
+    i = i + 1;
+  }
+}

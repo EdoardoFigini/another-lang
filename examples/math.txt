@@ -1,0 +1,49 @@
+export main: () -> none {
+  ints();
+  floats();
+  mixed();
+}
+
+ints: () -> none {
+  a := 1u;
+  b := 2;
+
+  std::io::println("\nInteger operations");
+
+  std::io::println(a.to_str());
+  std::io::println(b.to_str());
+  std::io::println((a + b).to_str());
+  std::io::println((a - b).to_str());
+  std::io::println((a * b).to_str());
+  std::io::println((a / b).to_str());
+}
+
+floats: () -> none {
+  a := 5f;
+  b := 5.0;
+
+  std::io::println("\nFloating point operations");
+
+  std::io::println(a.to_str());
+  std::io::println(b.to_str());
+  std::io::println((a + b).to_str());
+  std::io::println((a - b).to_str());
+  std::io::println((a * b).to_str());
+  std::io::println((a / b).to_str());
+}
+
+mixed: () -> none {
+  a := 5;
+  b := 5.0;
+
+  std::io::println("\nMixed operations");
+
+  std::io::println(a.to_str());
+  std::io::println(b.to_str());
+  std::io::println((a + b).to_str());
+  std::io::println((a - b).to_str());
+  std::io::println((a * b).to_str());
+  std::io::println((a / b).to_str());
+}
+
+@import std;

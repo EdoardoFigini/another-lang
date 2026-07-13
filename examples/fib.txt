@@ -10,7 +10,7 @@ fib: (n : u32) -> u32 {
 
 export main: () -> none {
   res := fib(N);
-  std::io::print(res.to_str());
+  std::io::println(res.to_str());
 }
 
 @import std;
