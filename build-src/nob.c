@@ -103,8 +103,8 @@ const_str_list_t tc_lflags_release[] = {
 
 const_str_list_t tc_includes[] = {
 #if defined(_WIN32)
-  [T_MSVC] = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP, SRC_FOLDER),
-  [T_GNU]  = CSTR_LIST(THIRD_PARTY_FOLDER "libffi" OS_SEP, SRC_FOLDER),
+  [T_MSVC] = CSTR_LIST(THIRD_PARTY_FOLDER, THIRD_PARTY_FOLDER "libffi" OS_SEP, SRC_FOLDER),
+  [T_GNU]  = CSTR_LIST(THIRD_PARTY_FOLDER, THIRD_PARTY_FOLDER "libffi" OS_SEP, SRC_FOLDER),
 #elif defined(__linux__)
   [T_GNU]  = CSTR_LIST(SRC_FOLDER),
 #endif
@@ -183,6 +183,7 @@ typedef struct {
   Nob_File_Paths objs;
   size_t jobs; 
   bool gen_compile_commands;
+  bool dry_run;
   struct {
     const char** items;
     size_t count;
@@ -282,6 +283,15 @@ bool compile_tu(Nob_Walk_Entry entry) {
       nob_da_append(&wd->compile_commands, nob_temp_sprintf(SV_Fmt, SV_Arg(nob_sb_to_sv(sb))));
     }
 
+    if (wd->dry_run) {
+      Nob_String_Builder sb = {0};
+      nob_cmd_render(cmd, &sb);
+      nob_sb_append_null(&sb);
+      nob_log(NOB_INFO, "CMD: %s", sb.items);
+      nob_sb_free(sb);
+      return true;
+    }
+
     if (!cmd_run(&cmd, .async = &wd->procs, .max_procs = wd->jobs)) return false;
   }
 
@@ -352,10 +362,15 @@ int main(int argc, char **argv)
       false,
       "Launch executable in debugger after compilation."
     );
-    bool *f_jobs = flag_size(
+    size_t *f_jobs = flag_size(
       "j",
       1,
       "Number of concurrent jobs."
+    );
+    bool *f_dry_run = flag_bool(
+      "dry-run",
+      false,
+      "Print commands without executing them."
     );
 
     const char* exe = argv[0];
@@ -409,7 +424,8 @@ int main(int argc, char **argv)
 
     walk_data_t wd = {
       .gen_compile_commands = *f_compile_commands,
-      .jobs = *f_jobs
+      .jobs = *f_jobs,
+      .dry_run = *f_dry_run,
     };
 
     if(!nob_walk_dir(SRC_FOLDER, compile_tu, .data = &wd)) return 1;
@@ -451,7 +467,15 @@ int main(int argc, char **argv)
       nob_cmd_append(&cmd, nob_temp_sprintf("%s%s", tc_lib_flag[tc], tc_libs[tc].items[i]));
     }
 
-    if (!cmd_run(&cmd)) return 1;
+    if (*f_dry_run) {
+      Nob_String_Builder sb = {0};
+      nob_cmd_render(cmd, &sb);
+      nob_sb_append_null(&sb);
+      nob_log(NOB_INFO, "CMD: %s", sb.items);
+      nob_sb_free(sb);
+    } else {
+      if (!cmd_run(&cmd)) return 1;
+    }
 
     uint64_t end = nob_nanos_since_unspecified_epoch();
     uint64_t delta = end - start;

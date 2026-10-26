@@ -1,3 +1,4 @@
+#if 0
 #include <assert.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -3839,3 +3840,4 @@ bool compile_from_file(program_t* program, const char* path) {
 bool compile_from_cstr(program_t* program, const char* source) {
   return compile_root(program, NULL, slice_from_cstr(source));
 }
+#endif

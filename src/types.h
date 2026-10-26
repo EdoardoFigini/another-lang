@@ -2,12 +2,12 @@
 #define PROGRAM_H
 #include <stdint.h>
 
-#include <ffi.h>
+#include <libffi/ffi.h>
 
-#include "arena.h"
-#include "vec.h"
-#include "sb.h"
-#include "slice.h"
+#include "efh/arena.h"
+#include "efh/vec.h"
+#include "efh/sb.h"
+#include "efh/ss.h"
 
 #ifndef MAX_CALL_STACK
 #define MAX_CALL_STACK 1024
@@ -19,7 +19,6 @@ typedef enum {
   TOK_EOF = 256,
   TOK_IDENT,
   TOK_ARROW,
-  TOK_COLCOL,
   TOK_EQEQ,
   TOK_GEQ,
   TOK_LEQ,
@@ -70,7 +69,7 @@ typedef enum {
 
 typedef struct {
   size_t line, col;
-  slice_t line_view; 
+  ss_t line_view; 
   const char* path;
 } loc_t;
 
@@ -83,14 +82,14 @@ typedef struct {
     uint64_t    u;
     int64_t     i;
   } as;
-  slice_t view;
+  ss_t view;
   loc_t loc;
 } token_t;
 
 typedef VEC(token_t) tokenarr_t;
 
 typedef struct {
-  slice_t source;
+  ss_t source;
   tokenarr_t tokens;
   arena_t arena;
   const char* path;
@@ -686,13 +685,13 @@ typedef struct {
   arena_t arena;
   instrarr_t code;
   struct _consts {
-    __VEC_HEADER__(constant_t);
+    VEC_HEADER(constant_t);
   } constants;
   struct _glob {
-    __VEC_HEADER__(uint32_t);
+    VEC_HEADER(uint32_t);
   } globals;
   struct _exports {
-    __VEC_HEADER__(
+    VEC_HEADER(
       struct _export {
         const char* name;
         uint32_t addr;
@@ -700,7 +699,7 @@ typedef struct {
     );
   } exports;
   struct _externs {
-    __VEC_HEADER__(
+    VEC_HEADER(
       struct _extern{ 
         ffi_cif cif;
         const char* name;
@@ -710,7 +709,7 @@ typedef struct {
     );
   } externs;
   struct _patches {
-    __VEC_HEADER__(
+    VEC_HEADER(
       struct _patch {
         uint32_t addr;
         symbol_t* symbol; 
@@ -749,7 +748,7 @@ typedef struct _handle_node {
 } handle_node_t;
 
 typedef struct {
-  __VEC_HEADER__(obj_t);
+  VEC_HEADER(obj_t);
   handle_node_t* freelist;
 } obj_pool_t;
 

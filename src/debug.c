@@ -3,8 +3,9 @@
 
 #include "debug.h"
 
+#include "efh/vec.h"
+
 #include "types.h"
-#include "vec.h"
 #include "macros.h"
 
 void __dbg_print_tok(FILE* stream, token_t tok) {
@@ -19,7 +20,6 @@ void __dbg_print_tok(FILE* stream, token_t tok) {
       case TOK_EOF: fprintf(stream, "%-20s", "TOK_EOF"); break;
       case TOK_IDENT: fprintf(stream, "%-20s", "TOK_IDENT"); break;
       case TOK_ARROW: fprintf(stream, "%-20s", "TOK_ARROW"); break;
-      case TOK_COLCOL: fprintf(stream, "%-20s", "TOK_COLCOL"); break;
       case TOK_EQEQ: fprintf(stream, "%-20s", "TOK_EQEQ"); break;
       case TOK_GEQ: fprintf(stream, "%-20s", "TOK_GEQ"); break;
       case TOK_LEQ: fprintf(stream, "%-20s", "TOK_LEQ"); break;
@@ -43,7 +43,7 @@ void __dbg_print_tok(FILE* stream, token_t tok) {
       default: fprintf(stream, "%-20s", "<INVALID TOKEN>"); break;
     }
   }
-  fprintf(stream, "%.*s\n", SLICE_FMT(tok.view));
+  fprintf(stream, PRI_SS "\n", SS_FMT(tok.view));
 #endif
 }
 
