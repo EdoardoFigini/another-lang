@@ -29,10 +29,10 @@ const char* tok_kind_str(arena_t* arena, tok_kind_t k) {
     switch(k) {
       case TOK_EOF: return "EOF";
       case TOK_IDENT: return "identifier";
-      case TOK_ARROW: return "->";
-      case TOK_EQEQ: return "==";
-      case TOK_GEQ: return ">=";
-      case TOK_LEQ: return "<=";
+      case TOK_ARROW: return "`->`";
+      case TOK_EQEQ: return "`==`";
+      case TOK_GEQ: return "`>=`";
+      case TOK_LEQ: return "`<=`";
       case TOK_INTLIT: return "integer literal";
       case TOK_REALLIT: return "real literal";
       case TOK_STRLIT: return "string literal";
@@ -342,6 +342,20 @@ token_t tok_next(tokenizer_t* t) {
   t->loc.col += tok.view.len;
 
   return tok;
+}
+
+token_t tok_peek_n(tokenizer_t* t, size_t n) {
+  tokenizer_t copy = *t;
+  assert(n > 0 && "Cannot peek ahead 0 steps");
+
+  for (size_t i=0; i < n - 1; i++) tok_next(&copy);
+  return tok_next(&copy);
+}
+
+token_t tok_peek(tokenizer_t* t) {
+  tokenizer_t copy = *t;
+
+  return tok_next(&copy);
 }
 
 tokenizer_t tok_init(ss_t src, const char* origin, arena_t* arena) {

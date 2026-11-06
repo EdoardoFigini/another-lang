@@ -71,6 +71,8 @@ typedef struct {
 
 tokenizer_t tok_init(ss_t src, const char* origin, arena_t* arena);
 token_t tok_next(tokenizer_t* t);
+token_t tok_peek(tokenizer_t* t);
+token_t tok_peek_n(tokenizer_t* t, size_t n);
 const char* tok_kind_str(arena_t* arena, tok_kind_t k);
 
 #endif // TOK_H

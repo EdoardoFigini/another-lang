@@ -1,6 +1,8 @@
 #ifndef MACROS_H
 #define MACROS_H
 
+#include <stdlib.h>
+
 #define UNREACHABLE(fmt, ...) \
   do { \
     fprintf(stderr, "[FATAL] UNREACHABLE\n  %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);\

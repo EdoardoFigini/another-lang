@@ -4,6 +4,9 @@
 
 #include "efh/sb.h"
 #include "efh/ss.h"
+#include "efh/arena.h"
+
+arena_t diag_arena = { 0 };
 
 const char* diag_lvl_txt[] = {
   [DIAG_DEBUG] = "[DEBUG]",

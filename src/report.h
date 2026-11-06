@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "efh/sb.h"
+#include "efh/arena.h"
 
 #include "common.h"
 #include "macros.h"
@@ -16,6 +17,8 @@ typedef enum {
   DIAG_ERROR,
   DIAG_FATAL,
 } diag_lvl_t;
+
+extern arena_t diag_arena;
 
 FMT_PRINTF(4, 5) void fdiagf(FILE* stream, diag_lvl_t lvl, loc_t loc, const char* fmt, ...);
 
